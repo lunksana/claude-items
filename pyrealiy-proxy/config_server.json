@@ -1,0 +1,8 @@
+{
+    "listen_host": "0.0.0.0",
+    "listen_port": 443,
+    "password": "your-strong-password-here",
+    "camouflage_host": "www.apple.com",
+    "camouflage_port": 443,
+    "brutal_rate_bps": 0
+}

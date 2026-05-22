@@ -1,0 +1,10 @@
+{
+    "socks5_host": "127.0.0.1",
+    "socks5_port": 1080,
+    "server_host": "your.server.ip",
+    "server_port": 443,
+    "password": "your-strong-password-here",
+    "camouflage_host": "www.apple.com",
+    "brutal_rate_bps": 8000000,
+    "brutal_pool_size": 20
+}
