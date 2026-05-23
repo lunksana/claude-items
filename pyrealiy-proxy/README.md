@@ -151,6 +151,110 @@ python client.py /path/to/config.json   # 指定配置文件
 
 ---
 
+## 透明代理（TProxy）
+
+TProxy 工作在网络层，由内核将匹配流量直接转交给代理进程，无需应用程序配置代理地址。适合用于软路由/网关，或希望对整台机器所有流量透明代理的场景。
+
+### 启用方式
+
+在 `config_client.json` 中设置 `tproxy_port`（0 表示禁用）：
+
+```json
+"tproxy_port": 7893
+```
+
+客户端会同时监听 SOCKS5 端口和 TProxy 端口，两者共用同一份规则和连接池。
+
+> 需要以 **root** 或具备 `CAP_NET_ADMIN` capability 的权限运行。
+
+### 防火墙规则
+
+运行 `python setup.py` 配置客户端时选择启用 TProxy，向导会自动检测系统防火墙工具（iptables / nftables），生成两个脚本：
+
+```bash
+sudo bash tproxy_rules.sh     # 应用规则（重启后失效）
+sudo bash tproxy_cleanup.sh   # 清除规则
+```
+
+也可参照以下命令手动配置（以端口 7893、服务端 IP 为 `1.2.3.4` 为例）。两种方式的 `ip rule` / `ip route` 路由命令完全相同，区别仅在防火墙规则语法。
+
+**第一步：路由（iptables 和 nftables 通用）**
+
+```bash
+ip rule add fwmark 0x1 table 100
+ip route add local 0.0.0.0/0 dev lo table 100
+```
+
+**iptables**
+
+```bash
+# PREROUTING：拦截转发流量（局域网设备）
+iptables -t mangle -N PYREALIY
+iptables -t mangle -A PYREALIY -d 127.0.0.0/8 -j RETURN
+iptables -t mangle -A PYREALIY -d 10.0.0.0/8 -j RETURN
+iptables -t mangle -A PYREALIY -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A PYREALIY -d 192.168.0.0/16 -j RETURN
+iptables -t mangle -A PYREALIY -p tcp -j TPROXY --tproxy-mark 0x1/0x1 --on-port 7893
+iptables -t mangle -A PREROUTING -j PYREALIY
+
+# OUTPUT：拦截本机自身流量（全局模式）
+iptables -t mangle -N PYREALIY_LOCAL
+iptables -t mangle -A PYREALIY_LOCAL -d 127.0.0.0/8 -j RETURN
+iptables -t mangle -A PYREALIY_LOCAL -d 10.0.0.0/8 -j RETURN
+iptables -t mangle -A PYREALIY_LOCAL -d 172.16.0.0/12 -j RETURN
+iptables -t mangle -A PYREALIY_LOCAL -d 192.168.0.0/16 -j RETURN
+iptables -t mangle -A PYREALIY_LOCAL -d 1.2.3.4 -j RETURN   # 排除服务端，防止环路
+iptables -t mangle -A PYREALIY_LOCAL -p tcp -j MARK --set-mark 0x1/0x1
+iptables -t mangle -A OUTPUT -j PYREALIY_LOCAL
+```
+
+**nftables**
+
+```bash
+nft -f - << 'EOF'
+table ip pyrealiy {
+    chain prerouting {
+        type filter hook prerouting priority mangle; policy accept;
+        ip daddr { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } return
+        meta l4proto tcp tproxy to :7893 meta mark set 0x1
+    }
+    chain output {
+        type route hook output priority mangle; policy accept;
+        ip daddr { 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } return
+        ip daddr 1.2.3.4 return
+        meta l4proto tcp meta mark set 0x1
+    }
+}
+EOF
+```
+
+清除 nftables 规则：
+
+```bash
+nft delete table ip pyrealiy
+ip rule del fwmark 0x1 table 100
+ip route del local 0.0.0.0/0 dev lo table 100
+```
+
+如需同时为局域网设备代理，还需开启 IP 转发：
+
+```bash
+echo 1 > /proc/sys/net/ipv4/ip_forward
+# 永久生效：在 /etc/sysctl.conf 添加 net.ipv4.ip_forward = 1
+```
+
+### 规则说明
+
+| 步骤 | 作用 |
+|---|---|
+| `ip rule` + `ip route` | 将带 `0x1` 标记的包路由到 loopback，让它们能被 PREROUTING 的 TPROXY 规则拦截 |
+| PREROUTING TPROXY | 将经本机转发的 TCP 流量重定向到 TProxy 端口，保留原始目标地址 |
+| OUTPUT MARK | 将本机自身发出的 TCP 流量打标记，触发上面的路由规则（仅全局模式） |
+| 排除私有地址 | 局域网直接通信不走代理 |
+| 排除服务端 IP | 防止代理进程连接服务端的流量被自身拦截，造成死循环 |
+
+---
+
 ## 分流规则
 
 规则写在 `config_client.json` 的 `rules` 数组中，从上到下依次匹配，第一条命中的规则生效。
@@ -279,6 +383,7 @@ pyrealiy-proxy/
     ├── hello_auth.py      ClientHello 中 session_id 的 token 生成与验证
     ├── geosite_cache.py   GeoSite/GeoIP 多源缓存管理（下载 / 刷新 / meta.json）
     ├── router.py          分流路由（规则匹配 + geosite.dat / geoip.dat 解析）
+    ├── tproxy.py          TProxy 透明代理监听器（IP_TRANSPARENT socket，仅 Linux）
     ├── socks5.py          本地 SOCKS5 协议解析
     ├── tls_raw.py         手动构造 TLS 1.3 ClientHello 字节
     ├── tunnel.py          ChaCha20-Poly1305 加密信道（帧格式 + HKDF 密钥协商）

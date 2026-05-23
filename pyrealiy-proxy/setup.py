@@ -407,6 +407,198 @@ def configure_rules() -> dict:
     }
 
 
+# ── TProxy 透明代理配置 ───────────────────────────────────────────────────────
+
+_TPROXY_MARK  = "0x1"
+_TPROXY_TABLE = "100"
+_PRIVATES     = ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+
+_ROUTE_CMDS = [
+    "# 路由：带标记的包走 loopback，使其再次经过 PREROUTING",
+    f"ip rule add fwmark {_TPROXY_MARK} table {_TPROXY_TABLE}",
+    f"ip route add local 0.0.0.0/0 dev lo table {_TPROXY_TABLE}",
+]
+_ROUTE_CLEAN = [
+    f"ip rule del fwmark {_TPROXY_MARK} table {_TPROXY_TABLE} 2>/dev/null || true",
+    f"ip route del local 0.0.0.0/0 dev lo table {_TPROXY_TABLE} 2>/dev/null || true",
+]
+
+
+def _detect_firewall() -> str:
+    """检测系统可用的防火墙工具，优先 nftables"""
+    for tool, name in [("nft", "nftables"), ("iptables", "iptables")]:
+        try:
+            r = subprocess.run([tool, "--version"], capture_output=True)
+            if r.returncode == 0:
+                return name
+        except FileNotFoundError:
+            pass
+    return "iptables"
+
+
+def _tproxy_scripts_ipt(server_ip: str, port: int, local_mode: bool) -> tuple[str, str]:
+    a: list[str] = [
+        "#!/bin/bash",
+        "# PyReality TProxy 规则 - iptables（由 setup.py 自动生成）",
+        "set -e",
+        "",
+        *_ROUTE_CMDS,
+        "",
+        "# PREROUTING：拦截经本机转发的 TCP 流量（局域网设备）",
+        "iptables -t mangle -N PYREALIY",
+        *[f"iptables -t mangle -A PYREALIY -d {c} -j RETURN" for c in _PRIVATES],
+        (f"iptables -t mangle -A PYREALIY -p tcp"
+         f" -j TPROXY --tproxy-mark {_TPROXY_MARK}/{_TPROXY_MARK} --on-port {port}"),
+        "iptables -t mangle -A PREROUTING -j PYREALIY",
+    ]
+    if local_mode:
+        a += [
+            "",
+            "# OUTPUT：拦截本机自身发出的 TCP 流量",
+            "iptables -t mangle -N PYREALIY_LOCAL",
+            *[f"iptables -t mangle -A PYREALIY_LOCAL -d {c} -j RETURN" for c in _PRIVATES],
+        ]
+        if server_ip:
+            a += [
+                "# 排除代理服务端，防止流量环路",
+                f"iptables -t mangle -A PYREALIY_LOCAL -d {server_ip} -j RETURN",
+            ]
+        a += [
+            (f"iptables -t mangle -A PYREALIY_LOCAL -p tcp"
+             f" -j MARK --set-mark {_TPROXY_MARK}/{_TPROXY_MARK}"),
+            "iptables -t mangle -A OUTPUT -j PYREALIY_LOCAL",
+        ]
+    a += ["", "echo '[✓] TProxy 规则已应用（iptables）'"]
+
+    c: list[str] = [
+        "#!/bin/bash",
+        "# PyReality TProxy 规则清理 - iptables（由 setup.py 自动生成）",
+        "",
+        "iptables -t mangle -D PREROUTING -j PYREALIY 2>/dev/null || true",
+        "iptables -t mangle -F PYREALIY 2>/dev/null || true",
+        "iptables -t mangle -X PYREALIY 2>/dev/null || true",
+    ]
+    if local_mode:
+        c += [
+            "iptables -t mangle -D OUTPUT -j PYREALIY_LOCAL 2>/dev/null || true",
+            "iptables -t mangle -F PYREALIY_LOCAL 2>/dev/null || true",
+            "iptables -t mangle -X PYREALIY_LOCAL 2>/dev/null || true",
+        ]
+    c += [*_ROUTE_CLEAN, "", "echo '[✓] TProxy 规则已清除（iptables）'"]
+
+    return "\n".join(a) + "\n", "\n".join(c) + "\n"
+
+
+def _tproxy_scripts_nft(server_ip: str, port: int, local_mode: bool) -> tuple[str, str]:
+    privates = "{ " + ", ".join(_PRIVATES) + " }"
+
+    prerouting = [
+        "    chain prerouting {",
+        "        type filter hook prerouting priority mangle; policy accept;",
+        f"        ip daddr {privates} return",
+        f"        meta l4proto tcp tproxy to :{port} meta mark set {_TPROXY_MARK}",
+        "    }",
+    ]
+    output: list[str] = []
+    if local_mode:
+        output_rules = [f"        ip daddr {privates} return"]
+        if server_ip:
+            output_rules.append(f"        ip daddr {server_ip} return")
+        output_rules.append(f"        meta l4proto tcp meta mark set {_TPROXY_MARK}")
+        output = [
+            "    chain output {",
+            "        type route hook output priority mangle; policy accept;",
+            *output_rules,
+            "    }",
+        ]
+
+    nft_body = "\n".join(["table ip pyrealiy {", *prerouting, *output, "}"])
+
+    a: list[str] = [
+        "#!/bin/bash",
+        "# PyReality TProxy 规则 - nftables（由 setup.py 自动生成）",
+        "set -e",
+        "",
+        *_ROUTE_CMDS,
+        "",
+        "# nftables 规则",
+        "nft -f - << 'NFTEOF'",
+        nft_body,
+        "NFTEOF",
+        "",
+        "echo '[✓] TProxy 规则已应用（nftables）'",
+    ]
+    c: list[str] = [
+        "#!/bin/bash",
+        "# PyReality TProxy 规则清理 - nftables（由 setup.py 自动生成）",
+        "",
+        "nft delete table ip pyrealiy 2>/dev/null || true",
+        *_ROUTE_CLEAN,
+        "",
+        "echo '[✓] TProxy 规则已清除（nftables）'",
+    ]
+
+    return "\n".join(a) + "\n", "\n".join(c) + "\n"
+
+
+def _tproxy_scripts(server_ip: str, port: int, local_mode: bool, backend: str) -> tuple[str, str]:
+    if backend == "nftables":
+        return _tproxy_scripts_nft(server_ip, port, local_mode)
+    return _tproxy_scripts_ipt(server_ip, port, local_mode)
+
+
+def configure_tproxy(server_ip: str, cfg: dict) -> None:
+    """询问是否启用 TProxy，生成防火墙脚本，可选立即应用。"""
+    print()
+    if not ask_yn("是否启用 TProxy 透明代理（需要 root / CAP_NET_ADMIN）？", default=False):
+        return
+
+    tproxy_port = int(ask("TProxy 监听端口", "7893"))
+    cfg["tproxy_port"] = tproxy_port
+
+    mode = ask(
+        "代理范围：[1] 全局（本机流量 + 局域网转发）  [2] 仅局域网转发",
+        "1",
+    )
+    local_mode = mode.strip() != "2"
+    if local_mode:
+        INFO("全局模式：本机发往代理服务端的流量将自动排除，防止环路")
+
+    detected  = _detect_firewall()
+    def_fw    = "2" if detected == "nftables" else "1"
+    INFO(f"检测到系统防火墙工具：{detected}")
+    fw_choice = ask("规则工具：[1] iptables  [2] nftables", def_fw)
+    backend   = "nftables" if fw_choice.strip() == "2" else "iptables"
+
+    apply_content, cleanup_content = _tproxy_scripts(server_ip, tproxy_port, local_mode, backend)
+
+    apply_path   = "tproxy_rules.sh"
+    cleanup_path = "tproxy_cleanup.sh"
+
+    with open(apply_path, "w") as f:
+        f.write(apply_content)
+    os.chmod(apply_path, 0o755)
+
+    with open(cleanup_path, "w") as f:
+        f.write(cleanup_content)
+    os.chmod(cleanup_path, 0o755)
+
+    OK(f"{backend} 脚本已写入：{apply_path}（应用）/ {cleanup_path}（清理）")
+    INFO(f"应用规则：sudo bash {apply_path}")
+    INFO(f"清除规则：sudo bash {cleanup_path}")
+
+    if local_mode:
+        INFO("为局域网设备代理还需开启 IP 转发：")
+        print(f"    {_c('36', 'echo 1 > /proc/sys/net/ipv4/ip_forward')}")
+
+    if check_root() and ask_yn("是否立即应用这些规则？"):
+        r = subprocess.run(["bash", apply_path])
+        if r.returncode == 0:
+            OK("TProxy 规则已应用")
+        else:
+            ERR("应用失败，请手动执行脚本")
+
+
 def configure_client(brutal_available: bool) -> None:
     TITLE("客户端配置")
 
@@ -449,6 +641,9 @@ def configure_client(brutal_available: bool) -> None:
         "brutal_pool_size": pool_size,
         **rules_cfg,
     }
+
+    configure_tproxy(server_host, cfg)
+
     path = "config_client.json"
     with open(path, "w") as f:
         json.dump(cfg, f, indent=4)

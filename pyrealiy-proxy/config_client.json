@@ -7,6 +7,7 @@
     "camouflage_host": "www.apple.com",
     "brutal_rate_bps": 8000000,
     "brutal_pool_size": 20,
+    "tproxy_port": 0,
 
     "geosite_dir": ".geosite",
     "geosite_update_days": 7,

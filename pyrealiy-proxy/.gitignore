@@ -2,6 +2,10 @@
 config_client.json
 config_server.json
 
+# TProxy iptables 脚本（由 setup.py 生成）
+tproxy_rules.sh
+tproxy_cleanup.sh
+
 # GeoSite / GeoIP 缓存
 .geosite/
 

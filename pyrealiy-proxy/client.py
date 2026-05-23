@@ -3,6 +3,9 @@ PyReality 客户端
 
 本地监听 SOCKS5 → 路由判断 → PROXY 走预建隧道池 / DIRECT 直连目标
 
+可选 TProxy 透明代理（需要 root + iptables TPROXY 规则，由 setup.py 生成）：
+  配置 tproxy_port 后同时启动 TProxy 监听器，无需应用层配合即可透明代理所有 TCP 流量
+
 Brutal 多连接策略：
   brutal_rate_bps  = 每条连接的速率（建议 5~10 Mbps）
   brutal_pool_size = 预建连接数（建议 10~20）
@@ -16,42 +19,29 @@ Brutal 多连接策略：
 from __future__ import annotations
 
 import asyncio
-
 import json
-
 import resource
-
 import sys
 
-
 from core.socks5 import parse_socks5_request
-
 from core.conn_pool import BrutalPool
-
 from core.geosite_cache import ensure_all as geo_ensure_all
 from core.router import build_router, DIRECT, REJECT
-
 from core.utils import get_logger, pack_address, relay
-
 from core import brutal
 
 logger = get_logger("client")
 
 
-async def handle_local_connection(
+async def _dispatch(
     local_reader: asyncio.StreamReader,
     local_writer: asyncio.StreamWriter,
+    target_host: str,
+    target_port: int,
     pool: BrutalPool,
     router,
 ) -> None:
-    # 1. 解析 SOCKS5 请求，获取目标地址
-    target = await parse_socks5_request(local_reader, local_writer)
-    if target is None:
-        local_writer.close()
-        return
-    target_host, target_port = target
-
-    # 2. 路由判断
+    """路由判断 + 转发，由 SOCKS5 和 TProxy 两个入口共用。"""
     action = router.match(target_host)
 
     if action == REJECT:
@@ -60,7 +50,6 @@ async def handle_local_connection(
         return
 
     if action == DIRECT:
-        # ── 直连分支 ──────────────────────────────────────────────────────────
         logger.info("DIRECT %s:%d", target_host, target_port)
         try:
             target_reader, target_writer = await asyncio.open_connection(
@@ -73,10 +62,9 @@ async def handle_local_connection(
         await relay(local_reader, target_writer, target_reader, local_writer)
         return
 
-    # ── 代理分支 ──────────────────────────────────────────────────────────────
+    # ── 代理分支 ─────────────────────────────────────────────────────────────
     logger.info("PROXY  %s:%d", target_host, target_port)
 
-    # 3. 从池中取一条预认证隧道（通常无需等待，已提前建好）
     ready = await pool.acquire()
     if ready is None:
         logger.error("No available tunnel for %s:%d", target_host, target_port)
@@ -86,7 +74,6 @@ async def handle_local_connection(
     tunnel = ready.tunnel
     server_writer = ready.writer
 
-    # 4. 发送目标地址（此时隧道已认证并完成密钥握手，直接发）
     try:
         await tunnel.send(pack_address(target_host, target_port))
     except Exception as e:
@@ -95,7 +82,6 @@ async def handle_local_connection(
         local_writer.close()
         return
 
-    # 5. 双向中继：本地应用 ↔ 加密隧道
     async def local_to_tunnel():
         try:
             while True:
@@ -139,6 +125,30 @@ async def handle_local_connection(
                     pass
 
 
+async def handle_local_connection(
+    local_reader: asyncio.StreamReader,
+    local_writer: asyncio.StreamWriter,
+    pool: BrutalPool,
+    router,
+) -> None:
+    target = await parse_socks5_request(local_reader, local_writer)
+    if target is None:
+        local_writer.close()
+        return
+    await _dispatch(local_reader, local_writer, target[0], target[1], pool, router)
+
+
+async def handle_tproxy_connection(
+    local_reader: asyncio.StreamReader,
+    local_writer: asyncio.StreamWriter,
+    pool: BrutalPool,
+    router,
+) -> None:
+    # TProxy 模式：内核将原始目标地址写入 sockname，无需协议握手
+    target_host, target_port = local_writer.get_extra_info("sockname")
+    await _dispatch(local_reader, local_writer, target_host, target_port, pool, router)
+
+
 def _raise_fd_limit() -> None:
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -158,7 +168,6 @@ async def main(config_path: str) -> None:
     rate_bps  = cfg.get("brutal_rate_bps", 0)
     pool_size = cfg.get("brutal_pool_size", 10)
 
-    # 启动时检测 Brutal 可用性并打印提示
     if rate_bps:
         if brutal.is_available():
             logger.info(
@@ -172,15 +181,13 @@ async def main(config_path: str) -> None:
             )
             cfg["brutal_rate_bps"] = 0
 
-    # 加载分流规则（geosite + geoip 并发下载/刷新）
     available_site, available_ip = await geo_ensure_all(cfg)
     router = build_router(cfg, available_site, available_ip)
 
-    # 预建连接池
     pool = BrutalPool(cfg)
     await pool.warmup()
 
-    server = await asyncio.start_server(
+    socks5_server = await asyncio.start_server(
         lambda r, w: handle_local_connection(r, w, pool, router),
         cfg["socks5_host"],
         cfg["socks5_port"],
@@ -191,8 +198,26 @@ async def main(config_path: str) -> None:
         cfg["socks5_port"],
         pool_size,
     )
-    async with server:
-        await server.serve_forever()
+
+    tproxy_server = None
+    tproxy_port = cfg.get("tproxy_port", 0)
+    if tproxy_port:
+        try:
+            from core import tproxy as _tproxy_mod
+            tproxy_server = await _tproxy_mod.start_server(
+                "0.0.0.0",
+                tproxy_port,
+                lambda r, w: handle_tproxy_connection(r, w, pool, router),
+            )
+        except OSError as e:
+            logger.error("TProxy failed to start: %s", e)
+
+    if tproxy_server:
+        async with socks5_server, tproxy_server:
+            await socks5_server.serve_forever()
+    else:
+        async with socks5_server:
+            await socks5_server.serve_forever()
 
 
 if __name__ == "__main__":
