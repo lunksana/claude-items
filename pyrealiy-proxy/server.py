@@ -102,7 +102,7 @@ async def handle_client(
     async def target_to_tunnel():
         try:
             while True:
-                data = await target_reader.read(4096)
+                data = await target_reader.read(65536)
                 if not data:
                     break
                 await tunnel.send(data)

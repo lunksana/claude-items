@@ -73,7 +73,7 @@ async def handle_local_connection(
     async def local_to_tunnel():
         try:
             while True:
-                data = await local_reader.read(4096)
+                data = await local_reader.read(65536)
                 if not data:
                     break
                 await tunnel.send(data)
