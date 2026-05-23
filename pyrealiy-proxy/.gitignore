@@ -1,0 +1,30 @@
+# 配置文件（含密码，不提交）
+config_client.json
+config_server.json
+
+# GeoSite / GeoIP 缓存
+.geosite/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db

@@ -1,10 +1,46 @@
 {
-    "socks5_host": "127.0.0.1",
+    "socks5_host": "0.0.0.0",
     "socks5_port": 1080,
     "server_host": "your.server.ip",
     "server_port": 443,
     "password": "your-strong-password-here",
     "camouflage_host": "www.apple.com",
     "brutal_rate_bps": 8000000,
-    "brutal_pool_size": 20
+    "brutal_pool_size": 20,
+
+    "geosite_dir": ".geosite",
+    "geosite_update_days": 7,
+
+    "geosite_sources": [
+        {
+            "name": "loyalsoldier",
+            "url": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+        }
+    ],
+    "geoip_sources": [
+        {
+            "name": "loyalsoldier",
+            "url": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+        }
+    ],
+
+    "rules": [
+        "GEOSITE,loyalsoldier:category-ads-all,REJECT",
+
+        "GEOSITE,loyalsoldier:private,DIRECT",
+        "GEOIP,loyalsoldier:private,DIRECT",
+
+        "GEOSITE,loyalsoldier:cn,DIRECT",
+        "GEOSITE,loyalsoldier:apple-cn,DIRECT",
+        "GEOSITE,loyalsoldier:google-cn,DIRECT",
+
+        "GEOIP,loyalsoldier:cn,DIRECT",
+
+        "IP-CIDR,127.0.0.0/8,DIRECT",
+        "IP-CIDR,10.0.0.0/8,DIRECT",
+        "IP-CIDR,172.16.0.0/12,DIRECT",
+        "IP-CIDR,192.168.0.0/16,DIRECT",
+
+        "FINAL,PROXY"
+    ]
 }

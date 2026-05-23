@@ -178,5 +178,12 @@ async def main(config_path: str) -> None:
 
 
 if __name__ == "__main__":
+    try:
+        import uvloop
+        uvloop.install()
+        print("[*] uvloop enabled")
+    except ImportError:
+        pass
+
     config = sys.argv[1] if len(sys.argv) > 1 else "config_server.json"
     asyncio.run(main(config))

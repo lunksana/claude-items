@@ -224,6 +224,189 @@ def configure_server(brutal_available: bool) -> None:
     OK(f"服务端配置已写入 {path}")
 
 
+# ── 分流规则配置 ──────────────────────────────────────────────────────────────
+
+# (展示名, tag, 动作, 默认启用, 说明)
+_GEOSITE_CATALOG = [
+    # ── REJECT ──────────────────────────────────────────────────────────
+    ("广告与追踪屏蔽",         "category-ads-all",    "REJECT", True,
+     "广告、追踪脚本、恶意域名"),
+
+    # ── DIRECT ──────────────────────────────────────────────────────────
+    ("私有 / 本地域名",        "private",             "DIRECT", True,
+     "localhost、内网等私有域名"),
+    ("中国大陆域名",           "cn",                  "DIRECT", True,
+     "百度、淘宝、B站等大陆综合域名列表"),
+    ("苹果中国服务",           "apple-cn",            "DIRECT", True,
+     "苹果在中国大陆的 CDN 和下载节点"),
+    ("谷歌中国服务",           "google-cn",           "DIRECT", True,
+     "谷歌在中国大陆可访问的服务（地图、商店等）"),
+
+    # ── PROXY ───────────────────────────────────────────────────────────
+    ("GFW 封锁域名",           "gfw",                 "PROXY",  True,
+     "已知被防火长城封锁的域名（精确维护列表）"),
+    ("境外常见域名",           "geolocation-!cn",     "PROXY",  False,
+     "非中国大陆的常用域名（大而全，可替代 gfw 规则）"),
+    ("YouTube",               "youtube",             "PROXY",  False, ""),
+    ("Google（全球）",         "google",              "PROXY",  False,
+     "谷歌全球服务（含 YouTube 以外的其他产品）"),
+    ("Telegram",              "telegram",            "PROXY",  False, ""),
+    ("Twitter / X",           "twitter",             "PROXY",  False, ""),
+    ("Facebook / Instagram",  "facebook",            "PROXY",  False,
+     "Facebook、Instagram、WhatsApp、Threads"),
+    ("OpenAI / ChatGPT",      "openai",              "PROXY",  False, ""),
+    ("GitHub",                "github",              "PROXY",  False, ""),
+    ("Netflix",               "netflix",             "PROXY",  False, ""),
+    ("Disney+",               "disney",              "PROXY",  False, ""),
+    ("Pixiv",                 "pixiv",               "PROXY",  False, ""),
+    ("学术站点",              "category-scholar-!cn", "PROXY",  False,
+     "谷歌学术、arXiv、Sci-Hub 等境外学术资源"),
+]
+
+_GEOIP_CATALOG = [
+    ("中国大陆 IP 直连", "cn",      "DIRECT", True,
+     "IP 归属地为中国大陆，直连（补全域名规则漏网的直连 IP 流量）"),
+    ("私有 IP 直连",    "private",  "DIRECT", True,
+     "RFC1918 私有地址段（10.x、172.16.x、192.168.x）"),
+]
+
+_LOYALSOLDIER_SITE_URL = (
+    "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
+)
+_LOYALSOLDIER_IP_URL = (
+    "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+)
+
+_ACTION_COLOR = {"REJECT": "31", "DIRECT": "32", "PROXY": "33"}
+_ACTION_LABEL = {"REJECT": "屏蔽", "DIRECT": "直连", "PROXY": "代理"}
+
+
+def _print_catalog(catalog, title: str) -> list[int]:
+    """打印规则列表，返回默认启用的编号列表（1-based）"""
+    print()
+    print(_c("1;36", f"  {title}"))
+    print()
+
+    last_action = None
+    defaults: list[int] = []
+
+    for idx, (name, tag, action, default, desc) in enumerate(catalog, start=1):
+        # 动作分组标题
+        if action != last_action:
+            label = _ACTION_LABEL[action]
+            color = _ACTION_COLOR[action]
+            print(f"    {_c(color, f'── {label} ({action}) ' + '─' * 20)}")
+            last_action = action
+
+        star  = _c("33", "✦") if default else " "
+        num   = _c("1", f"[{idx:>2}]")
+        nstr  = f"{name:<22}"
+        tstr  = _c("36", f"{tag}")
+        dstr  = f"  {_c('90', desc)}" if desc else ""
+        print(f"    {star} {num} {nstr} {tstr}{dstr}")
+
+        if default:
+            defaults.append(idx)
+
+    return defaults
+
+
+def _parse_selection(raw: str, max_idx: int) -> list[int]:
+    """解析用户输入的编号字符串，返回有效编号列表"""
+    result: list[int] = []
+    for tok in raw.replace("，", ",").split(","):
+        tok = tok.strip()
+        if tok.isdigit():
+            n = int(tok)
+            if 1 <= n <= max_idx:
+                result.append(n)
+    return result
+
+
+def configure_rules() -> dict:
+    """
+    交互式规则配置。
+    返回包含 geosite_sources / geoip_sources / rules 的 dict。
+    """
+    TITLE("分流规则配置")
+
+    INFO("规则数据来自 Loyalsoldier v2ray-rules-dat（启动时自动下载，每 7 天刷新）")
+    print()
+
+    if not ask_yn("是否配置分流规则（不配置则所有流量走代理）？"):
+        return {
+            "geosite_dir": ".geosite",
+            "geosite_update_days": 7,
+            "geosite_sources": [],
+            "geoip_sources": [],
+            "rules": ["FINAL,PROXY"],
+        }
+
+    # ── GEOSITE 选择 ─────────────────────────────────────────────────────────
+    site_defaults = _print_catalog(_GEOSITE_CATALOG, "GEOSITE 域名规则")
+    default_str   = ",".join(map(str, site_defaults))
+    print()
+    raw_site = ask(
+        f"选择启用的规则编号（逗号分隔，✦ 为推荐项，直接回车使用推荐）",
+        default_str,
+    )
+    site_sel = _parse_selection(raw_site, len(_GEOSITE_CATALOG))
+
+    # ── GEOIP 选择 ───────────────────────────────────────────────────────────
+    ip_defaults = _print_catalog(_GEOIP_CATALOG, "GEOIP IP 归属地规则")
+    default_str = ",".join(map(str, ip_defaults))
+    print()
+    raw_ip = ask(
+        "选择启用的规则编号",
+        default_str,
+    )
+    ip_sel = _parse_selection(raw_ip, len(_GEOIP_CATALOG))
+
+    # ── 默认动作 ─────────────────────────────────────────────────────────────
+    print()
+    final_action = ask(
+        "未命中规则的默认动作 [1] PROXY（代理，推荐）  [2] DIRECT（直连）",
+        "1",
+    )
+    final = "DIRECT" if final_action.strip() == "2" else "PROXY"
+
+    # ── 组装规则 ─────────────────────────────────────────────────────────────
+    rules: list[str] = []
+
+    for idx in site_sel:
+        _, tag, action, _, _ = _GEOSITE_CATALOG[idx - 1]
+        rules.append(f"GEOSITE,loyalsoldier:{tag},{action}")
+
+    for idx in ip_sel:
+        _, code, action, _, _ = _GEOIP_CATALOG[idx - 1]
+        rules.append(f"GEOIP,loyalsoldier:{code},{action}")
+
+    # 静态局域网 CIDR（始终加入）
+    for cidr in ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"):
+        rules.append(f"IP-CIDR,{cidr},DIRECT")
+
+    rules.append(f"FINAL,{final}")
+
+    # ── 汇总展示 ─────────────────────────────────────────────────────────────
+    print()
+    INFO(f"已生成 {len(rules)} 条规则，默认动作：{final}")
+
+    needs_site = any("GEOSITE" in r for r in rules)
+    needs_ip   = any("GEOIP"   in r for r in rules)
+
+    return {
+        "geosite_dir":         ".geosite",
+        "geosite_update_days": 7,
+        "geosite_sources": [
+            {"name": "loyalsoldier", "url": _LOYALSOLDIER_SITE_URL}
+        ] if needs_site else [],
+        "geoip_sources": [
+            {"name": "loyalsoldier", "url": _LOYALSOLDIER_IP_URL}
+        ] if needs_ip else [],
+        "rules": rules,
+    }
+
+
 def configure_client(brutal_available: bool) -> None:
     TITLE("客户端配置")
 
@@ -253,8 +436,10 @@ def configure_client(brutal_available: bool) -> None:
             total_mbps = rate_bps * pool_size / 1e6
             INFO(f"预计总吞吐上限：{pool_size} × {rate_bps//1_000_000} = {total_mbps:.0f} Mbps")
 
+    rules_cfg = configure_rules()
+
     cfg = {
-        "socks5_host":    "127.0.0.1",
+        "socks5_host":    "0.0.0.0",
         "socks5_port":    int(socks5_port),
         "server_host":    server_host,
         "server_port":    int(server_port),
@@ -262,6 +447,7 @@ def configure_client(brutal_available: bool) -> None:
         "camouflage_host": camouflage,
         "brutal_rate_bps": rate_bps,
         "brutal_pool_size": pool_size,
+        **rules_cfg,
     }
     path = "config_client.json"
     with open(path, "w") as f:
@@ -289,7 +475,7 @@ def main() -> None:
         print("  python3 server.py config_server.json")
 
     print()
-    INFO("依赖安装：pip install cryptography")
+    INFO("依赖安装：pip install cryptography uvloop")
     print()
 
 

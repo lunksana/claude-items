@@ -1,7 +1,7 @@
 """
 PyReality 客户端
 
-本地监听 SOCKS5 → 从 Brutal 连接池取一条预建隧道 → 发送目标地址 → 中继数据
+本地监听 SOCKS5 → 路由判断 → PROXY 走预建隧道池 / DIRECT 直连目标
 
 Brutal 多连接策略：
   brutal_rate_bps  = 每条连接的速率（建议 5~10 Mbps）
@@ -28,9 +28,10 @@ from core.socks5 import parse_socks5_request
 
 from core.conn_pool import BrutalPool
 
-from core.tunnel import EncryptedTunnel
+from core.geosite_cache import ensure_all as geo_ensure_all
+from core.router import build_router, DIRECT, REJECT
 
-from core.utils import get_logger, pack_address
+from core.utils import get_logger, pack_address, relay
 
 from core import brutal
 
@@ -41,6 +42,7 @@ async def handle_local_connection(
     local_reader: asyncio.StreamReader,
     local_writer: asyncio.StreamWriter,
     pool: BrutalPool,
+    router,
 ) -> None:
     # 1. 解析 SOCKS5 请求，获取目标地址
     target = await parse_socks5_request(local_reader, local_writer)
@@ -48,9 +50,33 @@ async def handle_local_connection(
         local_writer.close()
         return
     target_host, target_port = target
-    logger.info("SOCKS5 → %s:%d", target_host, target_port)
 
-    # 2. 从池中取一条预认证隧道（通常无需等待，已提前建好）
+    # 2. 路由判断
+    action = router.match(target_host)
+
+    if action == REJECT:
+        logger.info("REJECT  %s:%d", target_host, target_port)
+        local_writer.close()
+        return
+
+    if action == DIRECT:
+        # ── 直连分支 ──────────────────────────────────────────────────────────
+        logger.info("DIRECT %s:%d", target_host, target_port)
+        try:
+            target_reader, target_writer = await asyncio.open_connection(
+                target_host, target_port
+            )
+        except Exception as e:
+            logger.error("Direct connect %s:%d failed: %s", target_host, target_port, e)
+            local_writer.close()
+            return
+        await relay(local_reader, target_writer, target_reader, local_writer)
+        return
+
+    # ── 代理分支 ──────────────────────────────────────────────────────────────
+    logger.info("PROXY  %s:%d", target_host, target_port)
+
+    # 3. 从池中取一条预认证隧道（通常无需等待，已提前建好）
     ready = await pool.acquire()
     if ready is None:
         logger.error("No available tunnel for %s:%d", target_host, target_port)
@@ -60,7 +86,7 @@ async def handle_local_connection(
     tunnel = ready.tunnel
     server_writer = ready.writer
 
-    # 3. 发送目标地址（此时隧道已认证并完成密钥握手，直接发）
+    # 4. 发送目标地址（此时隧道已认证并完成密钥握手，直接发）
     try:
         await tunnel.send(pack_address(target_host, target_port))
     except Exception as e:
@@ -69,7 +95,7 @@ async def handle_local_connection(
         local_writer.close()
         return
 
-    # 4. 双向中继：本地应用 ↔ 加密隧道
+    # 5. 双向中继：本地应用 ↔ 加密隧道
     async def local_to_tunnel():
         try:
             while True:
@@ -144,14 +170,18 @@ async def main(config_path: str) -> None:
                 "brutal_rate_bps is set but kernel module not found — "
                 "falling back to normal TCP. Run setup.py to install."
             )
-            cfg["brutal_rate_bps"] = 0  # 回退，避免连接失败
+            cfg["brutal_rate_bps"] = 0
+
+    # 加载分流规则（geosite + geoip 并发下载/刷新）
+    available_site, available_ip = await geo_ensure_all(cfg)
+    router = build_router(cfg, available_site, available_ip)
 
     # 预建连接池
     pool = BrutalPool(cfg)
     await pool.warmup()
 
     server = await asyncio.start_server(
-        lambda r, w: handle_local_connection(r, w, pool),
+        lambda r, w: handle_local_connection(r, w, pool, router),
         cfg["socks5_host"],
         cfg["socks5_port"],
     )
@@ -166,5 +196,12 @@ async def main(config_path: str) -> None:
 
 
 if __name__ == "__main__":
+    try:
+        import uvloop
+        uvloop.install()
+        print("[*] uvloop enabled")
+    except ImportError:
+        pass
+
     config = sys.argv[1] if len(sys.argv) > 1 else "config_client.json"
     asyncio.run(main(config))
