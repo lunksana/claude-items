@@ -102,7 +102,8 @@ async def _dispatch(
             while True:
                 data = await tunnel.recv()
                 local_writer.write(data)
-                await local_writer.drain()
+                if local_writer.transport.get_write_buffer_size() > 65536:
+                    await local_writer.drain()
         except Exception:
             pass
         finally:
@@ -191,6 +192,7 @@ async def main(config_path: str) -> None:
         lambda r, w: handle_local_connection(r, w, pool, router),
         cfg["socks5_host"],
         cfg["socks5_port"],
+        limit=262144,
     )
     logger.info(
         "SOCKS5 listening on %s:%d  (pool: %d conns ready)",

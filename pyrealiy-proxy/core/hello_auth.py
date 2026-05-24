@@ -36,6 +36,60 @@ from cryptography.hazmat.primitives.poly1305 import Poly1305
 TIMESTAMP_TOLERANCE = 60  # 秒
 
 
+# ── Token 重放缓存 ─────────────────────────────────────────────────────────────
+
+class TokenReplayCache:
+    """
+    防重放 nonce 缓存。
+
+    问题背景：
+      ClientHello 明文传输，GFW 可在 TIMESTAMP_TOLERANCE（60s）窗口内
+      重放捕获到的合法 ClientHello，通过观察服务端行为差异（代理模式无限期挂起
+      vs 伪装模式快速断开）以 100% 准确率识别代理特征。
+
+    解决方案：
+      服务端维护已见 nonce（token[0:8]，8 字节真随机）的短生命周期缓存。
+      重复出现的 nonce 无论 Poly1305 验证是否通过，均视为重放并走伪装路径。
+
+    实现：
+      使用时间桶（宽度 = TIMESTAMP_TOLERANCE）分组存储 nonce。
+      保留当前桶和上一桶，覆盖跨桶边界生成的 token。
+      asyncio 单线程模型下无需加锁。
+
+    内存开销：
+      每个 token 仅存 8 字节 nonce；即使每秒 1000 次连接，60s 内也仅需 ~480 KB。
+    """
+
+    def __init__(self) -> None:
+        self._buckets: dict[int, set[bytes]] = {}
+
+    def _bucket(self) -> int:
+        return int(time.time()) // TIMESTAMP_TOLERANCE
+
+    def check_and_mark(self, token: bytes) -> bool:
+        """
+        检查 token 是否为首次使用。
+
+        返回 True  → 合法（首次出现），同时将其 nonce 标记为已使用。
+        返回 False → 重放攻击，调用方应走伪装路径而非代理路径。
+        """
+        nonce  = token[:8]
+        bucket = self._bucket()
+
+        # 清理过期桶（仅保留当前和上一桶）
+        for stale in [b for b in self._buckets if b < bucket - 1]:
+            del self._buckets[stale]
+
+        # 在当前桶和上一桶中查找重复
+        for b in (bucket, bucket - 1):
+            if nonce in self._buckets.get(b, ()):
+                return False
+
+        # 首次出现：写入当前桶
+        self._buckets.setdefault(bucket, set()).add(nonce)
+        return True
+
+
 # ── Token 生成 / 验证 ─────────────────────────────────────────────────────────
 
 def _ts_mask(password: str, random_prefix: bytes) -> bytes:

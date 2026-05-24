@@ -34,17 +34,22 @@ def unpack_address(data: bytes) -> tuple[str, int, int]:
     return host, port, consumed
 
 
+_RELAY_BUF       = 32768      # 单次读取大小，平衡延迟与吞吐
+_DRAIN_THRESHOLD = 64 * 1024  # 写缓冲积压超过此值才 drain，避免每帧切换协程
+
+
 async def relay(reader_a: asyncio.StreamReader, writer_b: asyncio.StreamWriter,
                 reader_b: asyncio.StreamReader, writer_a: asyncio.StreamWriter) -> None:
-    """双向透明中继（无加密，用于握手阶段转发）"""
+    """双向透明中继（无加密，用于直连路径）"""
     async def pipe(reader, writer):
         try:
             while True:
-                data = await reader.read(4096)
+                data = await reader.read(_RELAY_BUF)
                 if not data:
                     break
                 writer.write(data)
-                await writer.drain()
+                if writer.transport.get_write_buffer_size() > _DRAIN_THRESHOLD:
+                    await writer.drain()
         except Exception:
             pass
         finally:

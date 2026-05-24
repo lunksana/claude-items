@@ -117,12 +117,13 @@ class HandshakeCache:
         self._port = port
         self._pool: list[list[bytes]] = []
         self._last_refresh = 0.0
+        self._refresh_task: asyncio.Task | None = None
 
     async def warmup(self) -> bool:
         """启动时填满缓存池，并启动后台定时刷新任务。"""
         ok = await self._fill_pool()
         if ok:
-            asyncio.create_task(self._auto_refresh_loop())
+            self._refresh_task = asyncio.create_task(self._auto_refresh_loop())
         return ok
 
     async def _fill_pool(self) -> bool:

@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import asyncio
 
-from .hello_auth import extract_session_id, extract_client_random, verify_session_token
+from .hello_auth import (
+    extract_session_id, extract_client_random,
+    verify_session_token, TokenReplayCache,
+)
 from .handshake_cache import HandshakeCache
 from .utils import get_logger
 
@@ -61,12 +64,13 @@ async def server_read_hello_and_decide(
     client_writer: asyncio.StreamWriter,
     password: str,
     cache: HandshakeCache,
+    replay_cache: TokenReplayCache,
 ) -> tuple[bool, bytes | None]:
     """
     读取 ClientHello，验证 session_id 中的认证 token。
 
     合法客户端 → 模拟完整 TLS 1.3 握手后返回 (True, client_random)。
-    探测/非法  → 从缓存回放握手，由本函数负责关闭连接，返回 (False, None)。
+    探测/非法/重放 → 从缓存回放握手，由本函数负责关闭连接，返回 (False, None)。
     """
     try:
         _ct, hello_raw = await asyncio.wait_for(_read_tls_record(client_reader), timeout=8.0)
@@ -79,7 +83,8 @@ async def server_read_hello_and_decide(
 
     if (session_id and len(session_id) == 32
             and client_random
-            and verify_session_token(password, session_id)):
+            and verify_session_token(password, session_id)
+            and replay_cache.check_and_mark(session_id)):
         logger.info("In-Hello auth OK")
         ok = await cache.send_server_hello_done(client_writer)
         if not ok:

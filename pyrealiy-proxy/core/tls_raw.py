@@ -1,15 +1,18 @@
 """
-手动构造 TLS 1.2 ClientHello
+TLS ClientHello 构造器
 
-Python 的 ssl 模块不允许自定义 legacy_session_id，
-所以客户端必须手动构造 ClientHello 字节，通过原始 TCP 发送。
-服务端从中读取 session_id 并验证身份，同时提取 client_random 用于派生会话密钥。
+每次连接从三种浏览器指纹档案中随机选择一种，
+避免固定 JA3 指纹成为可统计识别的流量标识：
 
-构造的 ClientHello 模仿 Chrome 浏览器指纹：
-  - 密码套件列表以 GREASE 开头（RFC 8701）
-  - 扩展顺序与 Chrome 一致
-  - 包含 GREASE 扩展（首尾各一个）
-  - 包含 ALPN、OCSP stapling、renegotiation_info、ec_point_formats 等标准扩展
+  Chrome 120 — 密码套件、扩展、groups、key_share 均含 GREASE（RFC 8701）
+  Firefox 121 — 无 GREASE；ChaCha20 + CBC 套件；含 compress_certificate / record_size_limit
+  Safari 17   — 无 GREASE；扩展以 renegotiation_info 开头；更多 ECDSA 套件
+
+三档案主要差异（决定 JA3 哈希值）：
+  - 密码套件列表及顺序
+  - 扩展类型集合及排列顺序
+  - supported_groups 成员列表
+  - GREASE 使用与否
 """
 
 from __future__ import annotations
@@ -18,7 +21,6 @@ import os
 import random
 import struct
 
-# GREASE 保留值（RFC 8701 §3.1）
 _GREASE_VALUES = [
     0x0A0A, 0x1A1A, 0x2A2A, 0x3A3A, 0x4A4A, 0x5A5A, 0x6A6A, 0x7A7A,
     0x8A8A, 0x9A9A, 0xAAAA, 0xBABA, 0xCACA, 0xDADA, 0xEAEA, 0xFAFA,
@@ -33,9 +35,151 @@ def _ext(ext_type: int, data: bytes) -> bytes:
     return struct.pack("!HH", ext_type, len(data)) + data
 
 
+def _sni_ext(sni_bytes: bytes) -> bytes:
+    entry = struct.pack("!BH", 0, len(sni_bytes)) + sni_bytes
+    return _ext(0x0000, struct.pack("!H", len(entry)) + entry)
+
+
+def _alpn_ext() -> bytes:
+    # h2 + http/1.1；RFC 7301: 1-byte per-protocol length prefix
+    protos = b"\x02h2\x08http/1.1"
+    return _ext(0x0010, struct.pack("!H", len(protos)) + protos)
+
+
+def _key_share_ext(grease_val: int | None) -> bytes:
+    eph_pub = os.urandom(32)
+    x25519_ks = struct.pack("!HH", 0x001D, 32) + eph_pub
+    if grease_val is not None:
+        grease_ks = struct.pack("!HH", grease_val, 1) + b"\x00"
+        ks_list = grease_ks + x25519_ks
+    else:
+        ks_list = x25519_ks
+    return _ext(0x0033, struct.pack("!H", len(ks_list)) + ks_list)
+
+
+def _assemble(session_id: bytes, client_random: bytes,
+              cipher_suites: bytes, extensions: bytes) -> bytes:
+    hello_body = (
+        b"\x03\x03"
+        + client_random
+        + bytes([len(session_id)]) + session_id
+        + struct.pack("!H", len(cipher_suites)) + cipher_suites
+        + b"\x01\x00"
+        + struct.pack("!H", len(extensions)) + extensions
+    )
+    hs = b"\x01" + struct.pack("!I", len(hello_body))[1:] + hello_body
+    return b"\x16\x03\x01" + struct.pack("!H", len(hs)) + hs
+
+
+# ── 指纹档案 ───────────────────────────────────────────────────────────────────
+
+def _chrome(sni_bytes: bytes, session_id: bytes, client_random: bytes) -> bytes:
+    """Chrome 120 — GREASE 遍布密码套件、扩展列表、groups、key_share"""
+    gv = _grease()
+
+    ciphers = struct.pack("!10H",
+        gv,     0x1301, 0x1302, 0x1303,
+        0xC02B, 0xC02F, 0xC02C, 0xC030, 0x009C, 0x00FF,
+    )
+    groups  = struct.pack("!4H", gv, 0x001D, 0x0017, 0x0018)
+    sigalgs = struct.pack("!9H",
+        0x0403, 0x0804, 0x0401, 0x0503, 0x0805,
+        0x0501, 0x0806, 0x0601, 0x0201,
+    )
+
+    exts = (
+        _ext(gv, b"\x00")                                             # GREASE（首位）
+        + _sni_ext(sni_bytes)
+        + _ext(0x0017, b"")                                           # extended_master_secret
+        + _ext(0xFF01, b"\x00")                                       # renegotiation_info
+        + _ext(0x000A, struct.pack("!H", len(groups)) + groups)       # supported_groups
+        + _ext(0x000B, b"\x01\x00")                                   # ec_point_formats
+        + _ext(0x0023, b"")                                           # session_ticket
+        + _ext(0x0005, b"\x01\x00\x00\x00\x00")                      # status_request
+        + _alpn_ext()
+        + _ext(0x000D, struct.pack("!H", len(sigalgs)) + sigalgs)    # signature_algorithms
+        + _key_share_ext(gv)
+        + _ext(0x002D, b"\x01\x01")                                   # psk_key_exchange_modes
+        + _ext(0x002B, b"\x04\x03\x04\x03\x03")                      # supported_versions: TLS1.3+1.2
+        + _ext(gv, b"\x00")                                           # GREASE（末位）
+    )
+    return _assemble(session_id, client_random, ciphers, exts)
+
+
+def _firefox(sni_bytes: bytes, session_id: bytes, client_random: bytes) -> bytes:
+    """Firefox 121 — 无 GREASE；ChaCha20 + CBC 套件；含 compress_certificate / record_size_limit"""
+    ciphers = struct.pack("!12H",
+        0x1301, 0x1303, 0x1302,
+        0xC02B, 0xC02F, 0xCCA9, 0xCCA8, 0xC02C, 0xC030,
+        0xC009, 0xC013, 0x009C,
+    )
+    # Firefox 包含 ffdhe 组（有限域 DH），Chrome/Safari 不包含
+    groups  = struct.pack("!6H", 0x001D, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101)
+    sigalgs = struct.pack("!11H",
+        0x0403, 0x0503, 0x0603, 0x0804, 0x0805, 0x0806,
+        0x0401, 0x0501, 0x0601, 0x0201, 0x0203,
+    )
+
+    exts = (
+        _sni_ext(sni_bytes)
+        + _ext(0x0017, b"")
+        + _ext(0xFF01, b"\x00")
+        + _ext(0x000A, struct.pack("!H", len(groups)) + groups)
+        + _ext(0x000B, b"\x01\x00")
+        + _ext(0x0023, b"")
+        + _alpn_ext()
+        + _ext(0x0005, b"\x01\x00\x00\x00\x00")
+        + _ext(0x000D, struct.pack("!H", len(sigalgs)) + sigalgs)
+        + _key_share_ext(None)
+        + _ext(0x002D, b"\x01\x01")
+        + _ext(0x002B, b"\x04\x03\x04\x03\x03")
+        + _ext(0x001B, b"\x02\x00\x02")            # compress_certificate: brotli (0x0002)
+        + _ext(0x0031, b"")                         # post_handshake_auth
+        + _ext(0x001C, b"\x40\x01")                 # record_size_limit: 16385
+    )
+    return _assemble(session_id, client_random, ciphers, exts)
+
+
+def _safari(sni_bytes: bytes, session_id: bytes, client_random: bytes) -> bytes:
+    """Safari 17 — 无 GREASE；renegotiation_info 位于扩展首位；更多 ECDSA 套件"""
+    ciphers = struct.pack("!15H",
+        0x1301, 0x1302, 0x1303,
+        0xC02C, 0xC02B, 0xC030, 0xC02F, 0xCCA9, 0xCCA8,
+        0xC024, 0xC023, 0xC00A, 0xC009, 0x009D, 0x009C,
+    )
+    groups  = struct.pack("!4H", 0x001D, 0x0017, 0x0018, 0x0019)
+    sigalgs = struct.pack("!11H",
+        0x0403, 0x0804, 0x0401, 0x0503, 0x0603,
+        0x0805, 0x0806, 0x0501, 0x0601, 0x0203, 0x0201,
+    )
+
+    exts = (
+        _ext(0xFF01, b"\x00")                                         # renegotiation_info（Safari 首位）
+        + _sni_ext(sni_bytes)
+        + _ext(0x0017, b"")
+        + _ext(0x0023, b"")
+        + _ext(0x000D, struct.pack("!H", len(sigalgs)) + sigalgs)
+        + _ext(0x0005, b"\x01\x00\x00\x00\x00")
+        + _alpn_ext()
+        + _ext(0x000A, struct.pack("!H", len(groups)) + groups)
+        + _ext(0x000B, b"\x01\x00")
+        + _ext(0x001B, b"\x04\x00\x01\x00\x02")    # compress_certificate: zlib(0x0001)+brotli(0x0002)
+        + _ext(0x0031, b"")
+        + _key_share_ext(None)
+        + _ext(0x002D, b"\x01\x01")
+        + _ext(0x002B, b"\x04\x03\x04\x03\x03")
+    )
+    return _assemble(session_id, client_random, ciphers, exts)
+
+
+_BUILDERS = [_chrome, _firefox, _safari]
+
+
+# ── 公共接口 ───────────────────────────────────────────────────────────────────
+
 def build_client_hello(server_name: str, session_id: bytes) -> tuple[bytes, bytes]:
     """
-    构造完整的 TLS ClientHello 记录字节，模仿 Chrome 浏览器指纹。
+    构造 TLS ClientHello 记录，每次随机选择 Chrome / Firefox / Safari 指纹档案。
 
     参数：
       server_name: SNI 域名（即伪装站点，如 "www.apple.com"）
@@ -46,134 +190,15 @@ def build_client_hello(server_name: str, session_id: bytes) -> tuple[bytes, byte
       client_random: 32 字节，双方用此派生会话密钥
     """
     assert len(session_id) == 32, "session_id 必须是 32 字节"
-
     client_random = os.urandom(32)
-    grease_val = _grease()
-
-    # ── 密码套件（Chrome-like，GREASE 开头）─────────────────────────────────
-    cipher_suites = struct.pack("!10H",
-        grease_val,  # GREASE
-        0x1301,      # TLS_AES_128_GCM_SHA256
-        0x1302,      # TLS_AES_256_GCM_SHA384
-        0x1303,      # TLS_CHACHA20_POLY1305_SHA256
-        0xC02B,      # TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
-        0xC02F,      # TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
-        0xC02C,      # TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-        0xC030,      # TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
-        0x009C,      # TLS_RSA_WITH_AES_128_GCM_SHA256
-        0x00FF,      # TLS_EMPTY_RENEGOTIATION_INFO_SCSV
-    )
-
-    # ── 扩展（Chrome 扩展顺序）──────────────────────────────────────────────
-
-    # GREASE（首位）
-    ext_grease_first = _ext(grease_val, b"\x00")
-
-    # SNI
-    sni = server_name.encode()
-    sni_entry = struct.pack("!BH", 0, len(sni)) + sni
-    ext_sni = _ext(0x0000, struct.pack("!H", len(sni_entry)) + sni_entry)
-
-    # extended_master_secret
-    ext_ems = _ext(0x0017, b"")
-
-    # renegotiation_info（新连接，info 为空）
-    ext_reneg = _ext(0xFF01, b"\x00")
-
-    # supported_groups（GREASE + x25519 + secp256r1 + secp384r1）
-    groups = struct.pack("!4H", grease_val, 0x001D, 0x0017, 0x0018)
-    ext_groups = _ext(0x000A, struct.pack("!H", len(groups)) + groups)
-
-    # ec_point_formats（仅 uncompressed）
-    ext_ecpf = _ext(0x000B, b"\x01\x00")
-
-    # session_ticket（空，无复用）
-    ext_ticket = _ext(0x0023, b"")
-
-    # status_request（OCSP stapling）
-    ext_status = _ext(0x0005, b"\x01\x00\x00\x00\x00")
-
-    # ALPN（h2 + http/1.1，与 Chrome 访问 HTTPS 一致）
-    alpn_protos = b"\x00\x02h2\x00\x08http/1.1"
-    ext_alpn = _ext(0x0010, struct.pack("!H", len(alpn_protos)) + alpn_protos)
-
-    # signature_algorithms
-    sig_algs = struct.pack("!9H",
-        0x0403,  # ecdsa_secp256r1_sha256
-        0x0804,  # rsa_pss_rsae_sha256
-        0x0401,  # rsa_pkcs1_sha256
-        0x0503,  # ecdsa_secp384r1_sha384
-        0x0805,  # rsa_pss_rsae_sha384
-        0x0501,  # rsa_pkcs1_sha384
-        0x0806,  # rsa_pss_rsae_sha512
-        0x0601,  # rsa_pkcs1_sha512
-        0x0201,  # rsa_pkcs1_sha1
-    )
-    ext_sigalg = _ext(0x000D, struct.pack("!H", len(sig_algs)) + sig_algs)
-
-    # key_share（GREASE entry + x25519，与 Chrome 一致）
-    eph_pub        = os.urandom(32)
-    grease_ks      = struct.pack("!HH", grease_val, 1) + b"\x00"   # GREASE group, 1-byte key
-    x25519_ks      = struct.pack("!HH", 0x001D, 32) + eph_pub
-    ks_list        = grease_ks + x25519_ks
-    ext_keyshare   = _ext(0x0033, struct.pack("!H", len(ks_list)) + ks_list)
-
-    # psk_key_exchange_modes（psk_dhe_ke）
-    ext_psk_modes = _ext(0x002D, b"\x01\x01")
-
-    # supported_versions（TLS 1.3 + 1.2）
-    ext_versions = _ext(0x002B, b"\x04\x03\x04\x03\x03")
-
-    # GREASE（末位）
-    ext_grease_last = _ext(grease_val, b"\x00")
-
-    all_extensions = (
-        ext_grease_first + ext_sni + ext_ems + ext_reneg +
-        ext_groups + ext_ecpf + ext_ticket + ext_status + ext_alpn +
-        ext_sigalg + ext_keyshare + ext_psk_modes + ext_versions +
-        ext_grease_last
-    )
-
-    # ── ClientHello 主体 ────────────────────────────────────────────────────
-    hello_body = (
-        b"\x03\x03"                               # legacy_version = TLS 1.2
-        + client_random                            # 32 字节随机数
-        + bytes([len(session_id)]) + session_id   # session_id（嵌入认证 token）
-        + struct.pack("!H", len(cipher_suites)) + cipher_suites
-        + b"\x01\x00"                             # compression_methods: [null]
-        + struct.pack("!H", len(all_extensions)) + all_extensions
-    )
-
-    hs_len = len(hello_body)
-    handshake = (
-        b"\x01"                        # HandshakeType = ClientHello
-        + struct.pack("!I", hs_len)[1:]  # 3 字节长度
-        + hello_body
-    )
-
-    record = (
-        b"\x16\x03\x01"               # content_type=Handshake, legacy_version=TLS1.0
-        + struct.pack("!H", len(handshake))
-        + handshake
-    )
-
-    return record, client_random
+    sni_bytes = server_name.encode()
+    return random.choice(_BUILDERS)(sni_bytes, session_id, client_random), client_random
 
 
 def build_fake_client_tail() -> bytes:
     """
-    构造 TLS 1.3 客户端在收到服务端 flight 后应发送的假记录：
-      ChangeCipherSpec（compat middlebox record）+ Finished（Encrypted Application Data）
-
-    TLS 1.3 无 ClientKeyExchange，密钥协商通过 ClientHello 中的 key_share 完成。
-    服务端读取这两条记录后丢弃，双方直接进入加密应用数据模式。
+    构造 TLS 1.3 客户端握手 flight：ChangeCipherSpec（compat record）+ 假 Finished。
     """
-    # ChangeCipherSpec（TLS 1.3 compat record，Chrome 发送）
     ccs = b"\x14\x03\x03\x00\x01\x01"
-
-    # Finished：TLS 1.3 中为 type=0x17（Encrypted Application Data）
-    # 大小约 52 字节（4字节 HMAC header + 32字节 verify_data + 16字节 AEAD tag）
     finished_body = os.urandom(52)
-    finished = b"\x17\x03\x03" + struct.pack("!H", len(finished_body)) + finished_body
-
-    return ccs + finished
+    return ccs + b"\x17\x03\x03" + struct.pack("!H", len(finished_body)) + finished_body

@@ -2,12 +2,14 @@
 
 基于 Python 的抗审查代理，融合 Shadow-TLS 和 Reality 两种协议的核心思路：
 
-- **零延迟认证**：将 Poly1305 token 嵌入 TLS ClientHello 的 `legacy_session_id`，服务端在第一个数据包即完成身份验证，不产生额外 RTT
-- **零延迟伪装**：预先缓存真实站点的 TLS 握手记录，GFW 探测时本地直接回放，响应时延与真实站点完全一致
-- **加密信道**：ChaCha20-Poly1305 + HKDF 会话密钥，每条连接密钥独立
+- **零延迟认证**：Poly1305 token 嵌入 TLS ClientHello 的 `legacy_session_id`，服务端在第一个数据包即完成身份验证，不产生额外 RTT
+- **零延迟伪装**：预先缓存真实站点的 TLS 1.3 握手记录，GFW 探测时本地直接回放，响应时延与真实站点完全一致
+- **多浏览器指纹轮换**：每次连接随机选择 Chrome / Firefox / Safari 三种 TLS 指纹（不同密码套件顺序、扩展集合与排列），避免固定 JA3 成为可统计识别的流量标识
+- **加密信道**：ChaCha20-Poly1305 + HKDF 会话密钥；双向使用独立密钥（c2s / s2c），消除 nonce 复用攻击面；密钥从 ClientHello 的 `client_random` 派生，无需额外传输 salt
+- **防重放**：token 内含 8 字节随机 nonce，服务端维护时间桶缓存，60 秒窗口内的重放 ClientHello 一律走伪装路径
 - **TCP Brutal**：可选的固定速率拥塞控制，在高丢包跨境链路上维持稳定吞吐
 - **连接池**：客户端预建 N 条已认证隧道，SOCKS5 请求到来时零等待取用
-- **域名 + IP 分流**：规则内嵌在配置文件中，支持精确/后缀/关键词/正则/CIDR/GeoSite/GeoIP，正则匹配使用字面量预筛跳过无关主机名
+- **域名 + IP 分流**：规则内嵌配置，支持精确/后缀/关键词/正则/CIDR/GeoSite/GeoIP，正则匹配使用字面量预筛跳过无关主机名
 
 ---
 
@@ -15,7 +17,7 @@
 
 | 项目 | 最低版本 |
 |---|---|
-| Python | 3.9 |
+| Python | 3.10 |
 | cryptography | 42.0.0 |
 | uvloop（可选） | 任意 |
 | tcp_brutal 内核模块（可选） | Linux 内核 ≥ 4.9 |
@@ -65,7 +67,7 @@ python setup.py
 |---|---|
 | `listen_port` | 监听端口，建议 443 |
 | `password` | 连接密码，客户端必须一致 |
-| `camouflage_host` | 伪装域名，服务端会从此站点缓存 TLS 握手记录用于回放 |
+| `camouflage_host` | 伪装域名，服务端从此站点缓存 TLS 1.3 握手记录用于回放 |
 | `camouflage_port` | 伪装站点端口，通常 443 |
 | `brutal_rate_bps` | TCP Brutal 单连接速率（字节/秒），0 表示禁用 |
 
@@ -111,11 +113,6 @@ python server.py /path/to/config.json   # 指定配置文件
 
     "rules": [
         "GEOSITE,loyalsoldier:category-ads-all,REJECT",
-
-        "DOMAIN,ads.example.com,REJECT",
-        "DOMAIN-SUFFIX,tracking.io,REJECT",
-        "DOMAIN-KEYWORD,adservice,REJECT",
-        "DOMAIN-REGEX,^(.+\\.)?doubleclick\\.net$,REJECT",
 
         "GEOSITE,loyalsoldier:private,DIRECT",
         "GEOIP,loyalsoldier:private,DIRECT",
@@ -479,19 +476,18 @@ pyrealiy-proxy/
 ├── config_server.json     服务端配置示例
 ├── config_client.json     客户端配置示例
 └── core/
-    ├── auth.py            Poly1305 认证包
+    ├── hello_auth.py      ClientHello token 生成与验证（Poly1305 + 时间戳掩码 + nonce 防重放）
+    ├── camouflage.py      服务端 TLS 伪装决策（认证通过 → 代理模式；探测/重放 → 回放缓存）
+    ├── handshake_cache.py 服务端握手缓存池（32 份 TLS 1.3 记录轮换 + 每小时刷新）
+    ├── tls_raw.py         TLS ClientHello 构造（Chrome / Firefox / Safari 三档随机指纹）
+    ├── tunnel.py          ChaCha20-Poly1305 加密信道（TLS 0x17 帧格式 + 双向独立密钥）
+    ├── conn_pool.py       客户端预建连接池（BrutalPool，含超时 / 过期检测）
+    ├── socks5.py          本地 SOCKS5 协议解析
+    ├── router.py          分流路由（规则匹配 + geosite.dat / geoip.dat 解析）
+    ├── geosite_cache.py   GeoSite/GeoIP 多源缓存管理（下载 / 刷新 / meta.json）
     ├── bloom.py           Bloom Filter（域名后缀预过滤，Kirsch-Mitzenmacher 双哈希）
     ├── brutal.py          TCP Brutal socket 选项封装
-    ├── camouflage.py      服务端 TLS 伪装决策（认证 vs 回放探测）
-    ├── conn_pool.py       客户端预建连接池（BrutalPool）
-    ├── handshake_cache.py 服务端握手缓存池（8 份轮换 + 每日刷新）
-    ├── hello_auth.py      ClientHello 中 session_id 的 token 生成与验证
-    ├── geosite_cache.py   GeoSite/GeoIP 多源缓存管理（下载 / 刷新 / meta.json）
-    ├── router.py          分流路由（规则匹配 + geosite.dat / geoip.dat 解析）
     ├── tproxy.py          TProxy 透明代理监听器（IP_TRANSPARENT socket，仅 Linux）
-    ├── socks5.py          本地 SOCKS5 协议解析
-    ├── tls_raw.py         手动构造 TLS 1.3 ClientHello 字节
-    ├── tunnel.py          ChaCha20-Poly1305 加密信道（帧格式 + HKDF 密钥协商）
     └── utils.py           日志、地址打包、双向中继
 ```
 
@@ -502,41 +498,64 @@ pyrealiy-proxy/
 ### 连接建立流程
 
 ```
-客户端                                        服务端
-  │                                             │
-  │── TCP connect ──────────────────────────── │
-  │                                             │
-  │  ┌─ 构造含 Poly1305 token 的 ClientHello ─┐ │
-  │  │  token 嵌入 legacy_session_id (32B)    │ │
-  │  └────────────────────────────────────────┘ │
-  │── TLS ClientHello ─────────────────────── ► │
-  │                                             │ 验证 session_id
-  │                                             │ ├─ 通过 → 进入代理模式
-  │                                             │ └─ 失败 → 回放缓存握手记录
-  │                                             │
-  │◄── 16 字节随机盐（HKDF 输入）────────────── │  （代理模式）
-  │                                             │
-  ├─────── 加密信道建立（ChaCha20-Poly1305）────┤
-  │                                             │
-  │── [加密] 目标地址 ─────────────────────── ► │── TCP connect → 目标服务器
-  │                                             │
-  │◄══════════════ 双向加密中继 ══════════════► │◄══════════════ 透明中继 ══════════════►
+客户端                                              服务端
+  │                                                   │
+  │── TCP connect ──────────────────────────────────► │
+  │                                                   │
+  │  ┌─ 随机选 Chrome/Firefox/Safari 指纹档案 ────── ┐ │
+  │  │  构造 ClientHello，token 嵌入 session_id     │ │
+  │  │  token = random(8B) + masked_ts(8B) + MAC(16B) │ │
+  │  └────────────────────────────────────────────── ┘ │
+  │── TLS ClientHello ─────────────────────────────► │
+  │                                                   │ 验证 session_id token + nonce 防重放
+  │                                                   │ ├─ 通过 → 回放缓存握手记录，进代理模式
+  │                                                   │ └─ 失败/重放 → 回放缓存握手记录，关闭
+  │                                                   │
+  │◄── 缓存的真实 TLS 1.3 握手记录（ServerHello +  ── │
+  │    CCS + EncryptedExtensions + Certificate +      │
+  │    CertificateVerify + Finished）                 │
+  │                                                   │
+  │── CCS + 假 Finished（握手模拟完成）─────────────► │
+  │                                                   │
+  │  会话密钥由双方各自从 ClientHello 的              │
+  │  client_random 派生，无需额外传输 salt            │
+  │  c2s_key = HKDF(master, info="c2s")              │
+  │  s2c_key = HKDF(master, info="s2c")              │
+  │                                                   │
+  │── [加密] 目标地址 ──────────────────────────────► │── TCP connect → 目标服务器
+  │                                                   │
+  │◄═══════════════ 双向加密中继 ═══════════════════► │◄════════════ 透明中继 ════════════►
 ```
 
-### 帧格式
+### 帧格式（TLS 应用数据记录）
 
 ```
-┌──────────┬──────────────────────────────┐
-│ 2 字节   │ N + 16 字节                  │
-│ 明文长度 │ ChaCha20-Poly1305 密文 + Tag │
-└──────────┴──────────────────────────────┘
+┌──────┬───────────┬────────────┬──────────────────────────────────┐
+│ 0x17 │ 0x03 0x03 │ 2字节长度  │ ChaCha20-Poly1305 密文 + 16B Tag │
+└──────┴───────────┴────────────┴──────────────────────────────────┘
+  type   version     ciphertext   ciphertext（最大 16384+16 字节）
+                     length
 ```
 
-Nonce 由双方各自的计数器派生，不在线路上传输（减少开销，双方计数器保持同步）。
+与 TLS 1.3 应用数据记录格式完全一致，握手完成后的流量对旁观者不可与真实 HTTPS 区分。Nonce 由双方各自的计数器派生，不在线路上传输。
+
+### TLS 指纹轮换
+
+每次连接从三种浏览器档案中随机选择一种，主要差异体现在 JA3 哈希的各个组成部分：
+
+| 档案 | GREASE | 密码套件特征 | 扩展特征 |
+|---|---|---|---|
+| Chrome 120 | 密码套件首位 + 扩展首尾 + groups + key_share | 含 0x00FF (SCSV) | GREASE 扩展首尾各一个 |
+| Firefox 121 | 无 | 含 CCA9/CCA8（ChaCha20+ECDSA）、CBC 套件、ffdhe 组 | 含 compress_certificate / record_size_limit |
+| Safari 17 | 无 | 含更多 ECDSA-CBC 套件 | **renegotiation_info 位于首位**，含 compress_certificate |
+
+Chrome 档案内部还有 GREASE 值随机性（从 16 个 RFC 8701 保留值中随机选），同一档案不同连接的 JA3 哈希也不相同。
 
 ### GFW 探测应对
 
-服务端启动时从伪装站点预取 8 份 TLS 1.2 握手记录（含真实证书和 ECDHE 签名），每次探测随机取一份回放。不修改 `server_random`，ServerKeyExchange 签名始终有效。缓存每 24 小时自动刷新。
+服务端启动时并发从伪装站点预取 32 份 TLS 1.3 握手记录（ServerHello + CCS + EncryptedExtensions + Certificate + CertificateVerify + Finished），每次探测随机取一份回放。每小时自动在后台静默刷新，不影响进行中的连接。
+
+**防重放机制**：服务端维护基于时间桶的 nonce 缓存，每个 token 含 8 字节真随机 nonce。60 秒窗口内重放的 ClientHello——即使 Poly1305 验证通过——也会走伪装路径而非代理路径，消除通过行为差异识别代理的攻击面。
 
 ---
 

@@ -58,7 +58,7 @@ async def _read_server_handshake(reader: asyncio.StreamReader) -> None:
                 break  # server flight done
             ct     = header[0]
             length = int.from_bytes(header[3:5], "big")
-            await reader.readexactly(length)
+            await asyncio.wait_for(reader.readexactly(length), timeout=timeout)
             if ct == 0x14:
                 saw_ccs = True
     except Exception:
@@ -168,7 +168,7 @@ class BrutalPool:
                 )
             else:
                 server_reader, server_writer = await asyncio.wait_for(
-                    asyncio.open_connection(cfg["server_host"], cfg["server_port"]),
+                    asyncio.open_connection(cfg["server_host"], cfg["server_port"], limit=262144),
                     timeout=_BUILD_TIMEOUT,
                 )
 

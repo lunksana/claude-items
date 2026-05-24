@@ -131,5 +131,5 @@ async def open_brutal_connection(
     enable(sock, rate_bps)
 
     await loop.sock_connect(sock, sockaddr)
-    reader, writer = await asyncio.open_connection(sock=sock)
+    reader, writer = await asyncio.open_connection(sock=sock, limit=262144)
     return reader, writer

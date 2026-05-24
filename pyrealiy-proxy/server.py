@@ -26,6 +26,8 @@ from core.camouflage import server_read_hello_and_decide
 
 from core.handshake_cache import HandshakeCache
 
+from core.hello_auth import TokenReplayCache
+
 from core.tunnel import EncryptedTunnel
 
 from core.utils import get_logger, unpack_address
@@ -40,13 +42,14 @@ async def handle_client(
     client_writer: asyncio.StreamWriter,
     cfg: dict,
     cache: HandshakeCache,
+    replay_cache: TokenReplayCache,
 ) -> None:
     peer = client_writer.get_extra_info("peername")
     logger.info("New connection from %s", peer)
 
-    # 阶段1：读 ClientHello，认证决策 + 握手模拟
+    # 阶段1：读 ClientHello，认证决策 + 握手模拟（含重放检测）
     ok, client_random = await server_read_hello_and_decide(
-        client_reader, client_writer, cfg["password"], cache
+        client_reader, client_writer, cfg["password"], cache, replay_cache
     )
     if not ok:
         return  # 探测连接已由 camouflage 模块处理完毕
@@ -79,7 +82,7 @@ async def handle_client(
 
     # 阶段4：连接目标，双向中继
     try:
-        target_reader, target_writer = await asyncio.open_connection(target_host, target_port)
+        target_reader, target_writer = await asyncio.open_connection(target_host, target_port, limit=262144)
     except Exception as e:
         logger.error("Cannot connect to %s:%d: %s", target_host, target_port, e)
         client_writer.close()
@@ -90,7 +93,8 @@ async def handle_client(
             while True:
                 data = await tunnel.recv()
                 target_writer.write(data)
-                await target_writer.drain()
+                if target_writer.transport.get_write_buffer_size() > 65536:
+                    await target_writer.drain()
         except Exception:
             pass
         finally:
@@ -147,15 +151,17 @@ async def main(config_path: str) -> None:
     with open(config_path) as f:
         cfg = json.load(f)
 
-    # 服务启动时预热缓存（只需一次网络请求）
-    cache = HandshakeCache(cfg["camouflage_host"], cfg.get("camouflage_port", 443))
+    # 服务启动时预热握手缓存（只需一次网络请求）
+    cache        = HandshakeCache(cfg["camouflage_host"], cfg.get("camouflage_port", 443))
+    replay_cache = TokenReplayCache()   # 防重放 nonce 缓存，全局单例
     if not await cache.warmup():
         logger.warning("Handshake cache warmup failed — probe connections will be dropped silently")
 
     server = await asyncio.start_server(
-        lambda r, w: handle_client(r, w, cfg, cache),
+        lambda r, w: handle_client(r, w, cfg, cache, replay_cache),
         cfg["listen_host"],
         cfg["listen_port"],
+        limit=262144,
     )
 
     # 在监听 socket 上预设 brutal 算法名称。

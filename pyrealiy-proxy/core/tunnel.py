@@ -25,7 +25,7 @@ import hashlib
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF, HKDFExpand
 
 from cryptography.hazmat.primitives import hashes
 
@@ -37,10 +37,14 @@ _MAX_RECORD = 16384  # TLS 单条记录最大明文长度（RFC 5246 §6.2.1）
 _DRAIN_THRESHOLD = 64 * 1024
 
 
-def derive_session_key(password: str, salt: bytes) -> bytes:
+def _derive_master(password: str, salt: bytes) -> bytes:
     raw_key = hashlib.sha256(password.encode()).digest()
     hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=salt, info=b"pyrealiy-session")
     return hkdf.derive(raw_key)
+
+
+def _expand(master: bytes, info: bytes) -> bytes:
+    return HKDFExpand(algorithm=hashes.SHA256(), length=32, info=info).derive(master)
 
 
 class EncryptedTunnel:
@@ -56,7 +60,8 @@ class EncryptedTunnel:
         self._reader = reader
         self._writer = writer
         self._password = password
-        self._cipher: ChaCha20Poly1305 | None = None
+        self._send_cipher: ChaCha20Poly1305 | None = None
+        self._recv_cipher: ChaCha20Poly1305 | None = None
         self._send_nonce = 0
         self._recv_nonce = 0
 
@@ -64,11 +69,16 @@ class EncryptedTunnel:
 
     async def do_handshake_as_initiator(self, client_random: bytes) -> None:
         """派生会话密钥。client_random 来自已发出的 ClientHello，无需额外传输。"""
-        self._cipher = ChaCha20Poly1305(derive_session_key(self._password, client_random))
+        master = _derive_master(self._password, client_random)
+        # 方向独立密钥：避免双向共用同一 (key, nonce) 对导致的 nonce 复用攻击
+        self._send_cipher = ChaCha20Poly1305(_expand(master, b"c2s"))
+        self._recv_cipher = ChaCha20Poly1305(_expand(master, b"s2c"))
 
     async def do_handshake_as_responder(self, client_random: bytes) -> None:
         """派生会话密钥。client_random 由调用方从 ClientHello 中提取。"""
-        self._cipher = ChaCha20Poly1305(derive_session_key(self._password, client_random))
+        master = _derive_master(self._password, client_random)
+        self._send_cipher = ChaCha20Poly1305(_expand(master, b"s2c"))
+        self._recv_cipher = ChaCha20Poly1305(_expand(master, b"c2s"))
 
     # --- 数据读写 ---
 
@@ -80,9 +90,10 @@ class EncryptedTunnel:
             off  += len(chunk)
             nonce = self._send_nonce.to_bytes(NONCE_SIZE, "big")
             self._send_nonce += 1
-            ciphertext = self._cipher.encrypt(nonce, chunk, None)
+            ciphertext = self._send_cipher.encrypt(nonce, chunk, None)
             # TLS application data record: type=0x17, version=TLS1.2, length=len(ciphertext)
-            self._writer.write(b"\x17\x03\x03" + struct.pack("!H", len(ciphertext)) + ciphertext)
+            self._writer.write(b"\x17\x03\x03" + struct.pack("!H", len(ciphertext)))
+            self._writer.write(ciphertext)
         if self._writer.transport.get_write_buffer_size() > _DRAIN_THRESHOLD:
             await self._writer.drain()
 
@@ -93,7 +104,7 @@ class EncryptedTunnel:
         ciphertext = await self._reader.readexactly(length)
         nonce = self._recv_nonce.to_bytes(NONCE_SIZE, "big")
         self._recv_nonce += 1
-        return self._cipher.decrypt(nonce, ciphertext, None)
+        return self._recv_cipher.decrypt(nonce, ciphertext, None)
 
     async def relay_with(self, other: "EncryptedTunnel") -> None:
         """与另一个加密隧道双向中继"""
