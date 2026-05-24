@@ -199,6 +199,26 @@ class HandshakeCache:
     def ready(self) -> bool:
         return bool(self._pool)
 
+    async def send_server_hello_done(
+        self,
+        writer: asyncio.StreamWriter,
+    ) -> bool:
+        """
+        向合法客户端发送缓存的服务端握手记录（ServerHello…ServerHelloDone）。
+        不关闭连接，调用方继续读取客户端的 CKE+CCS+Finished 并完成握手模拟。
+        返回 False 表示缓存为空（调用方应关闭连接）。
+        """
+        if not self._pool:
+            return False
+        session_records = random.choice(self._pool)
+        try:
+            for raw in session_records:
+                writer.write(raw)
+            await writer.drain()
+            return True
+        except Exception:
+            return False
+
     async def serve_probe(
         self,
         client_reader: asyncio.StreamReader,

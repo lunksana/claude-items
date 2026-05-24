@@ -44,8 +44,8 @@ async def handle_client(
     peer = client_writer.get_extra_info("peername")
     logger.info("New connection from %s", peer)
 
-    # 阶段1：读 ClientHello，认证决策
-    ok = await server_read_hello_and_decide(
+    # 阶段1：读 ClientHello，认证决策 + 握手模拟
+    ok, client_random = await server_read_hello_and_decide(
         client_reader, client_writer, cfg["password"], cache
     )
     if not ok:
@@ -60,9 +60,9 @@ async def handle_client(
         if sock:
             brutal.set_rate(sock, rate_bps)
 
-    # 阶段2：加密信道握手
+    # 阶段2：派生会话密钥（client_random 已从 ClientHello 提取，无需额外握手）
     tunnel = EncryptedTunnel(client_reader, client_writer, cfg["password"])
-    await tunnel.do_handshake_as_responder()
+    await tunnel.do_handshake_as_responder(client_random)
 
     # 阶段3：读取目标地址
     try:

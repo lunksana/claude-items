@@ -1,21 +1,22 @@
 """
 加密信道 —— 用 ChaCha20-Poly1305 对代理数据加密
 
-帧格式（v2，nonce 不上线）：
-  [2 字节明文长度] [密文 + 16 字节 Tag]
+帧格式（v3，TLS 应用数据记录）：
+  [1字节 0x17] [2字节 0x03 0x03] [2字节密文长度] [密文 + 16字节 Tag]
 
-Nonce 由双方各自维护的计数器派生，不在线路上传输，
-每包减少 1 次 readexactly（3→2）和 12 字节开销。
+与 TLS 1.2 application data record 格式完全一致，握手完成后的流量
+在旁观者眼中不可与真实 HTTPS 区分。
 
-会话密钥 = HKDF(SHA256(password), 随机盐)
+Nonce 由双方各自维护的计数器派生，不在线路上传输。
+
+会话密钥 = HKDF(SHA256(password), salt=client_random)
+  client_random 来自 ClientHello，双方均已知，无需额外传输。
 """
 
 
 from __future__ import annotations
 
 import asyncio
-
-import os
 
 import struct
 
@@ -28,9 +29,9 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from cryptography.hazmat.primitives import hashes
 
-SALT_SIZE  = 16
 NONCE_SIZE = 12
 TAG_SIZE   = 16
+_MAX_RECORD = 16384  # TLS 单条记录最大明文长度（RFC 5246 §6.2.1）
 
 # 写缓冲超过此阈值才 drain，避免每包都切换协程
 _DRAIN_THRESHOLD = 64 * 1024
@@ -61,33 +62,35 @@ class EncryptedTunnel:
 
     # --- 握手 ---
 
-    async def do_handshake_as_initiator(self) -> None:
-        salt = os.urandom(SALT_SIZE)
-        self._writer.write(salt)
-        await self._writer.drain()
-        self._cipher = ChaCha20Poly1305(derive_session_key(self._password, salt))
+    async def do_handshake_as_initiator(self, client_random: bytes) -> None:
+        """派生会话密钥。client_random 来自已发出的 ClientHello，无需额外传输。"""
+        self._cipher = ChaCha20Poly1305(derive_session_key(self._password, client_random))
 
-    async def do_handshake_as_responder(self) -> None:
-        salt = await self._reader.readexactly(SALT_SIZE)
-        self._cipher = ChaCha20Poly1305(derive_session_key(self._password, salt))
+    async def do_handshake_as_responder(self, client_random: bytes) -> None:
+        """派生会话密钥。client_random 由调用方从 ClientHello 中提取。"""
+        self._cipher = ChaCha20Poly1305(derive_session_key(self._password, client_random))
 
     # --- 数据读写 ---
 
     async def send(self, plaintext: bytes) -> None:
-        nonce = self._send_nonce.to_bytes(NONCE_SIZE, "big")
-        self._send_nonce += 1
-        ciphertext = self._cipher.encrypt(nonce, plaintext, None)
-        # nonce 不上线，线路格式：[2字节明文长度][密文+tag]
-        self._writer.write(struct.pack("!H", len(plaintext)) + ciphertext)
-        # 仅在写缓冲积压时 drain，避免每包都触发协程切换
+        # 超过单条 TLS 记录限制时自动分片
+        off = 0
+        while off < len(plaintext):
+            chunk = plaintext[off:off + _MAX_RECORD]
+            off  += len(chunk)
+            nonce = self._send_nonce.to_bytes(NONCE_SIZE, "big")
+            self._send_nonce += 1
+            ciphertext = self._cipher.encrypt(nonce, chunk, None)
+            # TLS application data record: type=0x17, version=TLS1.2, length=len(ciphertext)
+            self._writer.write(b"\x17\x03\x03" + struct.pack("!H", len(ciphertext)) + ciphertext)
         if self._writer.transport.get_write_buffer_size() > _DRAIN_THRESHOLD:
             await self._writer.drain()
 
     async def recv(self) -> bytes:
-        # 一次读取 2 字节头部（之前是 3 次 readexactly，现在是 2 次）
-        header = await self._reader.readexactly(2)
-        plain_len = struct.unpack("!H", header)[0]
-        ciphertext = await self._reader.readexactly(plain_len + TAG_SIZE)
+        # TLS record header: content_type(1) + version(2) + length(2)
+        header = await self._reader.readexactly(5)
+        length = int.from_bytes(header[3:5], "big")
+        ciphertext = await self._reader.readexactly(length)
         nonce = self._recv_nonce.to_bytes(NONCE_SIZE, "big")
         self._recv_nonce += 1
         return self._cipher.decrypt(nonce, ciphertext, None)

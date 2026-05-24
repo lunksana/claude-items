@@ -26,7 +26,7 @@ import asyncio
 
 from .hello_auth import make_session_token
 
-from .tls_raw import build_client_hello
+from .tls_raw import build_client_hello, build_fake_client_tail
 
 from .tunnel import EncryptedTunnel
 
@@ -36,7 +36,39 @@ from . import brutal
 
 logger = get_logger("conn_pool")
 
-_BUILD_TIMEOUT = 15.0   # 单条连接建立（TCP+认证+握手）的总超时秒数
+_BUILD_TIMEOUT = 20.0   # 单条连接建立（TCP+认证+握手模拟）的总超时秒数
+
+
+async def _read_server_handshake(reader: asyncio.StreamReader) -> None:
+    """
+    读取服务端握手序列直至 ServerChangeCipherSpec+ServerFinished。
+
+    握手记录序列：ServerHello → Certificate → ServerKeyExchange → ServerHelloDone
+                  → ChangeCipherSpec → Finished（Encrypted）
+    读取并丢弃所有记录；收到 ChangeCipherSpec(0x14) 后再读一条 Finished 即结束。
+    """
+    try:
+        saw_ccs = False
+
+        async def _read_one() -> bool:
+            nonlocal saw_ccs
+            header = await reader.readexactly(5)
+            ct     = header[0]
+            length = int.from_bytes(header[3:5], "big")
+            await reader.readexactly(length)
+            if ct == 0x14:
+                saw_ccs = True
+                return False
+            return ct == 0x16 and saw_ccs  # True = 读到 Finished，停止
+
+        await asyncio.wait_for(_drain_until(_read_one), timeout=12.0)
+    except Exception:
+        pass
+
+
+async def _drain_until(coro_factory) -> None:
+    while not await coro_factory():
+        pass
 
 
 class _ReadyTunnel:
@@ -136,15 +168,24 @@ class BrutalPool:
                     timeout=_BUILD_TIMEOUT,
                 )
 
-            # 2. 发送含认证 token 的 ClientHello
+            # 2. 发送含认证 token 的 ClientHello，提取 client_random 用于密钥派生
             token = make_session_token(cfg["password"])
-            hello = build_client_hello(cfg["camouflage_host"], token)
+            hello, client_random = build_client_hello(cfg["camouflage_host"], token)
             server_writer.write(hello)
             await server_writer.drain()
 
-            # 3. 完成加密信道握手
+            # 3. 读取服务端握手记录（ServerHello…ServerHelloDone + CCS + Finished）
+            await _read_server_handshake(server_reader)
+
+            # 4. 发送假 ClientKeyExchange + CCS + Finished，使握手看起来完整
+            server_writer.write(build_fake_client_tail())
+            await server_writer.drain()
+
+            # 5. 派生会话密钥，无需额外传输 salt
             tunnel = EncryptedTunnel(server_reader, server_writer, cfg["password"])
-            await asyncio.wait_for(tunnel.do_handshake_as_initiator(), timeout=8.0)
+            await asyncio.wait_for(
+                tunnel.do_handshake_as_initiator(client_random), timeout=2.0
+            )
 
             return _ReadyTunnel(tunnel, server_writer)
 
