@@ -22,6 +22,7 @@ Brutal 连接预建池
 from __future__ import annotations
 
 import asyncio
+import time
 
 
 from .hello_auth import make_session_token
@@ -37,46 +38,44 @@ from . import brutal
 logger = get_logger("conn_pool")
 
 _BUILD_TIMEOUT = 20.0   # 单条连接建立（TCP+认证+握手模拟）的总超时秒数
+_MAX_IDLE_SEC  = 120    # 池中空闲连接最长存活时间（超过后丢弃重建，避免长期无流量被识别）
 
 
 async def _read_server_handshake(reader: asyncio.StreamReader) -> None:
     """
-    读取服务端握手序列直至 ServerChangeCipherSpec+ServerFinished。
+    读取服务端 TLS 1.3 握手 flight 直至结束。
 
-    握手记录序列：ServerHello → Certificate → ServerKeyExchange → ServerHelloDone
-                  → ChangeCipherSpec → Finished（Encrypted）
-    读取并丢弃所有记录；收到 ChangeCipherSpec(0x14) 后再读一条 Finished 即结束。
+    序列：ServerHello(0x16) → CCS(0x14) → N×ApplicationData(0x17, 加密记录群)
+    CCS 之后切换为短超时（1.5s）；超时意味着服务端 flight 已发完，无需继续等待。
     """
+    saw_ccs = False
     try:
-        saw_ccs = False
-
-        async def _read_one() -> bool:
-            nonlocal saw_ccs
-            header = await reader.readexactly(5)
+        while True:
+            timeout = 1.5 if saw_ccs else 12.0
+            try:
+                header = await asyncio.wait_for(reader.readexactly(5), timeout=timeout)
+            except asyncio.TimeoutError:
+                break  # server flight done
             ct     = header[0]
             length = int.from_bytes(header[3:5], "big")
             await reader.readexactly(length)
             if ct == 0x14:
                 saw_ccs = True
-                return False
-            return ct == 0x16 and saw_ccs  # True = 读到 Finished，停止
-
-        await asyncio.wait_for(_drain_until(_read_one), timeout=12.0)
     except Exception:
         pass
 
 
-async def _drain_until(coro_factory) -> None:
-    while not await coro_factory():
-        pass
-
-
 class _ReadyTunnel:
-    __slots__ = ("tunnel", "writer")
+    __slots__ = ("tunnel", "writer", "_created_at")
 
     def __init__(self, tunnel: EncryptedTunnel, writer: asyncio.StreamWriter):
-        self.tunnel = tunnel
-        self.writer = writer
+        self.tunnel     = tunnel
+        self.writer     = writer
+        self._created_at = time.monotonic()
+
+    @property
+    def is_stale(self) -> bool:
+        return time.monotonic() - self._created_at > _MAX_IDLE_SEC
 
     def close(self):
         try:
@@ -111,14 +110,19 @@ class BrutalPool:
     async def acquire(self) -> _ReadyTunnel | None:
         """
         取出一条可用隧道，同时触发后台补充。
+        跳过超过 _MAX_IDLE_SEC 的过期连接（关闭并触发补充）。
         若池暂时为空，等待最多 5 秒；超时则直接新建一条（不丢请求）。
         """
         self._schedule_refills()
         try:
-            ready = await asyncio.wait_for(self._queue.get(), timeout=5.0)
-            return ready
+            while True:
+                ready = await asyncio.wait_for(self._queue.get(), timeout=5.0)
+                if not ready.is_stale:
+                    return ready
+                ready.close()
+                logger.debug("Discarded stale pool connection, rebuilding")
+                self._schedule_refills()
         except asyncio.TimeoutError:
-            # 池暂时耗尽（并发请求超过池大小），直接建连不丢请求
             logger.info("Pool exhausted, building direct connection")
             return await self._build_one()
 
@@ -174,10 +178,10 @@ class BrutalPool:
             server_writer.write(hello)
             await server_writer.drain()
 
-            # 3. 读取服务端握手记录（ServerHello…ServerHelloDone + CCS + Finished）
+            # 3. 读取服务端 TLS 1.3 握手 flight（ServerHello + CCS + 加密记录群）
             await _read_server_handshake(server_reader)
 
-            # 4. 发送假 ClientKeyExchange + CCS + Finished，使握手看起来完整
+            # 4. 发送假 CCS + Finished，完成 TLS 1.3 握手模拟
             server_writer.write(build_fake_client_tail())
             await server_writer.drain()
 

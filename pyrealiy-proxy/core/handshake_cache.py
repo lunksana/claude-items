@@ -1,100 +1,58 @@
 """
-TLS 握手缓存（多份轮换 + 每日刷新）
+TLS 握手缓存（多份轮换 + 每小时刷新）
 
-【已知局限的根本原因】
-ServerKeyExchange 签名 = sign(client_random ‖ server_random ‖ ECDHE参数)
-替换 server_random → 签名失效 → 深度验证可检测
+【设计决策：使用 TLS 1.3 抓取】
+客户端发送 TLS 1.3-capable ClientHello（含 supported_versions 扩展）。
+如果服务端缓存使用 TLS 1.2-only ClientHello 去抓 apple.com，
+apple.com 会返回 TLS 1.2，但我们的客户端声称支持 TLS 1.3——
+版本降级本身就是一个可被 GFW 利用的强指纹。
 
-【缓解方案，无需私钥】
-A. 不替换 server_random，改为预取多份握手（每份 random 各不相同）
-   → 探测每次拿到不同的合法签名，重放检测需要"多次碰到同一份"才能发现
-B. 每 24 小时自动从伪装站点重新取，历史 random 不会被二次观测
-   → 两种手段叠加，实际暴露窗口极小
+修正方案：缓存抓取时使用与真实客户端相同规格的 TLS 1.3 ClientHello，
+apple.com 返回 TLS 1.3：ServerHello + CCS(compat) + 加密记录群（EncryptedExtensions
++ Certificate + CertificateVerify + Finished，均为 0x17 记录）。
+这些加密记录对 GFW 是不透明的，无法读取证书内容，只能看到合法的 TLS 1.3 协商。
 
-参数 POOL_SIZE 控制缓存数量，默认 8。
-REFRESH_INTERVAL_SEC 控制刷新周期，默认 86400（24h）。
+【重放检测缓解】
+POOL_SIZE = 32：碰撞期望探针数从 ~4 提升至 ~8
+REFRESH_INTERVAL_SEC = 3600：每小时换新，缩短历史记录被观测的时间窗口
 """
-
 
 from __future__ import annotations
 
 import asyncio
-
 import os
-
 import random
-
-import struct
-
 import time
 
-
+from .tls_raw import build_client_hello
 from .utils import get_logger
 
 logger = get_logger("handshake_cache")
 
 _TLS_HANDSHAKE     = 0x16
 _TLS_CHANGE_CIPHER = 0x14
-_HS_SERVER_HELLO_DONE = 0x0e
 
-POOL_SIZE            = 8       # 同时持有的握手份数
-REFRESH_INTERVAL_SEC = 86400   # 每 24 小时刷新一次
+POOL_SIZE            = 32    # 同时持有的握手份数（扩大以降低重放碰撞概率）
+REFRESH_INTERVAL_SEC = 3600  # 每小时刷新一次（缩短历史 random 暴露窗口）
 
 
 # ── 底层工具函数 ───────────────────────────────────────────────────────────────
 
 async def _read_tls_record(reader: asyncio.StreamReader) -> tuple[int, bytes]:
     header = await reader.readexactly(5)
-    ct = header[0]
+    ct     = header[0]
     length = int.from_bytes(header[3:5], "big")
-    body = await reader.readexactly(length)
+    body   = await reader.readexactly(length)
     return ct, header + body
-
-
-def _build_tls12_client_hello(server_name: str) -> bytes:
-    """
-    构造只允许 TLS 1.2 的 ClientHello（无 supported_versions 扩展）。
-    TLS 1.2 的 Certificate 明文传输，适合缓存回放。
-    """
-    rnd  = os.urandom(32)
-    sni  = server_name.encode()
-
-    sni_entry = struct.pack("!BH", 0, len(sni)) + sni
-    sni_list  = struct.pack("!H", len(sni_entry)) + sni_entry
-    ext_sni   = struct.pack("!HH", 0x0000, len(sni_list)) + sni_list
-
-    groups      = struct.pack("!HH", 0x001d, 0x0017)
-    groups_list = struct.pack("!H", len(groups)) + groups
-    ext_groups  = struct.pack("!HH", 0x000a, len(groups_list)) + groups_list
-
-    ext_ecpf = struct.pack("!HHBB", 0x000b, 2, 1, 0x00)
-
-    sig_algs = struct.pack("!8H",
-        0x0403, 0x0804, 0x0401,
-        0x0503, 0x0805, 0x0501,
-        0x0806, 0x0601,
-    )
-    sa_list = struct.pack("!H", len(sig_algs)) + sig_algs
-    ext_sa  = struct.pack("!HH", 0x000d, len(sa_list)) + sa_list
-
-    extensions    = ext_sni + ext_groups + ext_ecpf + ext_sa
-    cipher_suites = struct.pack("!7H",
-        0xC02B, 0xC02F, 0xC02C, 0xC030, 0xC013, 0xC014, 0x00FF,
-    )
-
-    hello_body = (
-        b"\x03\x03" + rnd + b"\x00"
-        + struct.pack("!H", len(cipher_suites)) + cipher_suites
-        + b"\x01\x00"
-        + struct.pack("!H", len(extensions)) + extensions
-    )
-    handshake = b"\x01" + struct.pack("!I", len(hello_body))[1:] + hello_body
-    return b"\x16\x03\x01" + struct.pack("!H", len(handshake)) + handshake
 
 
 async def _fetch_one(host: str, port: int) -> list[bytes]:
     """
-    与伪装站点完成一次 TLS 1.2 握手，返回服务端的所有握手记录。
+    与伪装站点完成一次 TLS 1.3 握手，返回服务端的完整握手记录列表。
+
+    使用与真实客户端相同规格的 TLS 1.3-capable ClientHello，
+    保证抓取到的是 TLS 1.3 响应，与客户端发出的 ClientHello 版本一致。
+
     返回空列表表示失败。
     """
     try:
@@ -107,21 +65,32 @@ async def _fetch_one(host: str, port: int) -> list[bytes]:
 
     records: list[bytes] = []
     try:
-        writer.write(_build_tls12_client_hello(host))
+        # 使用与真实客户端相同的 TLS 1.3-capable ClientHello（随机 session_id）
+        hello, _ = build_client_hello(host, os.urandom(32))
+        writer.write(hello)
         await writer.drain()
 
+        saw_ccs   = False
+        enc_count = 0
+
         while True:
-            ct, raw = await asyncio.wait_for(_read_tls_record(reader), timeout=8.0)
+            # CCS 之后切换短超时：服务端会快速发完整个 flight，超时即代表 flight 结束
+            timeout = 2.0 if saw_ccs else 8.0
+            try:
+                ct, raw = await asyncio.wait_for(_read_tls_record(reader), timeout=timeout)
+            except asyncio.TimeoutError:
+                break  # server flight done
+
             records.append(raw)
 
-            if ct == _TLS_HANDSHAKE and len(raw) > 5 and raw[5] == _HS_SERVER_HELLO_DONE:
-                break  # 拿到 ServerHelloDone，握手记录完整
             if ct == _TLS_CHANGE_CIPHER:
-                logger.warning("Server responded TLS 1.3 — certificate is encrypted, cache will be incomplete")
-                break
+                saw_ccs = True
+            elif ct == 0x17 and saw_ccs:
+                # EncryptedExtensions + Certificate + CertificateVerify + Finished
+                enc_count += 1
+                if enc_count >= 6:   # 余量：通常 4 条，最多 6 条
+                    break
 
-    except asyncio.TimeoutError:
-        pass
     except Exception as e:
         logger.debug("_fetch_one record error: %s", e)
         records = []
@@ -136,17 +105,17 @@ async def _fetch_one(host: str, port: int) -> list[bytes]:
 class HandshakeCache:
     """
     维护一个大小为 POOL_SIZE 的握手记录池，每次探测随机取一份回放，
-    并每 24 小时自动从伪装站点刷新所有缓存。
+    并每小时自动从伪装站点刷新所有缓存。
 
-    签名有效性保证：
-      不修改 server_random → ServerKeyExchange 签名全程有效。
-      重放检测概率 = 1/POOL_SIZE（默认 1/8），且每日换新。
+    缓存的是真实 apple.com 的 TLS 1.3 握手记录：
+      ServerHello(0x16) + CCS(0x14) + 加密记录群(0x17...)
+    加密记录对外不透明（包含证书，但 GFW 无法读取）。
     """
 
     def __init__(self, host: str, port: int = 443):
         self._host = host
         self._port = port
-        self._pool: list[list[bytes]] = []   # 每个元素是一份完整的握手记录列表
+        self._pool: list[list[bytes]] = []
         self._last_refresh = 0.0
 
     async def warmup(self) -> bool:
@@ -157,39 +126,35 @@ class HandshakeCache:
         return ok
 
     async def _fill_pool(self) -> bool:
-        logger.info("Fetching %d TLS sessions from %s ...", POOL_SIZE, self._host)
-        pool: list[list[bytes]] = []
-
-        # 并发拉取，加快启动速度
-        tasks = [_fetch_one(self._host, self._port) for _ in range(POOL_SIZE)]
+        logger.info("Fetching %d TLS 1.3 sessions from %s ...", POOL_SIZE, self._host)
+        tasks   = [_fetch_one(self._host, self._port) for _ in range(POOL_SIZE)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for r in results:
-            if isinstance(r, list) and r:
-                pool.append(r)
+        pool: list[list[bytes]] = [
+            r for r in results if isinstance(r, list) and r
+        ]
 
         if not pool:
             logger.error("Failed to fetch any TLS session from %s", self._host)
             return False
 
-        self._pool = pool
+        self._pool         = pool
         self._last_refresh = time.monotonic()
         logger.info("Cached %d/%d TLS sessions from %s", len(pool), POOL_SIZE, self._host)
         return True
 
     async def _auto_refresh_loop(self) -> None:
-        """每 24 小时在后台静默刷新缓存池，不中断正在进行的请求。"""
+        """每小时在后台静默刷新缓存池，不中断正在进行的请求。"""
         while True:
             await asyncio.sleep(REFRESH_INTERVAL_SEC)
             logger.info("Refreshing handshake cache ...")
-            new_pool: list[list[bytes]] = []
-            tasks = [_fetch_one(self._host, self._port) for _ in range(POOL_SIZE)]
+            tasks   = [_fetch_one(self._host, self._port) for _ in range(POOL_SIZE)]
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            for r in results:
-                if isinstance(r, list) and r:
-                    new_pool.append(r)
+            new_pool: list[list[bytes]] = [
+                r for r in results if isinstance(r, list) and r
+            ]
             if new_pool:
-                self._pool = new_pool      # 原子替换，不影响并发读
+                self._pool         = new_pool
                 self._last_refresh = time.monotonic()
                 logger.info("Cache refreshed: %d sessions", len(new_pool))
             else:
@@ -204,9 +169,9 @@ class HandshakeCache:
         writer: asyncio.StreamWriter,
     ) -> bool:
         """
-        向合法客户端发送缓存的服务端握手记录（ServerHello…ServerHelloDone）。
-        不关闭连接，调用方继续读取客户端的 CKE+CCS+Finished 并完成握手模拟。
-        返回 False 表示缓存为空（调用方应关闭连接）。
+        向合法客户端发送缓存的服务端 TLS 1.3 握手记录（ServerHello + CCS + 加密记录群）。
+        不关闭连接，调用方继续读取客户端的 CCS+Finished 并完成握手模拟。
+        返回 False 表示缓存为空。
         """
         if not self._pool:
             return False
@@ -226,7 +191,8 @@ class HandshakeCache:
     ) -> None:
         """
         从池中随机选一份握手记录回放给探测连接。
-        server_random 保持原样 → ServerKeyExchange 签名有效。
+        GFW 探测器收到真实 apple.com 的 TLS 1.3 握手记录，
+        无法在不掌握会话密钥的情况下验证或继续握手。
         """
         if not self._pool:
             client_writer.close()
@@ -238,7 +204,7 @@ class HandshakeCache:
                 client_writer.write(raw)
             await client_writer.drain()
 
-            # 等探测器的 ClientKeyExchange/Finished，之后自然断开
+            # 等探测器尝试继续（发送 CCS+Finished），之后自然断开
             await asyncio.wait_for(client_reader.read(4096), timeout=2.0)
         except Exception:
             pass

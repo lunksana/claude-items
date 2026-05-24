@@ -111,10 +111,12 @@ def build_client_hello(server_name: str, session_id: bytes) -> tuple[bytes, byte
     )
     ext_sigalg = _ext(0x000D, struct.pack("!H", len(sig_algs)) + sig_algs)
 
-    # key_share（x25519 临时密钥，随机生成——不会真正完成 TLS 握手）
-    eph_pub = os.urandom(32)
-    ks_entry = struct.pack("!HH", 0x001D, 32) + eph_pub
-    ext_keyshare = _ext(0x0033, struct.pack("!H", len(ks_entry)) + ks_entry)
+    # key_share（GREASE entry + x25519，与 Chrome 一致）
+    eph_pub        = os.urandom(32)
+    grease_ks      = struct.pack("!HH", grease_val, 1) + b"\x00"   # GREASE group, 1-byte key
+    x25519_ks      = struct.pack("!HH", 0x001D, 32) + eph_pub
+    ks_list        = grease_ks + x25519_ks
+    ext_keyshare   = _ext(0x0033, struct.pack("!H", len(ks_list)) + ks_list)
 
     # psk_key_exchange_modes（psk_dhe_ke）
     ext_psk_modes = _ext(0x002D, b"\x01\x01")
@@ -160,21 +162,18 @@ def build_client_hello(server_name: str, session_id: bytes) -> tuple[bytes, byte
 
 def build_fake_client_tail() -> bytes:
     """
-    构造客户端在收到 ServerHelloDone 后应发送的假记录：
-      ClientKeyExchange + ChangeCipherSpec + Finished（Encrypted Handshake Message）
+    构造 TLS 1.3 客户端在收到服务端 flight 后应发送的假记录：
+      ChangeCipherSpec（compat middlebox record）+ Finished（Encrypted Application Data）
 
-    这三条记录使握手在 GFW 旁观者眼中看起来完整，服务端读取后丢弃。
+    TLS 1.3 无 ClientKeyExchange，密钥协商通过 ClientHello 中的 key_share 完成。
+    服务端读取这两条记录后丢弃，双方直接进入加密应用数据模式。
     """
-    # ClientKeyExchange：x25519 临时公钥（32 字节）
-    eph_pub  = os.urandom(32)
-    cke_body = b"\x10\x00\x00\x21\x20" + eph_pub  # HS type + 3-byte len(33) + 1-byte key len + key
-    cke      = b"\x16\x03\x03" + struct.pack("!H", len(cke_body)) + cke_body
-
-    # ChangeCipherSpec
+    # ChangeCipherSpec（TLS 1.3 compat record，Chrome 发送）
     ccs = b"\x14\x03\x03\x00\x01\x01"
 
-    # Encrypted Handshake Message（fake Finished）
-    finished_body = os.urandom(40)
-    finished = b"\x16\x03\x03" + struct.pack("!H", len(finished_body)) + finished_body
+    # Finished：TLS 1.3 中为 type=0x17（Encrypted Application Data）
+    # 大小约 52 字节（4字节 HMAC header + 32字节 verify_data + 16字节 AEAD tag）
+    finished_body = os.urandom(52)
+    finished = b"\x17\x03\x03" + struct.pack("!H", len(finished_body)) + finished_body
 
-    return cke + ccs + finished
+    return ccs + finished
