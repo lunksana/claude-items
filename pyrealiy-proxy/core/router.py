@@ -27,6 +27,7 @@ GEOSITE / GEOIP 引用示例：
 from __future__ import annotations
 
 import ipaddress
+import re
 import struct
 
 from .bloom import BloomFilter
@@ -39,6 +40,17 @@ DIRECT = "DIRECT"
 REJECT = "REJECT"
 
 _ACTIONS = {PROXY, DIRECT, REJECT}
+
+# 从正则 pattern 提取最长固定字面量，用于跳过明显不匹配的主机名
+# 策略：反转义 \X → X，去掉其余特殊字符，取最长含点的片段
+_UNESCAPE = re.compile(r'\\(.)')
+_NON_LIT  = re.compile(r'[^a-zA-Z0-9.-]')
+
+def _extract_literal(pattern: str) -> str:
+    s = _UNESCAPE.sub(lambda m: m.group(1), pattern)
+    s = _NON_LIT.sub(' ', s)
+    parts = [p for p in s.split() if '.' in p and len(p) >= 4]
+    return max(parts, key=len) if parts else ''
 
 # geosite Domain.Type
 _GEO_KEYWORD = 0
@@ -279,6 +291,11 @@ class Router:
         self._exact:   dict[str, str] = {}
         self._suffix:  dict[str, str] = {}
         self._keyword: list[tuple[str, str]] = []
+        # 有可提取字面量的正则：[(literal, [(pattern, action), ...]), ...]
+        # match() 先用 `literal in h`（C 层 BM 算法）预筛，命中才进正则引擎
+        self._regex_groups:   list[tuple[str, list[tuple[re.Pattern, str]]]] = []
+        # 无法提取字面量的正则，始终跑引擎
+        self._regex_fallback: list[tuple[re.Pattern, str]] = []
         self._cidr:    list[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, str]] = []
         self._geoip_table = _GeoIPTable()
         self._suffix_bf: BloomFilter | None = None
@@ -291,6 +308,22 @@ class Router:
 
     def add_keyword(self, keyword: str, action: str) -> None:
         self._keyword.append((keyword.lower(), action.upper()))
+
+    def add_regex(self, pattern: str, action: str) -> None:
+        try:
+            compiled = re.compile(pattern, re.IGNORECASE)
+        except re.error as e:
+            logger.warning("Invalid regex pattern '%s': %s", pattern, e)
+            return
+        lit = _extract_literal(pattern)
+        if lit:
+            for g_lit, g_list in self._regex_groups:
+                if g_lit == lit:
+                    g_list.append((compiled, action.upper()))
+                    return
+            self._regex_groups.append((lit, [(compiled, action.upper())]))
+        else:
+            self._regex_fallback.append((compiled, action.upper()))
 
     def add_cidr(self, cidr: str, action: str) -> None:
         try:
@@ -315,10 +348,12 @@ class Router:
         for domain in self._suffix:
             self._suffix_bf.add(domain)
         self._geoip_table.build()
+        n_regex = (sum(len(g[1]) for g in self._regex_groups)
+                   + len(self._regex_fallback))
         logger.info(
-            "Router built: %d exact / %d suffix / %d keyword / %d cidr | default=%s",
+            "Router built: %d exact / %d suffix / %d keyword / %d regex / %d cidr | default=%s",
             len(self._exact), len(self._suffix),
-            len(self._keyword), len(self._cidr),
+            len(self._keyword), n_regex, len(self._cidr),
             self._default,
         )
 
@@ -355,6 +390,16 @@ class Router:
         # 关键词（线性）
         for kw, action in self._keyword:
             if kw in h:
+                return action
+
+        # 正则：字面量预筛（C 层 `in`）→ 命中才进正则引擎
+        for lit, patterns in self._regex_groups:
+            if lit in h:
+                for pat, action in patterns:
+                    if pat.search(h):
+                        return action
+        for pat, action in self._regex_fallback:
+            if pat.search(h):
                 return action
 
         return self._default
@@ -433,6 +478,9 @@ def build_router(
 
         elif rule_type == "DOMAIN-KEYWORD":
             router.add_keyword(value, action)
+
+        elif rule_type == "DOMAIN-REGEX":
+            router.add_regex(value, action)
 
         elif rule_type == "IP-CIDR":
             router.add_cidr(value, action)

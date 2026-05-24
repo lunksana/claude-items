@@ -7,7 +7,7 @@
 - **加密信道**：ChaCha20-Poly1305 + HKDF 会话密钥，每条连接密钥独立
 - **TCP Brutal**：可选的固定速率拥塞控制，在高丢包跨境链路上维持稳定吞吐
 - **连接池**：客户端预建 N 条已认证隧道，SOCKS5 请求到来时零等待取用
-- **域名 + IP 分流**：规则内嵌在配置文件中，支持精确/后缀/关键词/CIDR/GeoSite/GeoIP，后缀匹配使用 Bloom Filter 预过滤
+- **域名 + IP 分流**：规则内嵌在配置文件中，支持精确/后缀/关键词/正则/CIDR/GeoSite/GeoIP，正则匹配使用字面量预筛跳过无关主机名
 
 ---
 
@@ -34,7 +34,13 @@ pip install cryptography uvloop   # uvloop 仅 Linux/macOS 有效
 python setup.py
 ```
 
-向导会询问部署角色（服务端 / 客户端），客户端配置时还会引导完成分流规则选择（列出常用 GeoSite/GeoIP tag 供逐项勾选），最终写出完整的配置文件。
+向导依次完成：
+
+1. TCP Brutal 检测与安装
+2. 服务端 / 客户端参数配置
+3. 分流规则选择（列出常用 GeoSite/GeoIP tag 供逐项勾选）
+4. TProxy 透明代理配置（可选，生成 iptables/nftables 脚本）
+5. 系统服务安装（可选，支持 systemd / SysV init / OpenRC）
 
 ---
 
@@ -106,6 +112,11 @@ python server.py /path/to/config.json   # 指定配置文件
     "rules": [
         "GEOSITE,loyalsoldier:category-ads-all,REJECT",
 
+        "DOMAIN,ads.example.com,REJECT",
+        "DOMAIN-SUFFIX,tracking.io,REJECT",
+        "DOMAIN-KEYWORD,adservice,REJECT",
+        "DOMAIN-REGEX,^(.+\\.)?doubleclick\\.net$,REJECT",
+
         "GEOSITE,loyalsoldier:private,DIRECT",
         "GEOIP,loyalsoldier:private,DIRECT",
 
@@ -134,6 +145,7 @@ python server.py /path/to/config.json   # 指定配置文件
 | `camouflage_host` | 与服务端一致 |
 | `brutal_rate_bps` | 单连接速率，0 禁用；建议 5–10 Mbps |
 | `brutal_pool_size` | 预建连接数，总吞吐 ≈ `pool_size × rate_bps` |
+| `tproxy_port` | TProxy 监听端口，0 禁用；需要 root / CAP_NET_ADMIN |
 | `geosite_dir` | GeoSite/GeoIP 缓存目录，默认 `.geosite` |
 | `geosite_update_days` | 全局默认刷新周期（天），默认 7 |
 | `geosite_sources` | geosite 源列表，见下方说明 |
@@ -261,12 +273,13 @@ echo 1 > /proc/sys/net/ipv4/ip_forward
 
 | 规则类型 | 示例 | 说明 |
 |---|---|---|
-| `DOMAIN` | `DOMAIN,example.com,DIRECT` | 精确域名匹配 |
-| `DOMAIN-SUFFIX` | `DOMAIN-SUFFIX,google.com,PROXY` | 后缀匹配（含本身及所有子域名） |
-| `DOMAIN-KEYWORD` | `DOMAIN-KEYWORD,youtube,PROXY` | 域名中含关键词 |
-| `IP-CIDR` | `IP-CIDR,192.168.0.0/16,DIRECT` | IPv4 CIDR |
+| `DOMAIN` | `DOMAIN,example.com,DIRECT` | 精确域名匹配，O(1) 哈希查找 |
+| `DOMAIN-SUFFIX` | `DOMAIN-SUFFIX,google.com,PROXY` | 后缀匹配（含本身及所有子域名），Bloom Filter 预过滤 |
+| `DOMAIN-KEYWORD` | `DOMAIN-KEYWORD,youtube,PROXY` | 域名中含关键词，线性扫描 |
+| `DOMAIN-REGEX` | `DOMAIN-REGEX,^(.+\.)?google\.com$,PROXY` | 正则匹配（Python `re`，`search` 模式），字面量预筛 |
+| `IP-CIDR` | `IP-CIDR,192.168.0.0/16,DIRECT` | IPv4 CIDR，先于域名规则匹配 |
 | `GEOSITE` | `GEOSITE,[source:]tag,ACTION` | geosite.dat 中的 tag，可指定源 |
-| `GEOIP` | `GEOIP,[source:]code,ACTION` | geoip.dat 中的国家/地区代码，可指定源 |
+| `GEOIP` | `GEOIP,[source:]code,ACTION` | geoip.dat 中的国家/地区代码，二分查找 |
 | `FINAL` | `FINAL,PROXY` | 默认动作，放最后 |
 
 **动作：**
@@ -276,6 +289,23 @@ echo 1 > /proc/sys/net/ipv4/ip_forward
 | `PROXY` | 走加密隧道 |
 | `DIRECT` | 本地直连，不经过代理 |
 | `REJECT` | 拒绝连接（适用于广告、追踪域名屏蔽） |
+
+### 匹配顺序与性能
+
+每次连接按以下顺序匹配，命中即返回，后续规则不再执行：
+
+```
+IP 地址  →  IP-CIDR（线性）→  GEOIP（二分）
+域名     →  DOMAIN（O(1)）→  DOMAIN-SUFFIX（BF + O(1)）
+         →  DOMAIN-KEYWORD（线性）→  DOMAIN-REGEX（字面量预筛 + 正则引擎）
+         →  FINAL（默认动作）
+```
+
+**DOMAIN-SUFFIX** 使用 Bloom Filter 作前置过滤：加载 geosite 大型 tag（如 `cn`）后后缀表有数万条目，BF 是紧凑 bitset 常驻 CPU 缓存，对 miss 路径可避免大 hash table 的 cache miss。
+
+**DOMAIN-REGEX** 使用字面量预筛：启动时从每条正则中提取固定子串（如 `^(.+\.)?openai\.com$` 提取 `openai.com`），匹配时先用 C 层 `in` 操作检查该子串是否出现在主机名中，不包含则跳过正则引擎，包含才运行完整正则。对于域名类正则规则，绝大多数主机名在预筛阶段即可排除。
+
+> **建议**：尽量让正则 pattern 包含清晰的固定子串（如完整域名片段），预筛效果更好。纯通配符写法（如 `.*`）无法提取字面量，每次都要走正则引擎。
 
 ### GeoSite / GeoIP 多源配置
 
@@ -364,18 +394,93 @@ cd tcp-brutal && make && insmod tcp_brutal.ko
 
 ---
 
+## 系统服务
+
+运行 `python setup.py` 时向导会询问是否安装为系统服务，自动检测 init 系统并生成对应的启动脚本（含 `ulimit -n 65536`）。
+
+### systemd
+
+适用于：Debian、Ubuntu、CentOS 8+、Fedora、Arch 等主流发行版。
+
+若非 root 运行向导，脚本会写到当前目录（`pyrealiy-server.service`），手动安装：
+
+```bash
+sudo cp pyrealiy-server.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable pyrealiy-server   # 设置开机自启
+sudo systemctl start  pyrealiy-server   # 立即启动
+```
+
+日常管理：
+
+```bash
+systemctl status  pyrealiy-server
+systemctl restart pyrealiy-server
+journalctl -u pyrealiy-server -f        # 实时日志
+```
+
+### SysV init
+
+适用于：Debian 8 以下、CentOS 6、旧版 OpenWrt 等。
+
+```bash
+sudo cp pyrealiy-server.init /etc/init.d/pyrealiy-server
+sudo chmod +x /etc/init.d/pyrealiy-server
+sudo update-rc.d pyrealiy-server defaults   # Debian/Ubuntu
+# 或
+sudo chkconfig --add pyrealiy-server        # RHEL/CentOS
+sudo service pyrealiy-server start
+```
+
+日常管理：
+
+```bash
+service pyrealiy-server status
+service pyrealiy-server restart
+tail -f /var/log/pyrealiy-server.log        # 实时日志
+```
+
+### OpenRC（Alpine Linux）
+
+Alpine 默认使用 OpenRC，向导会自动识别并生成 `pyrealiy-server.openrc`：
+
+```bash
+sudo cp pyrealiy-server.openrc /etc/init.d/pyrealiy-server
+sudo chmod +x /etc/init.d/pyrealiy-server
+sudo rc-update add pyrealiy-server default  # 加入 default runlevel
+sudo rc-service pyrealiy-server start
+```
+
+日常管理：
+
+```bash
+rc-service pyrealiy-server status
+rc-service pyrealiy-server restart
+tail -f /var/log/pyrealiy-server.log
+```
+
+### ulimit 处理方式
+
+| init 系统 | 方式 | 说明 |
+|---|---|---|
+| systemd | `LimitNOFILE=65536`（`[Service]` 段） | systemd 原生方式，比 shell `ulimit` 更可靠 |
+| SysV init | `ulimit -n 65536`（`start()` 函数内） | 在 `nohup` 前执行，子进程继承 |
+| OpenRC | `start_pre()` 钩子内 `ulimit -n 65536` | fork 前执行，子进程继承 |
+
+---
+
 ## 项目结构
 
 ```
 pyrealiy-proxy/
 ├── server.py              服务端入口
 ├── client.py              客户端入口（SOCKS5 + 分流 + 连接池）
-├── setup.py               交互式部署向导（含 GeoSite/GeoIP tag 选择）
+├── setup.py               交互式部署向导（规则选择 / TProxy / 系统服务安装）
 ├── config_server.json     服务端配置示例
 ├── config_client.json     客户端配置示例
 └── core/
     ├── auth.py            Poly1305 认证包
-    ├── bloom.py           Bloom Filter（用于域名后缀的快速成员判定）
+    ├── bloom.py           Bloom Filter（域名后缀预过滤，Kirsch-Mitzenmacher 双哈希）
     ├── brutal.py          TCP Brutal socket 选项封装
     ├── camouflage.py      服务端 TLS 伪装决策（认证 vs 回放探测）
     ├── conn_pool.py       客户端预建连接池（BrutalPool）

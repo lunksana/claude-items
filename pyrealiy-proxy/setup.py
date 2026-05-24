@@ -650,6 +650,292 @@ def configure_client(brutal_available: bool) -> None:
     OK(f"客户端配置已写入 {path}")
 
 
+# ── 系统服务安装 ──────────────────────────────────────────────────────────────
+
+def _detect_init_system() -> str:
+    """检测当前 init 系统，返回 'systemd' / 'openrc' / 'sysvinit'"""
+    try:
+        with open("/proc/1/comm") as f:
+            if "systemd" in f.read():
+                return "systemd"
+    except OSError:
+        pass
+    # Alpine Linux / OpenRC
+    if os.path.exists("/sbin/openrc-run") or os.path.exists("/etc/alpine-release"):
+        return "openrc"
+    try:
+        r = subprocess.run(["systemctl", "--version"], capture_output=True)
+        if r.returncode == 0:
+            return "systemd"
+    except FileNotFoundError:
+        pass
+    return "sysvinit"
+
+
+def _systemd_unit(name: str, desc: str, python: str,
+                  script: str, config: str, work_dir: str) -> str:
+    # systemd 用 LimitNOFILE 设置文件描述符上限，等价于 ulimit -n
+    return (
+        f"[Unit]\n"
+        f"Description={desc}\n"
+        f"After=network-online.target\n"
+        f"Wants=network-online.target\n"
+        f"\n"
+        f"[Service]\n"
+        f"Type=simple\n"
+        f"WorkingDirectory={work_dir}\n"
+        f"ExecStart={python} {script} {config}\n"
+        f"Restart=on-failure\n"
+        f"RestartSec=5\n"
+        f"LimitNOFILE=65536\n"
+        f"StandardOutput=journal\n"
+        f"StandardError=journal\n"
+        f"\n"
+        f"[Install]\n"
+        f"WantedBy=multi-user.target\n"
+    )
+
+
+def _sysvinit_script(name: str, desc: str, python: str,
+                     script: str, config: str, work_dir: str) -> str:
+    return (
+        f"#!/bin/bash\n"
+        f"### BEGIN INIT INFO\n"
+        f"# Provides:          {name}\n"
+        f"# Required-Start:    $network $remote_fs $syslog\n"
+        f"# Required-Stop:     $network $remote_fs $syslog\n"
+        f"# Default-Start:     2 3 4 5\n"
+        f"# Default-Stop:      0 1 6\n"
+        f"# Short-Description: {desc}\n"
+        f"### END INIT INFO\n"
+        f"\n"
+        f'NAME="{name}"\n'
+        f'PYTHON="{python}"\n'
+        f'SCRIPT="{script}"\n'
+        f'CONFIG="{config}"\n'
+        f'WORKDIR="{work_dir}"\n'
+        f'PIDFILE="/var/run/${{NAME}}.pid"\n'
+        f'LOGFILE="/var/log/${{NAME}}.log"\n'
+        f"\n"
+        f"start() {{\n"
+        f'    echo -n "Starting ${{NAME}}: "\n'
+        f'    if [ -f "$PIDFILE" ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; then\n'
+        f'        echo "already running"; return 0\n'
+        f"    fi\n"
+        f"    ulimit -n 65536\n"
+        f'    cd "$WORKDIR"\n'
+        f'    nohup "$PYTHON" "$SCRIPT" "$CONFIG" >> "$LOGFILE" 2>&1 &\n'
+        f'    echo $! > "$PIDFILE"\n'
+        f'    echo "OK"\n'
+        f"}}\n"
+        f"\n"
+        f"stop() {{\n"
+        f'    echo -n "Stopping ${{NAME}}: "\n'
+        f'    if [ ! -f "$PIDFILE" ]; then echo "not running"; return 0; fi\n'
+        f'    kill "$(cat $PIDFILE)" 2>/dev/null && rm -f "$PIDFILE"\n'
+        f'    echo "OK"\n'
+        f"}}\n"
+        f"\n"
+        f"status() {{\n"
+        f'    if [ -f "$PIDFILE" ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; then\n'
+        f'        echo "${{NAME}} is running (pid $(cat $PIDFILE))"\n'
+        f"    else\n"
+        f'        echo "${{NAME}} is not running"\n'
+        f'        [ -f "$PIDFILE" ] && rm -f "$PIDFILE"\n'
+        f"    fi\n"
+        f"}}\n"
+        f"\n"
+        f'case "$1" in\n'
+        f"    start)   start   ;;\n"
+        f"    stop)    stop    ;;\n"
+        f"    restart) stop; sleep 1; start ;;\n"
+        f"    status)  status  ;;\n"
+        f"    *)\n"
+        f'        echo "Usage: $0 {{start|stop|restart|status}}"\n'
+        f"        exit 1 ;;\n"
+        f"esac\n"
+        f"exit 0\n"
+    )
+
+
+def _openrc_script(name: str, desc: str, python: str,
+                   script: str, config: str, work_dir: str) -> str:
+    # openrc-run 原生支持 command_background、pidfile、output_log
+    # start_pre() 在进程启动前执行，ulimit 在此设置可被子进程继承
+    return (
+        f"#!/sbin/openrc-run\n"
+        f"\n"
+        f'name="{name}"\n'
+        f'description="{desc}"\n'
+        f'command="{python}"\n'
+        f'command_args="{script} {config}"\n'
+        f"command_background=true\n"
+        f'directory="{work_dir}"\n'
+        f'pidfile="/var/run/${{RC_SVCNAME}}.pid"\n'
+        f'output_log="/var/log/${{RC_SVCNAME}}.log"\n'
+        f'error_log="/var/log/${{RC_SVCNAME}}.log"\n'
+        f"\n"
+        f"depend() {{\n"
+        f"    need net\n"
+        f"    after firewall\n"
+        f"}}\n"
+        f"\n"
+        f"start_pre() {{\n"
+        f"    ulimit -n 65536\n"
+        f"}}\n"
+    )
+
+
+def _install_openrc(name: str, dest: str, content: str) -> None:
+    if check_root():
+        try:
+            with open(dest, "w") as f:
+                f.write(content)
+            os.chmod(dest, 0o755)
+            subprocess.run(["rc-update", "add", name, "default"], check=True, capture_output=True)
+            OK(f"服务已安装：{dest}")
+            OK(f"{name} 已加入 default runlevel（开机自启）")
+            INFO(f"启动服务：rc-service {name} start")
+            INFO(f"查看状态：rc-service {name} status")
+            INFO(f"实时日志：tail -f /var/log/{name}.log")
+            print()
+            if ask_yn("是否立即启动服务？"):
+                subprocess.run(["rc-service", name, "start"])
+        except Exception as e:
+            ERR(f"安装失败：{e}")
+    else:
+        local = f"{name}.openrc"
+        with open(local, "w") as f:
+            f.write(content)
+        os.chmod(local, 0o755)
+        OK(f"OpenRC 脚本已写到当前目录：{local}")
+        INFO("需要 root 权限，请手动执行：")
+        for cmd in [
+            f"sudo cp {local} {dest}",
+            f"sudo chmod +x {dest}",
+            f"sudo rc-update add {name} default",
+            f"sudo rc-service {name} start",
+        ]:
+            print(f"    {_c('36', cmd)}")
+
+
+def _install_systemd(name: str, dest: str, content: str) -> None:
+    if check_root():
+        try:
+            with open(dest, "w") as f:
+                f.write(content)
+            subprocess.run(["systemctl", "daemon-reload"], check=True, capture_output=True)
+            subprocess.run(["systemctl", "enable", name],  check=True, capture_output=True)
+            OK(f"服务已安装：{dest}")
+            OK(f"{name} 已设置为开机自启")
+            INFO(f"启动服务：systemctl start {name}")
+            INFO(f"查看状态：systemctl status {name}")
+            INFO(f"实时日志：journalctl -u {name} -f")
+            print()
+            if ask_yn("是否立即启动服务？"):
+                subprocess.run(["systemctl", "start", name])
+        except Exception as e:
+            ERR(f"安装失败：{e}")
+    else:
+        local = f"{name}.service"
+        with open(local, "w") as f:
+            f.write(content)
+        OK(f"service 文件已写到当前目录：{local}")
+        INFO("需要 root 权限，请手动执行：")
+        for cmd in [
+            f"sudo cp {local} {dest}",
+            "sudo systemctl daemon-reload",
+            f"sudo systemctl enable {name}",
+            f"sudo systemctl start {name}",
+        ]:
+            print(f"    {_c('36', cmd)}")
+
+
+def _install_sysvinit(name: str, dest: str, content: str) -> None:
+    if check_root():
+        try:
+            with open(dest, "w") as f:
+                f.write(content)
+            os.chmod(dest, 0o755)
+            # 尝试 update-rc.d（Debian/Ubuntu）或 chkconfig（RHEL/CentOS）
+            enabled = False
+            for enabler in [["update-rc.d", name, "defaults"],
+                            ["chkconfig", "--add", name]]:
+                try:
+                    r = subprocess.run(enabler, capture_output=True)
+                    if r.returncode == 0:
+                        OK(f"已通过 {enabler[0]} 注册开机自启")
+                        enabled = True
+                        break
+                except FileNotFoundError:
+                    pass
+            if not enabled:
+                WARN("未找到 update-rc.d / chkconfig，请手动配置开机自启")
+            OK(f"init 脚本已安装：{dest}")
+            INFO(f"启动服务：service {name} start")
+            INFO(f"查看状态：service {name} status")
+            INFO(f"实时日志：tail -f /var/log/{name}.log")
+            print()
+            if ask_yn("是否立即启动服务？"):
+                subprocess.run(["service", name, "start"])
+        except Exception as e:
+            ERR(f"安装失败：{e}")
+    else:
+        local = f"{name}.init"
+        with open(local, "w") as f:
+            f.write(content)
+        os.chmod(local, 0o755)
+        OK(f"init 脚本已写到当前目录：{local}")
+        INFO("需要 root 权限，请手动执行：")
+        for cmd, comment in [
+            (f"sudo cp {local} {dest}", ""),
+            (f"sudo chmod +x {dest}", ""),
+            (f"sudo update-rc.d {name} defaults", "Debian/Ubuntu"),
+            (f"sudo chkconfig --add {name}", "RHEL/CentOS"),
+            (f"sudo service {name} start", ""),
+        ]:
+            suffix = f"  # {comment}" if comment else ""
+            print(f"    {_c('36', cmd)}{_c('90', suffix)}")
+
+
+def install_service(role: str, config_path: str) -> None:
+    """引导用户将服务端或客户端安装为系统服务。"""
+    if not check_linux():
+        return
+    print()
+    if not ask_yn("是否安装为系统服务（开机自动启动）？", default=False):
+        return
+
+    work_dir   = os.path.abspath(".")
+    python     = sys.executable
+    script     = os.path.join(work_dir, f"{role}.py")
+    config_abs = os.path.abspath(config_path)
+    name       = f"pyrealiy-{role}"
+    desc       = "PyReality 代理服务端" if role == "server" else "PyReality 代理客户端"
+
+    detected   = _detect_init_system()
+    def_choice = {"systemd": "1", "openrc": "3"}.get(detected, "2")
+    INFO(f"检测到 init 系统：{detected}")
+    choice = ask(
+        "安装方式：[1] systemd  [2] SysV init（/etc/init.d）  [3] OpenRC（Alpine）",
+        def_choice,
+    )
+    choice = choice.strip()
+
+    if choice == "3":
+        content = _openrc_script(name, desc, python, script, config_abs, work_dir)
+        dest    = f"/etc/init.d/{name}"
+        _install_openrc(name, dest, content)
+    elif choice == "2":
+        content = _sysvinit_script(name, desc, python, script, config_abs, work_dir)
+        dest    = f"/etc/init.d/{name}"
+        _install_sysvinit(name, dest, content)
+    else:
+        content = _systemd_unit(name, desc, python, script, config_abs, work_dir)
+        dest    = f"/etc/systemd/system/{name}.service"
+        _install_systemd(name, dest, content)
+
+
 # ── 主流程 ────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -662,10 +948,12 @@ def main() -> None:
 
     if role == "2":
         configure_client(brutal_ok)
+        install_service("client", "config_client.json")
         TITLE("启动命令")
         print("  python3 client.py config_client.json")
     else:
         configure_server(brutal_ok)
+        install_service("server", "config_server.json")
         TITLE("启动命令")
         print("  python3 server.py config_server.json")
 

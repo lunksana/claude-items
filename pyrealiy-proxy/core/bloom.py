@@ -10,14 +10,30 @@ Bloom Filter —— 用于域名集合的快速成员判定预过滤
   BF 说"可能在"→ 再去真实 dict 确认。
 
 实现：
-  使用 Kirsch-Mitzenmacher 双哈希技巧，从 blake2b 一次计算中派生 k 个哈希值，
-  避免重复调用哈希函数。blake2b 在 Python 标准库中已有 C 实现，速度远快于 SHA256。
+  使用 Kirsch-Mitzenmacher 双哈希技巧派生 k 个位置。
+  哈希采用 Python 内置 hash()（C 层，字符串对象缓存结果）+ finalizer 混合出
+  第二个独立值，比 blake2b 快且无外部依赖。
+  hash() 受 PYTHONHASHSEED 影响，但 BF 在同一进程内构建并查询，完全一致。
 """
 
 from __future__ import annotations
 
-import hashlib
 import math
+
+# 64-bit 掩码
+_M64 = 0xFFFFFFFFFFFFFFFF
+
+
+def _hash_pair(key: str) -> tuple[int, int]:
+    """从 Python 内置 hash 派生两个独立的 64-bit 值（Murmur finalizer 混合）"""
+    h = hash(key) & _M64
+    # Wang/Murmur finalizer：将 h 扩散为 h2，保证 h1 ≠ h2 且分布均匀
+    h2 = h ^ (h >> 30)
+    h2 = (h2 * 0xBF58476D1CE4E5B9) & _M64
+    h2 = h2 ^ (h2 >> 27)
+    h2 = (h2 * 0x94D049BB133111EB) & _M64
+    h2 = (h2 ^ (h2 >> 31)) | 1  # 保证奇数，避免 Kirsch-Mitzenmacher 退化
+    return h, h2
 
 
 class BloomFilter:
@@ -41,9 +57,7 @@ class BloomFilter:
 
     def _positions(self, key: str):
         """Kirsch-Mitzenmacher: g_i(x) = h1(x) + i·h2(x) mod m"""
-        digest = hashlib.blake2b(key.encode(), digest_size=16).digest()
-        h1 = int.from_bytes(digest[:8],  "little")
-        h2 = int.from_bytes(digest[8:],  "little") | 1  # 保证 h2 为奇数，避免退化
+        h1, h2 = _hash_pair(key)
         for i in range(self._k):
             yield (h1 + i * h2) % self._m
 
