@@ -32,6 +32,10 @@ from core.tunnel import EncryptedTunnel
 
 from core.utils import get_logger, unpack_address
 
+from core.stats import StatsStore
+
+from core.admin import start_admin
+
 from core import brutal
 
 logger = get_logger("server")
@@ -43,8 +47,17 @@ async def handle_client(
     cfg: dict,
     cache: HandshakeCache,
     replay_cache: TokenReplayCache,
+    store: StatsStore,
 ) -> None:
-    peer = client_writer.get_extra_info("peername")
+    peer      = client_writer.get_extra_info("peername")
+    client_ip = peer[0] if peer else "unknown"
+
+    # 封锁 IP 直接断开（在握手前，避免浪费资源）
+    if store.is_blocked(client_ip):
+        logger.info("Blocked %s", client_ip)
+        client_writer.close()
+        return
+
     logger.info("New connection from %s", peer)
 
     # 阶段1：读 ClientHello，认证决策 + 握手模拟（含重放检测）
@@ -78,7 +91,8 @@ async def handle_client(
         return
 
     target_host, target_port, _ = unpack_address(addr_packet)
-    logger.info("Proxy %s → %s:%d", peer, target_host, target_port)
+    conn = store.register(client_ip, target_host, target_port, client_writer)
+    logger.info("Proxy %s → %s:%d [id=%d]", peer, target_host, target_port, conn.id)
 
     # 阶段4：连接目标，双向中继
     try:
@@ -86,12 +100,14 @@ async def handle_client(
     except Exception as e:
         logger.error("Cannot connect to %s:%d: %s", target_host, target_port, e)
         client_writer.close()
+        store.unregister(conn)
         return
 
     async def tunnel_to_target():
         try:
             while True:
                 data = await tunnel.recv()
+                conn.bytes_up += len(data)
                 target_writer.write(data)
                 if target_writer.transport.get_write_buffer_size() > 65536:
                     await target_writer.drain()
@@ -109,6 +125,7 @@ async def handle_client(
                 data = await target_reader.read(65536)
                 if not data:
                     break
+                conn.bytes_down += len(data)
                 await tunnel.send(data)
         except Exception:
             pass
@@ -130,8 +147,9 @@ async def handle_client(
                     await t
                 except asyncio.CancelledError:
                     pass
+        store.unregister(conn)
 
-    logger.info("Connection from %s closed", peer)
+    logger.info("Connection from %s closed [id=%d]", peer, conn.id)
 
 
 def _raise_fd_limit() -> None:
@@ -154,11 +172,12 @@ async def main(config_path: str) -> None:
     # 服务启动时预热握手缓存（只需一次网络请求）
     cache        = HandshakeCache(cfg["camouflage_host"], cfg.get("camouflage_port", 443))
     replay_cache = TokenReplayCache()   # 防重放 nonce 缓存，全局单例
+    store        = StatsStore()
     if not await cache.warmup():
         logger.warning("Handshake cache warmup failed — probe connections will be dropped silently")
 
     server = await asyncio.start_server(
-        lambda r, w: handle_client(r, w, cfg, cache, replay_cache),
+        lambda r, w: handle_client(r, w, cfg, cache, replay_cache, store),
         cfg["listen_host"],
         cfg["listen_port"],
         limit=262144,
@@ -179,8 +198,20 @@ async def main(config_path: str) -> None:
         cfg["camouflage_host"],
         cache.ready,
     )
-    async with server:
-        await server.serve_forever()
+
+    admin_port = cfg.get("admin_port", 0)
+    admin_server = None
+    if admin_port:
+        admin_host  = cfg.get("admin_host", "127.0.0.1")
+        admin_token = cfg.get("admin_token", "")
+        admin_server = await start_admin(store, admin_host, admin_port, admin_token)
+        token_hint = f"?token={admin_token}" if admin_token else ""
+        logger.info("Admin panel: http://%s:%d/%s", admin_host, admin_port, token_hint)
+
+    servers = [server] + ([admin_server] if admin_server else [])
+    async with asyncio.TaskGroup() as tg:
+        for s in servers:
+            tg.create_task(s.serve_forever())
 
 
 if __name__ == "__main__":

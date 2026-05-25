@@ -472,18 +472,23 @@ def build_router(
 
         if rule_type == "DOMAIN":
             router.add_exact(value, action)
+            logger.info("Rule: DOMAIN          %-40s → %s", value, action)
 
         elif rule_type == "DOMAIN-SUFFIX":
             router.add_suffix(value, action)
+            logger.info("Rule: DOMAIN-SUFFIX   %-40s → %s", value, action)
 
         elif rule_type == "DOMAIN-KEYWORD":
             router.add_keyword(value, action)
+            logger.info("Rule: DOMAIN-KEYWORD  %-40s → %s", value, action)
 
         elif rule_type == "DOMAIN-REGEX":
             router.add_regex(value, action)
+            logger.info("Rule: DOMAIN-REGEX    %-40s → %s", value, action)
 
         elif rule_type == "IP-CIDR":
             router.add_cidr(value, action)
+            logger.info("Rule: IP-CIDR         %-40s → %s", value, action)
 
         elif rule_type == "GEOSITE":
             src, tag = (value.split(":", 1) if ":" in value
