@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -26,8 +26,8 @@ class ConnInfo:
     def duration(self) -> float:
         return time.monotonic() - self.started
 
-    def as_dict(self) -> dict:
-        return {
+    def as_dict(self, closed_at: float | None = None) -> dict:
+        d = {
             "id":         self.id,
             "client_ip":  self.client_ip,
             "target":     f"{self.target_host}:{self.target_port}",
@@ -35,12 +35,16 @@ class ConnInfo:
             "bytes_up":   self.bytes_up,
             "bytes_down": self.bytes_down,
         }
+        if closed_at is not None:
+            d["closed_at"] = closed_at
+        return d
 
 
 class StatsStore:
     def __init__(self) -> None:
         self._counter    = 0
         self.active:       dict[int, ConnInfo]         = {}
+        self.recent:       deque[dict]                 = deque(maxlen=50)
         self.domain_conns: defaultdict[str, int]       = defaultdict(int)
         self.domain_bytes: defaultdict[str, int]       = defaultdict(int)
         self.blocked:      set[str]                    = set()
@@ -61,6 +65,7 @@ class StatsStore:
     def unregister(self, conn: ConnInfo) -> None:
         self.active.pop(conn.id, None)
         self.domain_bytes[conn.target_host] += conn.bytes_up + conn.bytes_down
+        self.recent.appendleft(conn.as_dict(closed_at=time.time()))
 
     # ── block list ─────────────────────────────────────────────────────────────
 
@@ -100,6 +105,7 @@ class StatsStore:
             "active_count": len(self.active),
             "blocked":      sorted(self.blocked),
             "connections":  conns,
+            "recent":       list(self.recent),
             "top_domains":  top_domains,
         }
 

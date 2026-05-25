@@ -50,6 +50,12 @@ tr:hover td{background:#161b22}
   <th>时长</th><th>上行</th><th>下行</th><th>操作</th>
 </tr></thead><tbody id="conns"></tbody></table>
 
+<h2>最近关闭 <span style="color:#484f58;font-size:11px;font-weight:normal">（最近 50 条）</span></h2>
+<table><thead><tr>
+  <th>ID</th><th>客户端 IP</th><th>目标</th>
+  <th>时长</th><th>上行</th><th>下行</th><th>关闭时间</th>
+</tr></thead><tbody id="recent"></tbody></table>
+
 <h2>域名分布 Top 30</h2>
 <table><thead><tr>
   <th>域名 / 目标</th><th>连接数</th><th>总流量</th>
@@ -75,6 +81,9 @@ function fmtD(s) {
   if (s < 60) return s + 's';
   if (s < 3600) return Math.floor(s/60) + 'm' + (s%60) + 's';
   return Math.floor(s/3600) + 'h' + Math.floor((s%3600)/60) + 'm';
+}
+function fmtT(ts) {
+  return new Date(ts * 1000).toLocaleTimeString();
 }
 async function post(url) {
   await fetch(q(url), {method:'POST'});
@@ -106,6 +115,13 @@ async function load() {
     `<button class="btn btn-red" onclick="block(${JSON.stringify(c.client_ip)})">封锁</button></td></tr>`
   ).join('') : `<tr><td colspan="7" class="empty">暂无活跃连接</td></tr>`;
 
+  const rb = document.getElementById('recent');
+  rb.innerHTML = (d.recent||[]).length ? d.recent.map(c =>
+    `<tr style="opacity:.6"><td>${c.id}</td><td>${esc(c.client_ip)}</td><td>${esc(c.target)}</td>` +
+    `<td>${fmtD(c.duration)}</td><td>${fmtB(c.bytes_up)}</td><td>${fmtB(c.bytes_down)}</td>` +
+    `<td>${fmtT(c.closed_at)}</td></tr>`
+  ).join('') : `<tr><td colspan="7" class="empty">暂无记录</td></tr>`;
+
   const db = document.getElementById('domains');
   const top = d.top_domains.slice(0,30);
   db.innerHTML = top.length ? top.map(x =>
@@ -127,7 +143,7 @@ function esc(s) {
 }
 
 load();
-setInterval(load, 3000);
+setInterval(load, 1000);
 </script>
 </body>
 </html>"""
