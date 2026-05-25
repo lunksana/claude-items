@@ -12,6 +12,7 @@
 - **内置 DNS 转发器**：本地监听 UDP，国内域名直接查询国内 DNS（223.5.5.5），境外域名通过隧道 DNS-over-TCP 查询（8.8.8.8），屏蔽域名返回 NXDOMAIN；与分流规则复用同一份路由表，将系统 DNS 指向本地端口即可消除 DNS 泄漏
 - **TProxy 域名嗅探**：透明代理模式下读取连接初始字节，提取 TLS SNI 或 HTTP Host 字段，将原始目标 IP 升级为域名后再做路由匹配，使 GEOSITE / DOMAIN-SUFFIX 等规则在 TProxy 模式下同样生效
 - **域名 + IP 分流**：规则内嵌配置，支持精确/后缀/关键词/正则/CIDR/GeoSite/GeoIP，正则匹配使用字面量预筛跳过无关主机名
+- **Web 管理面板**：服务端内嵌 HTTP 面板，实时展示活跃连接（客户端 IP、目标、时长、上下行流量）、域名转发分布，支持单独断开连接或封锁 IP（立即终止已有连接并拒绝后续连接）
 
 ---
 
@@ -32,7 +33,39 @@ pip install cryptography uvloop   # uvloop 仅 Linux/macOS 有效
 
 ## 快速部署
 
-运行交互式向导，自动检测环境、安装 TCP Brutal、生成配置文件：
+提供两种部署方式，选其一即可：
+
+### 方式一：一键 bash 脚本
+
+适合快速上手，无需 Python 环境预装，`curl` 即可运行：
+
+```bash
+bash install.sh
+# 或从远程直接运行
+bash <(curl -fsSL https://your-server/install.sh)
+```
+
+向导依次完成（服务端）：
+
+1. 系统检测、Python 3.10+ 及依赖安装
+2. 基础参数配置（端口、密码、伪装域名）
+3. TCP Brutal 检测与安装（可选），可用时询问速率
+4. Web 管理面板配置（监听地址、端口、访问令牌，可选启用）
+5. systemd 系统服务安装（可选，需 root）
+
+向导依次完成（客户端）：
+
+1. 系统检测、Python 3.10+ 及依赖安装
+2. 基础参数配置（服务端地址、密码、本地 SOCKS5 端口）
+3. 本地 DNS 转发器配置（可选）
+4. TProxy 透明代理端口配置（可选，仅设置 `tproxy_port`）
+5. systemd 系统服务安装（可选，需 root）
+
+> **TProxy 注意**：`install.sh` 仅在配置文件中写入 `tproxy_port`，不生成防火墙规则。需另行配置 iptables/nftables，或运行 `python setup.py` 由向导自动生成脚本（见方式二）。
+
+### 方式二：Python 交互向导（完整配置）
+
+提供完整的规则选择、TProxy 防火墙脚本生成和多 init 系统支持：
 
 ```bash
 python setup.py
@@ -42,10 +75,11 @@ python setup.py
 
 1. 服务端 / 客户端参数配置
 2. （仅服务端）TCP Brutal 检测与安装，可用时自动启用并询问速率
-3. （仅客户端）本地 DNS 转发器配置（监听端口、国内/境外 DNS 服务器）
-4. 分流规则选择（列出常用 GeoSite/GeoIP tag 供逐项勾选）
-5. TProxy 透明代理配置（可选，生成 iptables/nftables 脚本；若已配置 DNS 转发器，可同时启用 DNS 透明捕获）
-6. 系统服务安装（可选，支持 systemd / SysV init / OpenRC）
+3. （仅服务端）Web 管理面板配置（监听地址、端口、访问令牌，可选启用）
+4. （仅客户端）本地 DNS 转发器配置（监听端口、国内/境外 DNS 服务器）
+5. （仅客户端）分流规则选择（列出常用 GeoSite/GeoIP tag 供逐项勾选）
+6. （仅客户端）TProxy 透明代理配置：询问端口、代理范围（全局/仅转发）、防火墙工具（iptables/nftables），自动生成 `tproxy_rules.sh` / `tproxy_cleanup.sh`；若已配置 DNS 转发器，可同时启用 DNS 透明捕获
+7. 系统服务安装（可选，支持 systemd / SysV init / OpenRC）
 
 ---
 
@@ -62,7 +96,10 @@ python setup.py
     "password": "your-strong-password-here",
     "camouflage_host": "www.apple.com",
     "camouflage_port": 443,
-    "brutal_rate_bps": 0
+    "brutal_rate_bps": 0,
+    "admin_host": "127.0.0.1",
+    "admin_port": 8080,
+    "admin_token": ""
 }
 ```
 
@@ -73,6 +110,9 @@ python setup.py
 | `camouflage_host` | 伪装域名，服务端从此站点缓存 TLS 1.3 握手记录用于回放 |
 | `camouflage_port` | 伪装站点端口，通常 443 |
 | `brutal_rate_bps` | TCP Brutal 单连接速率（字节/秒），0 表示禁用 |
+| `admin_host` | 管理面板监听地址，建议 `127.0.0.1`（仅本机），`0.0.0.0` 需配合 `admin_token` 使用 |
+| `admin_port` | 管理面板端口，0 表示不启用 |
+| `admin_token` | 访问令牌，URL 中携带 `?token=xxx` 进行验证；留空则不验证 |
 
 启动：
 
@@ -80,6 +120,42 @@ python setup.py
 python server.py                        # 默认读 config_server.json
 python server.py /path/to/config.json   # 指定配置文件
 ```
+
+---
+
+### Web 管理面板
+
+服务端内嵌了一个轻量 HTTP 面板，设置 `admin_port` 后随服务端一同启动，无需额外进程。
+
+**功能：**
+
+| 页面区域 | 内容 |
+|---|---|
+| 活跃连接 | 连接 ID、客户端 IP、目标地址、在线时长、上下行流量；[断开] 关闭单条连接，[封锁] 同时加入黑名单 |
+| 域名分布 | Top 30 目标域名 / IP，按连接次数降序，显示累计流量 |
+| 封锁 IP | 黑名单列表，[解除] 恢复该 IP 的访问权限 |
+
+封锁 IP 时，服务端会立即关闭该 IP 的所有已有连接，并拒绝后续连接（直至解除）。
+
+**访问地址：**
+
+```
+http://<admin_host>:<admin_port>/?token=<admin_token>
+```
+
+`admin_token` 为空时省略 `?token=...` 直接访问。
+
+**安全建议：**
+
+- `admin_host` 建议设为 `127.0.0.1`，面板仅对本机开放
+- 通过 SSH 端口转发在本地浏览器查看，无需将面板端口暴露到公网：
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@your-vps
+# 然后本地访问 http://127.0.0.1:8080/?token=xxx
+```
+
+- 若需从外部访问，务必设置 `admin_token`，并考虑配合防火墙仅允许可信 IP
 
 ---
 
@@ -544,6 +620,8 @@ pyrealiy-proxy/
     ├── bloom.py           Bloom Filter（域名后缀预过滤，Kirsch-Mitzenmacher 双哈希）
     ├── sniffer.py         流量嗅探（TLS SNI + HTTP Host 提取域名，PrefixedReader）
     ├── dns_forwarder.py   DNS 转发器（分流查询 + DNS-over-TCP 隧道）
+    ├── stats.py           服务端连接统计与 IP 封锁表（StatsStore）
+    ├── admin.py           Web 管理面板（内嵌 HTTP 服务，无外部依赖）
     ├── brutal.py          TCP Brutal socket 选项封装
     ├── tproxy.py          TProxy 透明代理监听器（IP_TRANSPARENT socket，仅 Linux）
     └── utils.py           日志、地址打包、双向中继

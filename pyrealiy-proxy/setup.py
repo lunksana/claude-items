@@ -225,6 +225,24 @@ def configure_server(brutal_available: bool) -> None:
     else:
         INFO("TCP Brutal 不可用，使用普通 TCP")
 
+    # ── Web 管理面板 ──────────────────────────────────────────────────────────
+    admin_cfg: dict = {"admin_port": 0}
+    if ask_yn("是否启用 Web 管理面板（监控连接、封锁 IP）？", default=False):
+        admin_host  = ask("面板监听地址（建议 127.0.0.1 仅本机，0.0.0.0 公网暴露需设令牌）",
+                          "127.0.0.1")
+        admin_port  = ask("面板端口", "8080")
+        admin_token = ask("访问令牌（留空则不验证，建议随机字符串）", "")
+        admin_cfg   = {
+            "admin_host":  admin_host,
+            "admin_port":  int(admin_port),
+            "admin_token": admin_token,
+        }
+        token_hint = f"?token={admin_token}" if admin_token else ""
+        OK(f"面板地址：http://{admin_host}:{admin_port}/{token_hint}")
+        if admin_host == "127.0.0.1":
+            INFO("面板仅本机可访问，可通过 SSH 隧道在本地浏览器查看：")
+            print(f"    {_c('36', f'ssh -L {admin_port}:127.0.0.1:{admin_port} user@your-vps')}")
+
     cfg = {
         "listen_host":    "0.0.0.0",
         "listen_port":    int(listen_port),
@@ -232,6 +250,7 @@ def configure_server(brutal_available: bool) -> None:
         "camouflage_host": camouflage,
         "camouflage_port": 443,
         "brutal_rate_bps": rate_bps,
+        **admin_cfg,
     }
     path = "config_server.json"
     with open(path, "w") as f:

@@ -161,9 +161,22 @@ configure_server() {
         rate_bps=$(( rate_mbps * 1_000_000 ))
     fi
 
-    export _PORT="$port" _PASSWORD="$password" _CAMOUFLAGE="$camouflage" _RATE="$rate_bps"
+    local admin_host="127.0.0.1" admin_port=0 admin_token=""
+    if ask_yn "是否启用 Web 管理面板（监控连接、封锁 IP）？" "n"; then
+        admin_host=$(ask "面板监听地址（127.0.0.1 仅本机，0.0.0.0 公网需设令牌）" "127.0.0.1")
+        admin_port=$(ask "面板端口" "8080")
+        admin_token=$(ask "访问令牌（留空则不验证）" "")
+        ok "面板地址：http://${admin_host}:${admin_port}/${admin_token:+?token=}${admin_token}"
+        if [[ "$admin_host" == "127.0.0.1" ]]; then
+            info "SSH 隧道本地访问：ssh -L ${admin_port}:127.0.0.1:${admin_port} user@your-vps"
+        fi
+    fi
+
+    export _PORT="$port" _PASSWORD="$password" _CAMOUFLAGE="$camouflage" _RATE="$rate_bps" \
+           _ADMIN_HOST="$admin_host" _ADMIN_PORT="$admin_port" _ADMIN_TOKEN="$admin_token"
     "$PYTHON" - << 'PYEOF'
-import json, os, sys
+import json, os
+admin_port = int(os.environ["_ADMIN_PORT"])
 cfg = {
     "listen_host":     "0.0.0.0",
     "listen_port":     int(os.environ["_PORT"]),
@@ -171,6 +184,9 @@ cfg = {
     "camouflage_host": os.environ["_CAMOUFLAGE"],
     "camouflage_port": 443,
     "brutal_rate_bps": int(os.environ["_RATE"]),
+    "admin_host":      os.environ["_ADMIN_HOST"],
+    "admin_port":      admin_port,
+    "admin_token":     os.environ["_ADMIN_TOKEN"],
 }
 with open("config_server.json", "w") as f:
     json.dump(cfg, f, indent=4)
@@ -185,6 +201,7 @@ configure_client() {
 
     local server_host server_port password camouflage socks5_port
     local dns_port=0 cn_dns="223.5.5.5" remote_dns="8.8.8.8"
+    local tproxy_port=0
 
     server_host=$(ask "服务端 IP 或域名")
     [[ -n "$server_host" ]] || err "服务端地址不能为空"
@@ -201,9 +218,15 @@ configure_client() {
         info "启动后将系统 DNS 改为 127.0.0.1:${dns_port}"
     fi
 
+    if ask_yn "是否启用 TProxy 透明代理（需要 root / CAP_NET_ADMIN）？" "n"; then
+        tproxy_port=$(ask "TProxy 监听端口" "7893")
+        warn "防火墙规则需手动配置，运行 python setup.py 可自动生成 iptables/nftables 脚本"
+    fi
+
     export _SHOST="$server_host" _SPORT="$server_port" _PWD="$password" \
            _CAM="$camouflage"    _S5PORT="$socks5_port" \
-           _DNSPORT="$dns_port"  _CNDNS="$cn_dns" _RDNS="$remote_dns"
+           _DNSPORT="$dns_port"  _CNDNS="$cn_dns" _RDNS="$remote_dns" \
+           _TPROXY="$tproxy_port"
     "$PYTHON" - << 'PYEOF'
 import json, os
 cfg = {
@@ -215,7 +238,7 @@ cfg = {
     "camouflage_host":  os.environ["_CAM"],
     "brutal_rate_bps":  0,
     "brutal_pool_size": 10,
-    "tproxy_port":      0,
+    "tproxy_port":      int(os.environ["_TPROXY"]),
     "dns_listen_host":  "127.0.0.1",
     "dns_listen_port":  int(os.environ["_DNSPORT"]),
     "cn_dns":           os.environ["_CNDNS"],

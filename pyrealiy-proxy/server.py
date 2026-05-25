@@ -208,10 +208,13 @@ async def main(config_path: str) -> None:
         token_hint = f"?token={admin_token}" if admin_token else ""
         logger.info("Admin panel: http://%s:%d/%s", admin_host, admin_port, token_hint)
 
-    servers = [server] + ([admin_server] if admin_server else [])
-    async with asyncio.TaskGroup() as tg:
-        for s in servers:
-            tg.create_task(s.serve_forever())
+    if admin_server:
+        async with server, admin_server:
+            await asyncio.gather(server.serve_forever(),
+                                 admin_server.serve_forever())
+    else:
+        async with server:
+            await server.serve_forever()
 
 
 if __name__ == "__main__":
