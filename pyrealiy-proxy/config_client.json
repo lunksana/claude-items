@@ -5,9 +5,14 @@
     "server_port": 443,
     "password": "your-strong-password-here",
     "camouflage_host": "www.apple.com",
-    "brutal_rate_bps": 8000000,
-    "brutal_pool_size": 20,
+    "brutal_rate_bps": 0,
+    "brutal_pool_size": 10,
     "tproxy_port": 0,
+
+    "dns_listen_host": "127.0.0.1",
+    "dns_listen_port": 5353,
+    "cn_dns": "223.5.5.5",
+    "remote_dns": "8.8.8.8",
 
     "geosite_dir": ".geosite",
     "geosite_update_days": 7,

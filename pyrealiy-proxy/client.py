@@ -25,6 +25,8 @@ import sys
 
 from core.socks5 import parse_socks5_request
 from core.conn_pool import BrutalPool
+from core.dns_forwarder import DNSForwarder
+from core.sniffer import sniff_domain, PrefixedReader
 from core.geosite_cache import ensure_all as geo_ensure_all
 from core.router import build_router, DIRECT, REJECT
 from core.utils import get_logger, pack_address, relay
@@ -34,23 +36,33 @@ logger = get_logger("client")
 
 
 async def _dispatch(
-    local_reader: asyncio.StreamReader,
+    local_reader,
     local_writer: asyncio.StreamWriter,
     target_host: str,
     target_port: int,
     pool: BrutalPool,
     router,
+    routing_host: str | None = None,
 ) -> None:
-    """路由判断 + 转发，由 SOCKS5 和 TProxy 两个入口共用。"""
-    action = router.match(target_host)
+    """
+    路由判断 + 转发，由 SOCKS5 和 TProxy 两个入口共用。
+
+    routing_host: 用于路由匹配的域名（TProxy sniff 结果）；
+                  None 时退化为 target_host（IP 或 SOCKS5 提供的域名）。
+    target_host:  实际连接目标（TProxy 模式下始终是原始 IP）。
+    """
+    route_key = routing_host or target_host
+    action    = router.match(route_key)
+
+    label = f"{routing_host} ({target_host}:{target_port})" if routing_host else f"{target_host}:{target_port}"
 
     if action == REJECT:
-        logger.info("REJECT  %s:%d", target_host, target_port)
+        logger.info("REJECT  %s", label)
         local_writer.close()
         return
 
     if action == DIRECT:
-        logger.info("DIRECT %s:%d", target_host, target_port)
+        logger.info("DIRECT  %s", label)
         try:
             target_reader, target_writer = await asyncio.open_connection(
                 target_host, target_port
@@ -63,7 +75,7 @@ async def _dispatch(
         return
 
     # ── 代理分支 ─────────────────────────────────────────────────────────────
-    logger.info("PROXY  %s:%d", target_host, target_port)
+    logger.info("PROXY   %s", label)
 
     ready = await pool.acquire()
     if ready is None:
@@ -147,7 +159,14 @@ async def handle_tproxy_connection(
 ) -> None:
     # TProxy 模式：内核将原始目标地址写入 sockname，无需协议握手
     target_host, target_port = local_writer.get_extra_info("sockname")
-    await _dispatch(local_reader, local_writer, target_host, target_port, pool, router)
+
+    # Sniff 初始字节，尝试提取域名以启用 GEOSITE/DOMAIN 规则；
+    # buffered 必须放回 reader 前缀，确保数据完整到达目标
+    domain, buffered = await sniff_domain(local_reader)
+    reader = PrefixedReader(local_reader, buffered) if buffered else local_reader
+
+    await _dispatch(reader, local_writer, target_host, target_port, pool, router,
+                    routing_host=domain)
 
 
 def _raise_fd_limit() -> None:
@@ -201,6 +220,15 @@ async def main(config_path: str) -> None:
         pool_size,
     )
 
+    dns_forwarder = None
+    if cfg.get("dns_listen_port", 0):
+        try:
+            dns_forwarder = DNSForwarder(cfg, router, pool)
+            await dns_forwarder.start()
+        except OSError as e:
+            logger.error("DNS forwarder failed to start: %s", e)
+            dns_forwarder = None
+
     tproxy_server = None
     tproxy_port = cfg.get("tproxy_port", 0)
     if tproxy_port:
@@ -214,12 +242,16 @@ async def main(config_path: str) -> None:
         except OSError as e:
             logger.error("TProxy failed to start: %s", e)
 
-    if tproxy_server:
-        async with socks5_server, tproxy_server:
-            await socks5_server.serve_forever()
-    else:
-        async with socks5_server:
-            await socks5_server.serve_forever()
+    try:
+        if tproxy_server:
+            async with socks5_server, tproxy_server:
+                await socks5_server.serve_forever()
+        else:
+            async with socks5_server:
+                await socks5_server.serve_forever()
+    finally:
+        if dns_forwarder:
+            dns_forwarder.stop()
 
 
 if __name__ == "__main__":

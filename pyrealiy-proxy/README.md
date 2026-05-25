@@ -7,8 +7,10 @@
 - **多浏览器指纹轮换**：每次连接随机选择 Chrome / Firefox / Safari 三种 TLS 指纹（不同密码套件顺序、扩展集合与排列），避免固定 JA3 成为可统计识别的流量标识
 - **加密信道**：ChaCha20-Poly1305 + HKDF 会话密钥；双向使用独立密钥（c2s / s2c），消除 nonce 复用攻击面；密钥从 ClientHello 的 `client_random` 派生，无需额外传输 salt
 - **防重放**：token 内含 8 字节随机 nonce，服务端维护时间桶缓存，60 秒窗口内的重放 ClientHello 一律走伪装路径
-- **TCP Brutal**：可选的固定速率拥塞控制，在高丢包跨境链路上维持稳定吞吐
+- **TCP Brutal**：服务端可选的固定速率拥塞控制，在高丢包跨境链路上维持稳定吞吐；仅需在服务端（Linux VPS）安装内核模块，客户端无需任何额外配置
 - **连接池**：客户端预建 N 条已认证隧道，SOCKS5 请求到来时零等待取用
+- **内置 DNS 转发器**：本地监听 UDP，国内域名直接查询国内 DNS（223.5.5.5），境外域名通过隧道 DNS-over-TCP 查询（8.8.8.8），屏蔽域名返回 NXDOMAIN；与分流规则复用同一份路由表，将系统 DNS 指向本地端口即可消除 DNS 泄漏
+- **TProxy 域名嗅探**：透明代理模式下读取连接初始字节，提取 TLS SNI 或 HTTP Host 字段，将原始目标 IP 升级为域名后再做路由匹配，使 GEOSITE / DOMAIN-SUFFIX 等规则在 TProxy 模式下同样生效
 - **域名 + IP 分流**：规则内嵌配置，支持精确/后缀/关键词/正则/CIDR/GeoSite/GeoIP，正则匹配使用字面量预筛跳过无关主机名
 
 ---
@@ -20,7 +22,7 @@
 | Python | 3.10 |
 | cryptography | 42.0.0 |
 | uvloop（可选） | 任意 |
-| tcp_brutal 内核模块（可选） | Linux 内核 ≥ 4.9 |
+| tcp_brutal 内核模块（可选，仅服务端） | Linux 内核 ≥ 4.9 |
 
 ```bash
 pip install cryptography uvloop   # uvloop 仅 Linux/macOS 有效
@@ -38,11 +40,12 @@ python setup.py
 
 向导依次完成：
 
-1. TCP Brutal 检测与安装
-2. 服务端 / 客户端参数配置
-3. 分流规则选择（列出常用 GeoSite/GeoIP tag 供逐项勾选）
-4. TProxy 透明代理配置（可选，生成 iptables/nftables 脚本）
-5. 系统服务安装（可选，支持 systemd / SysV init / OpenRC）
+1. 服务端 / 客户端参数配置
+2. （仅服务端）TCP Brutal 检测与安装，可用时自动启用并询问速率
+3. （仅客户端）本地 DNS 转发器配置（监听端口、国内/境外 DNS 服务器）
+4. 分流规则选择（列出常用 GeoSite/GeoIP tag 供逐项勾选）
+5. TProxy 透明代理配置（可选，生成 iptables/nftables 脚本；若已配置 DNS 转发器，可同时启用 DNS 透明捕获）
+6. 系统服务安装（可选，支持 systemd / SysV init / OpenRC）
 
 ---
 
@@ -92,8 +95,14 @@ python server.py /path/to/config.json   # 指定配置文件
     "server_port": 443,
     "password": "your-strong-password-here",
     "camouflage_host": "www.apple.com",
-    "brutal_rate_bps": 8000000,
-    "brutal_pool_size": 20,
+    "brutal_rate_bps": 0,
+    "brutal_pool_size": 10,
+    "tproxy_port": 0,
+
+    "dns_listen_host": "127.0.0.1",
+    "dns_listen_port": 5353,
+    "cn_dns": "223.5.5.5",
+    "remote_dns": "8.8.8.8",
 
     "geosite_dir": ".geosite",
     "geosite_update_days": 7,
@@ -140,9 +149,13 @@ python server.py /path/to/config.json   # 指定配置文件
 | `server_host/port` | 服务端地址 |
 | `password` | 与服务端一致 |
 | `camouflage_host` | 与服务端一致 |
-| `brutal_rate_bps` | 单连接速率，0 禁用；建议 5–10 Mbps |
-| `brutal_pool_size` | 预建连接数，总吞吐 ≈ `pool_size × rate_bps` |
+| `brutal_rate_bps` | 固定为 0，客户端不启用 TCP Brutal |
+| `brutal_pool_size` | 预建连接池大小，默认 10 |
 | `tproxy_port` | TProxy 监听端口，0 禁用；需要 root / CAP_NET_ADMIN |
+| `dns_listen_host` | DNS 转发器监听地址，建议 `127.0.0.1` |
+| `dns_listen_port` | DNS 转发器端口，0 禁用；5353 无需 root，53 需要 root |
+| `cn_dns` | 国内 DNS 服务器（DIRECT 域名走此 UDP 查询），默认 `223.5.5.5` |
+| `remote_dns` | 境外 DNS 服务器（PROXY 域名通过隧道 TCP 查询），默认 `8.8.8.8` |
 | `geosite_dir` | GeoSite/GeoIP 缓存目录，默认 `.geosite` |
 | `geosite_update_days` | 全局默认刷新周期（天），默认 7 |
 | `geosite_sources` | geosite 源列表，见下方说明 |
@@ -173,6 +186,8 @@ TProxy 工作在网络层，由内核将匹配流量直接转交给代理进程�
 ```
 
 客户端会同时监听 SOCKS5 端口和 TProxy 端口，两者共用同一份规则和连接池。
+
+**域名嗅探**：TProxy 从内核拿到的是原始目标 IP，无法直接匹配 GEOSITE / DOMAIN-SUFFIX 等域名规则。客户端会读取连接初始字节（最多 1 KB，2 秒超时），从 TLS SNI 或 HTTP Host 头提取域名，然后用域名进行路由匹配，实际连接仍使用原始 IP，不会触发二次 DNS 解析。
 
 > 需要以 **root** 或具备 `CAP_NET_ADMIN` capability 的权限运行。
 
@@ -245,6 +260,47 @@ ip rule del fwmark 0x1 table 100
 ip route del local 0.0.0.0/0 dev lo table 100
 ```
 
+### DNS 透明捕获（可选）
+
+若同时启用了本地 DNS 转发器（`dns_listen_port: 5353`），可追加以下规则将所有 DNS 查询重定向到转发器，实现全局 DNS 防泄漏。`<uid>` 替换为运行代理进程的用户 UID（`id -u`），用于阻止转发器自身的上游查询形成环路。
+
+**iptables**
+
+```bash
+# LAN 设备的 DNS
+iptables -t nat -N PYREALIY_DNS
+iptables -t nat -A PYREALIY_DNS -p udp --dport 53 -j REDIRECT --to-port 5353
+iptables -t nat -A PREROUTING -j PYREALIY_DNS
+
+# 本机的 DNS（排除代理进程自身，防止环路）
+iptables -t nat -N PYREALIY_DNS_LOCAL
+iptables -t nat -A PYREALIY_DNS_LOCAL -p udp --dport 53 -m owner --uid-owner <uid> -j RETURN
+iptables -t nat -A PYREALIY_DNS_LOCAL -p udp --dport 53 -j REDIRECT --to-port 5353
+iptables -t nat -A OUTPUT -j PYREALIY_DNS_LOCAL
+```
+
+**nftables**（独立 nat 表，REDIRECT 不能在 mangle 类型 chain 中使用）
+
+```bash
+nft -f - << 'EOF'
+table ip pyrealiy_nat {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        meta l4proto udp th dport 53 redirect to :5353
+    }
+    chain output {
+        type nat hook output priority dstnat; policy accept;
+        meta l4proto udp th dport 53 skuid <uid> return
+        meta l4proto udp th dport 53 redirect to :5353
+    }
+}
+EOF
+```
+
+清除：`nft delete table ip pyrealiy_nat`
+
+`setup.py` 配置 TProxy 时会询问是否同时启用 DNS 捕获，选择后自动将上述规则写入 `tproxy_rules.sh`，并把 `dns_listen_host` 改为 `0.0.0.0` 以接收 LAN 设备的 DNS 请求。
+
 如需同时为局域网设备代理，还需开启 IP 转发：
 
 ```bash
@@ -278,6 +334,8 @@ echo 1 > /proc/sys/net/ipv4/ip_forward
 | `GEOSITE` | `GEOSITE,[source:]tag,ACTION` | geosite.dat 中的 tag，可指定源 |
 | `GEOIP` | `GEOIP,[source:]code,ACTION` | geoip.dat 中的国家/地区代码，二分查找 |
 | `FINAL` | `FINAL,PROXY` | 默认动作，放最后 |
+
+> **TProxy 模式补充说明**：TProxy 只能从内核获得目标 IP，但客户端会在连接建立后立即嗅探初始字节提取 TLS SNI / HTTP Host，因此域名类规则（DOMAIN、DOMAIN-SUFFIX、GEOSITE 等）在 TProxy 模式下同样有效。无法嗅探到域名时（非 TLS/HTTP 协议）自动退化为 IP 规则匹配。
 
 **动作：**
 
@@ -366,28 +424,26 @@ IP 地址  →  IP-CIDR（线性）→  GEOIP（二分）
 
 ## TCP Brutal
 
-TCP Brutal 是针对跨境链路设计的拥塞控制算法，以固定速率发送数据，不因丢包降速。
+TCP Brutal 是针对跨境链路设计的拥塞控制算法，以固定速率发送数据，不因丢包降速。**仅需在服务端（Linux VPS）安装**，客户端无需任何内核模块。
 
-**安装（服务端和客户端均需要）：**
+**安装（仅服务端）：**
 
 ```bash
-# 方式 1：DKMS（推荐，重启后自动加载）
+# 官方一键脚本（推荐，自动处理 DKMS 和开机加载）
+bash <(curl -fsSL https://tcp.hy2.sh/)
+
+# 或手动 DKMS 安装（持久化，重启后自动加载）
 apt install dkms linux-headers-$(uname -r)
 git clone --depth=1 https://github.com/apernet/tcp-brutal
 cd tcp-brutal && make dkms
-
-# 方式 2：临时加载（重启后失效）
-git clone --depth=1 https://github.com/apernet/tcp-brutal
-cd tcp-brutal && make && insmod tcp_brutal.ko
 ```
 
-或直接运行 `python setup.py`，向导会完成安装。
+或直接运行 `python setup.py` 选择服务端角色，向导检测到模块可用时会自动启用并询问速率。
 
 **速率设置建议：**
 
-- 单连接速率：实际带宽的 1.5–2 倍（例如带宽 50 Mbps → 设 80 Mbps）
-- 多连接总吞吐：`brutal_pool_size × brutal_rate_bps`
-- 典型配置：20 连接 × 8 Mbps = 160 Mbps 上限
+- 单连接速率建议设为实际上行带宽的 80%–100%（例如 VPS 带宽 100 Mbps → 设 80–100 Mbps）
+- `config_server.json` 中的 `brutal_rate_bps` 控制服务端向客户端发送时的速率
 
 ---
 
@@ -486,6 +542,8 @@ pyrealiy-proxy/
     ├── router.py          分流路由（规则匹配 + geosite.dat / geoip.dat 解析）
     ├── geosite_cache.py   GeoSite/GeoIP 多源缓存管理（下载 / 刷新 / meta.json）
     ├── bloom.py           Bloom Filter（域名后缀预过滤，Kirsch-Mitzenmacher 双哈希）
+    ├── sniffer.py         流量嗅探（TLS SNI + HTTP Host 提取域名，PrefixedReader）
+    ├── dns_forwarder.py   DNS 转发器（分流查询 + DNS-over-TCP 隧道）
     ├── brutal.py          TCP Brutal socket 选项封装
     ├── tproxy.py          TProxy 透明代理监听器（IP_TRANSPARENT socket，仅 Linux）
     └── utils.py           日志、地址打包、双向中继
@@ -561,6 +619,30 @@ Chrome 档案内部还有 GREASE 值随机性（从 16 个 RFC 8701 保留值中
 
 ## 常见问题
 
+**Q: 如何配置系统 DNS 指向本地转发器**
+
+启用 DNS 转发器（`dns_listen_port: 5353`）后，需要将操作系统 DNS 改为本地地址：
+
+```bash
+# Linux（临时，重启后失效）
+echo "nameserver 127.0.0.1" | sudo tee /etc/resolv.conf
+
+# systemd-resolved（永久）
+# 编辑 /etc/systemd/resolved.conf，添加：
+# [Resolve]
+# DNS=127.0.0.1:5353
+# 然后：sudo systemctl restart systemd-resolved
+```
+
+macOS：系统设置 → 网络 → DNS，添加 `127.0.0.1`（端口 5353 需借助 dnsmasq 中转，或直接监听端口 53）。
+
+如果使用端口 53，Linux 上可能需要先关闭 `systemd-resolved` 占用：
+
+```bash
+sudo systemctl stop systemd-resolved
+sudo systemctl disable systemd-resolved
+```
+
 **Q: `OSError: [Errno 24] Too many open files`**
 
 提升系统文件描述符限制：
@@ -576,14 +658,16 @@ ulimit -n 65536
 
 客户端和服务端启动时会自动尝试提升至系统硬限制。
 
-**Q: 如何验证 TCP Brutal 是否生效**
+**Q: 如何验证服务端 TCP Brutal 是否生效**
+
+在服务端执行：
 
 ```bash
 python3 -c "from core.brutal import is_available; print(is_available())"
 # 输出 True 表示内核模块已加载
 
 # 运行时检查连接的拥塞算法
-ss -tin dst <对端IP> | grep brutal
+ss -tin dst <客户端IP> | grep brutal
 ```
 
 **Q: 不想使用 geosite，只要简单规则**

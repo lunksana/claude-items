@@ -96,6 +96,21 @@ def suggest_brutal_rate(iface: str) -> int:
 def _run(cmd: list, **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, **kw)
 
+def install_brutal_official() -> bool:
+    """使用官方一键脚本安装 tcp_brutal（推荐，自动处理 DKMS 和开机加载）"""
+    INFO("使用官方一键脚本安装 tcp_brutal ...")
+    r = subprocess.run(
+        "bash <(curl -fsSL https://tcp.hy2.sh/)",
+        shell=True, executable="/bin/bash",
+    )
+    if r.returncode != 0:
+        ERR("官方脚本安装失败，请查看上方输出")
+        return False
+    # 脚本通常已自动加载模块，此处补一次 modprobe 确保立即生效
+    subprocess.run(["modprobe", "tcp_brutal"], capture_output=True)
+    return True
+
+
 def install_brutal_dkms() -> bool:
     """通过 DKMS 安装 tcp_brutal（持久化，重启后仍有效）"""
     INFO("尝试通过 DKMS 安装 tcp_brutal ...")
@@ -169,13 +184,15 @@ def handle_brutal_install() -> bool:
         return False
 
     method = ask(
-        "安装方式：[1] DKMS（持久化，推荐）  [2] 临时加载",
+        "安装方式：[1] 官方一键脚本（推荐）  [2] DKMS 手动编译  [3] 临时加载",
         default="1",
     )
-    if method == "2":
+    if method == "3":
         ok = install_brutal_simple()
-    else:
+    elif method == "2":
         ok = install_brutal_dkms()
+    else:
+        ok = install_brutal_official()
 
     if ok and brutal_is_loaded():
         OK("TCP Brutal 安装成功")
@@ -199,14 +216,12 @@ def configure_server(brutal_available: bool) -> None:
         iface = get_default_interface()
         speed = get_interface_speed_mbps(iface)
         suggested = suggest_brutal_rate(iface)
-        INFO(f"检测到网卡 {iface}，带宽 {speed} Mbps")
-        INFO(f"建议单连接速率：{suggested // 1_000_000} Mbps")
-        if ask_yn("启用 TCP Brutal？"):
-            rate_input = ask(
-                f"单连接 Brutal 速率（Mbps）",
-                str(suggested // 1_000_000),
-            )
-            rate_bps = int(rate_input) * 1_000_000
+        INFO(f"检测到网卡 {iface}，带宽 {speed} Mbps，TCP Brutal 已启用")
+        rate_input = ask(
+            "单连接 Brutal 速率（Mbps）",
+            str(suggested // 1_000_000),
+        )
+        rate_bps = int(rate_input) * 1_000_000
     else:
         INFO("TCP Brutal 不可用，使用普通 TCP")
 
@@ -436,7 +451,8 @@ def _detect_firewall() -> str:
     return "iptables"
 
 
-def _tproxy_scripts_ipt(server_ip: str, port: int, local_mode: bool) -> tuple[str, str]:
+def _tproxy_scripts_ipt(server_ip: str, port: int, local_mode: bool,
+                         dns_port: int = 0, proxy_uid: int = 0) -> tuple[str, str]:
     a: list[str] = [
         "#!/bin/bash",
         "# PyReality TProxy 规则 - iptables（由 setup.py 自动生成）",
@@ -468,6 +484,27 @@ def _tproxy_scripts_ipt(server_ip: str, port: int, local_mode: bool) -> tuple[st
              f" -j MARK --set-mark {_TPROXY_MARK}/{_TPROXY_MARK}"),
             "iptables -t mangle -A OUTPUT -j PYREALIY_LOCAL",
         ]
+
+    if dns_port:
+        a += [
+            "",
+            f"# DNS 透明捕获：UDP 53 → 本地 DNS 转发器（端口 {dns_port}）",
+            "iptables -t nat -N PYREALIY_DNS",
+            (f"iptables -t nat -A PYREALIY_DNS -p udp --dport 53"
+             f" -j REDIRECT --to-port {dns_port}"),
+            "iptables -t nat -A PREROUTING -j PYREALIY_DNS",
+        ]
+        if local_mode:
+            a += [
+                "iptables -t nat -N PYREALIY_DNS_LOCAL",
+                # 排除代理进程自身，防止 DNS 转发器向上游 DNS 查询时形成环路
+                (f"iptables -t nat -A PYREALIY_DNS_LOCAL -p udp --dport 53"
+                 f" -m owner --uid-owner {proxy_uid} -j RETURN"),
+                (f"iptables -t nat -A PYREALIY_DNS_LOCAL -p udp --dport 53"
+                 f" -j REDIRECT --to-port {dns_port}"),
+                "iptables -t nat -A OUTPUT -j PYREALIY_DNS_LOCAL",
+            ]
+
     a += ["", "echo '[✓] TProxy 规则已应用（iptables）'"]
 
     c: list[str] = [
@@ -484,12 +521,25 @@ def _tproxy_scripts_ipt(server_ip: str, port: int, local_mode: bool) -> tuple[st
             "iptables -t mangle -F PYREALIY_LOCAL 2>/dev/null || true",
             "iptables -t mangle -X PYREALIY_LOCAL 2>/dev/null || true",
         ]
+    if dns_port:
+        c += [
+            "iptables -t nat -D PREROUTING -j PYREALIY_DNS 2>/dev/null || true",
+            "iptables -t nat -F PYREALIY_DNS 2>/dev/null || true",
+            "iptables -t nat -X PYREALIY_DNS 2>/dev/null || true",
+        ]
+        if local_mode:
+            c += [
+                "iptables -t nat -D OUTPUT -j PYREALIY_DNS_LOCAL 2>/dev/null || true",
+                "iptables -t nat -F PYREALIY_DNS_LOCAL 2>/dev/null || true",
+                "iptables -t nat -X PYREALIY_DNS_LOCAL 2>/dev/null || true",
+            ]
     c += [*_ROUTE_CLEAN, "", "echo '[✓] TProxy 规则已清除（iptables）'"]
 
     return "\n".join(a) + "\n", "\n".join(c) + "\n"
 
 
-def _tproxy_scripts_nft(server_ip: str, port: int, local_mode: bool) -> tuple[str, str]:
+def _tproxy_scripts_nft(server_ip: str, port: int, local_mode: bool,
+                         dns_port: int = 0, proxy_uid: int = 0) -> tuple[str, str]:
     privates = "{ " + ", ".join(_PRIVATES) + " }"
 
     prerouting = [
@@ -514,6 +564,27 @@ def _tproxy_scripts_nft(server_ip: str, port: int, local_mode: bool) -> tuple[st
 
     nft_body = "\n".join(["table ip pyrealiy {", *prerouting, *output, "}"])
 
+    # DNS 捕获使用独立的 nat 表（REDIRECT 只能在 nat 类型 chain 中使用）
+    dns_nat_body = ""
+    if dns_port:
+        dns_pre = [
+            "    chain prerouting {",
+            "        type nat hook prerouting priority dstnat; policy accept;",
+            f"        meta l4proto udp th dport 53 redirect to :{dns_port}",
+            "    }",
+        ]
+        dns_out: list[str] = []
+        if local_mode:
+            dns_out = [
+                "    chain output {",
+                "        type nat hook output priority dstnat; policy accept;",
+                # 排除代理进程自身，防止 DNS 转发器向上游查询时形成环路
+                f"        meta l4proto udp th dport 53 skuid {proxy_uid} return",
+                f"        meta l4proto udp th dport 53 redirect to :{dns_port}",
+                "    }",
+            ]
+        dns_nat_body = "\n".join(["table ip pyrealiy_nat {", *dns_pre, *dns_out, "}"])
+
     a: list[str] = [
         "#!/bin/bash",
         "# PyReality TProxy 规则 - nftables（由 setup.py 自动生成）",
@@ -524,15 +595,24 @@ def _tproxy_scripts_nft(server_ip: str, port: int, local_mode: bool) -> tuple[st
         "# nftables 规则",
         "nft -f - << 'NFTEOF'",
         nft_body,
+    ]
+    if dns_nat_body:
+        a += [dns_nat_body]
+    a += [
         "NFTEOF",
         "",
         "echo '[✓] TProxy 规则已应用（nftables）'",
     ]
+
     c: list[str] = [
         "#!/bin/bash",
         "# PyReality TProxy 规则清理 - nftables（由 setup.py 自动生成）",
         "",
         "nft delete table ip pyrealiy 2>/dev/null || true",
+    ]
+    if dns_port:
+        c += ["nft delete table ip pyrealiy_nat 2>/dev/null || true"]
+    c += [
         *_ROUTE_CLEAN,
         "",
         "echo '[✓] TProxy 规则已清除（nftables）'",
@@ -541,10 +621,11 @@ def _tproxy_scripts_nft(server_ip: str, port: int, local_mode: bool) -> tuple[st
     return "\n".join(a) + "\n", "\n".join(c) + "\n"
 
 
-def _tproxy_scripts(server_ip: str, port: int, local_mode: bool, backend: str) -> tuple[str, str]:
+def _tproxy_scripts(server_ip: str, port: int, local_mode: bool, backend: str,
+                     dns_port: int = 0, proxy_uid: int = 0) -> tuple[str, str]:
     if backend == "nftables":
-        return _tproxy_scripts_nft(server_ip, port, local_mode)
-    return _tproxy_scripts_ipt(server_ip, port, local_mode)
+        return _tproxy_scripts_nft(server_ip, port, local_mode, dns_port, proxy_uid)
+    return _tproxy_scripts_ipt(server_ip, port, local_mode, dns_port, proxy_uid)
 
 
 def configure_tproxy(server_ip: str, cfg: dict) -> None:
@@ -570,7 +651,18 @@ def configure_tproxy(server_ip: str, cfg: dict) -> None:
     fw_choice = ask("规则工具：[1] iptables  [2] nftables", def_fw)
     backend   = "nftables" if fw_choice.strip() == "2" else "iptables"
 
-    apply_content, cleanup_content = _tproxy_scripts(server_ip, tproxy_port, local_mode, backend)
+    dns_port  = 0
+    proxy_uid = os.getuid()
+    if cfg.get("dns_listen_port", 0):
+        if ask_yn(f"同时透明捕获 DNS（UDP 53 → 本地转发器端口 {cfg['dns_listen_port']}）？"):
+            dns_port = cfg["dns_listen_port"]
+            # tproxy 模式下 DNS 转发器需要监听所有接口以接收 LAN 设备的查询
+            cfg["dns_listen_host"] = "0.0.0.0"
+            INFO(f"DNS 透明捕获已启用（owner uid={proxy_uid} 的进程将绕过重定向，防止环路）")
+
+    apply_content, cleanup_content = _tproxy_scripts(
+        server_ip, tproxy_port, local_mode, backend, dns_port, proxy_uid
+    )
 
     apply_path   = "tproxy_rules.sh"
     cleanup_path = "tproxy_cleanup.sh"
@@ -599,7 +691,7 @@ def configure_tproxy(server_ip: str, cfg: dict) -> None:
             ERR("应用失败，请手动执行脚本")
 
 
-def configure_client(brutal_available: bool) -> None:
+def configure_client() -> None:
     TITLE("客户端配置")
 
     server_host = ask("服务端 IP 或域名")
@@ -608,25 +700,22 @@ def configure_client(brutal_available: bool) -> None:
     camouflage  = ask("伪装域名（与服务端一致）", "www.apple.com")
     socks5_port = ask("本地 SOCKS5 端口", "1080")
 
-    rate_bps  = 0
-    pool_size = 10
-
-    if brutal_available:
-        iface = get_default_interface()
-        suggested = suggest_brutal_rate(iface)
-        INFO(f"建议单连接速率：{suggested // 1_000_000} Mbps")
-        if ask_yn("启用 TCP Brutal 多连接加速？"):
-            rate_input = ask("单连接速率（Mbps）", str(suggested // 1_000_000))
-            rate_bps = int(rate_input) * 1_000_000
-
-            pool_input = ask(
-                "预建连接数（越多总吞吐越高，建议 10~20）",
-                "20",
-            )
-            pool_size = int(pool_input)
-
-            total_mbps = rate_bps * pool_size / 1e6
-            INFO(f"预计总吞吐上限：{pool_size} × {rate_bps//1_000_000} = {total_mbps:.0f} Mbps")
+    # ── DNS 转发器 ────────────────────────────────────────────────────────────
+    dns_cfg: dict = {}
+    if ask_yn("是否启用本地 DNS 转发器（防止 DNS 泄漏）？"):
+        dns_port = ask("DNS 监听端口（5353 无需 root，53 需要 root）", "5353")
+        cn_dns   = ask("国内 DNS 服务器", "223.5.5.5")
+        remote   = ask("境外 DNS 服务器（通过隧道解析）", "8.8.8.8")
+        dns_cfg  = {
+            "dns_listen_host": "127.0.0.1",
+            "dns_listen_port": int(dns_port),
+            "cn_dns":          cn_dns,
+            "remote_dns":      remote,
+        }
+        INFO(f"国内域名 → {cn_dns}  境外域名 → {remote}（通过隧道）")
+        INFO(f"启动后将系统 DNS 改为 127.0.0.1:{dns_port} 即可防止泄漏")
+    else:
+        dns_cfg = {"dns_listen_port": 0}
 
     rules_cfg = configure_rules()
 
@@ -637,8 +726,9 @@ def configure_client(brutal_available: bool) -> None:
         "server_port":    int(server_port),
         "password":       password,
         "camouflage_host": camouflage,
-        "brutal_rate_bps": rate_bps,
-        "brutal_pool_size": pool_size,
+        "brutal_rate_bps": 0,
+        "brutal_pool_size": 10,
+        **dns_cfg,
         **rules_cfg,
     }
 
@@ -943,15 +1033,14 @@ def main() -> None:
 
     role = ask("部署角色：[1] 服务端（墙外 VPS）  [2] 客户端（本地）", "1")
 
-    # 检测并（可选）安装 TCP Brutal
-    brutal_ok = handle_brutal_install()
-
     if role == "2":
-        configure_client(brutal_ok)
+        configure_client()
         install_service("client", "config_client.json")
         TITLE("启动命令")
         print("  python3 client.py config_client.json")
     else:
+        # 仅服务端需要 TCP Brutal 内核模块
+        brutal_ok = handle_brutal_install()
         configure_server(brutal_ok)
         install_service("server", "config_server.json")
         TITLE("启动命令")
