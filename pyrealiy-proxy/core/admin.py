@@ -15,115 +15,346 @@ _HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PyReality 监控面板</title>
+<title>PyReality · NOC</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%;overflow:hidden;background:#0f111a;color:#c9d1d9;font-family:'Courier New',monospace;font-size:13px}
+html,body{height:100%;overflow:hidden;font-family:'Courier New',monospace;font-size:13px}
+:root{
+  --bg:#030712;--bg2:#060d1a;--card:rgba(8,18,38,.85);
+  --bdr:rgba(0,180,255,.12);--bdr2:rgba(0,180,255,.28);
+  --neon:#00ccff;--neon2:#0066ff;--np:#9944ee;
+  --grn:#00ff88;--amb:#ffaa00;--red:#ff2244;
+  --tx:#a8c8e8;--tx2:#4a6a8a;--tx3:#1e3050
+}
+body{
+  background:var(--bg);color:var(--tx);
+  background-image:
+    linear-gradient(rgba(0,200,255,.022) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(0,200,255,.022) 1px,transparent 1px);
+  background-size:44px 44px
+}
+.layout{display:flex;height:100vh;overflow:hidden}
 
-/* ── 整体三区布局 ── */
-.layout{display:flex;height:100vh}
+/* ── sidebar ── */
+.sidebar{
+  width:188px;flex-shrink:0;
+  background:linear-gradient(180deg,var(--bg2),var(--bg));
+  border-right:1px solid var(--bdr);display:flex;flex-direction:column
+}
+.brand{padding:20px 16px 14px;border-bottom:1px solid var(--bdr)}
+.brand-name{
+  font-size:17px;font-weight:bold;letter-spacing:2px;color:var(--neon);
+  text-shadow:0 0 20px rgba(0,204,255,.6)
+}
+.brand-sub{font-size:9px;color:var(--tx2);letter-spacing:3px;margin-top:3px;text-transform:uppercase}
+.dot{
+  display:inline-block;width:7px;height:7px;border-radius:50%;
+  background:var(--grn);box-shadow:0 0 8px var(--grn);
+  animation:pulse 2s ease-in-out infinite;margin-right:5px;vertical-align:middle
+}
+@keyframes pulse{
+  0%,100%{opacity:1;box-shadow:0 0 8px var(--grn),0 0 14px rgba(0,255,136,.35)}
+  50%{opacity:.3;box-shadow:0 0 3px var(--grn)}
+}
+.nav-menu{flex:1;padding:6px 0;overflow-y:auto}
+.nav-item{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:9px 16px;cursor:pointer;color:var(--tx2);font-size:12px;
+  border-left:2px solid transparent;transition:all .15s;letter-spacing:.3px
+}
+.nav-item:hover{color:var(--tx);background:rgba(0,204,255,.04);border-left-color:rgba(0,204,255,.2)}
+.nav-item.on{
+  color:var(--neon);border-left-color:var(--neon);
+  background:rgba(0,204,255,.07);text-shadow:0 0 8px rgba(0,204,255,.35)
+}
+.badge{
+  background:rgba(0,204,255,.1);color:var(--neon);
+  border:1px solid rgba(0,204,255,.2);border-radius:10px;
+  padding:1px 7px;font-size:10px;line-height:1.5
+}
+.badge.r{background:rgba(255,34,68,.12);color:var(--red);border-color:rgba(255,34,68,.25)}
+.sidebar-ft{padding:10px 14px;color:var(--tx3);font-size:10px;border-top:1px solid var(--bdr)}
+.sidebar-ts{color:var(--tx2);font-size:10px;margin-top:3px}
 
-/* ── 左导航 ── */
-.nav{width:160px;flex-shrink:0;background:#0d1117;border-right:1px solid #21262d;display:flex;flex-direction:column;padding:0}
-.nav-brand{padding:18px 16px 14px;color:#58a6ff;font-size:14px;font-weight:bold;letter-spacing:.5px;border-bottom:1px solid #21262d}
-.nav-menu{flex:1;padding:10px 0}
-.nav-item{padding:10px 18px;cursor:pointer;color:#8b949e;border-left:2px solid transparent;transition:all .15s}
-.nav-item:hover{color:#c9d1d9;background:#161b22}
-.nav-item.on{color:#58a6ff;border-left-color:#58a6ff;background:#161b22}
-.nav-item .badge{float:right;background:#30363d;color:#8b949e;border-radius:10px;padding:1px 7px;font-size:10px;line-height:1.6}
-.nav-item.on .badge{background:#1f3a5f;color:#79c0ff}
-.nav-ts{padding:12px 16px;color:#484f58;font-size:10px;border-top:1px solid #21262d}
+/* ── main ── */
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+.topbar{
+  display:flex;align-items:center;gap:14px;padding:8px 20px;flex-shrink:0;
+  background:rgba(6,13,26,.92);border-bottom:1px solid var(--bdr);
+  backdrop-filter:blur(20px)
+}
+.tb-title{font-size:10px;color:var(--tx2);letter-spacing:1.5px;text-transform:uppercase}
+.tb-online{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--grn);text-shadow:0 0 6px rgba(0,255,136,.4)}
+.tb-sep{flex:1}
+.tb-m{text-align:right}
+.tb-m .v{font-size:13px;font-weight:bold}
+.tb-m .l{font-size:9px;color:var(--tx2);letter-spacing:.4px}
 
-/* ── 右侧：上统计 + 下内容 ── */
-.right{flex:1;display:flex;flex-direction:column;overflow:hidden}
+/* ── panel system ── */
+.panel{display:none;flex:1;min-height:0;flex-direction:column;overflow:hidden}
+.panel.on{display:flex}
 
-/* 上栏：统计 */
-.stats{display:flex;gap:0;border-bottom:1px solid #21262d;background:#161b22;flex-shrink:0}
-.stat{flex:1;padding:14px 20px;border-right:1px solid #21262d}
-.stat:last-child{border-right:none}
-.stat-val{font-size:22px;font-weight:bold;color:#58a6ff;line-height:1}
-.stat-val.red{color:#f85149}
-.stat-lbl{font-size:10px;color:#8b949e;margin-top:5px;letter-spacing:.3px}
+/* ── overview ── */
+.ov-wrap{flex:1;overflow-y:auto;padding:14px 18px;display:flex;flex-direction:column;gap:12px}
+.ov-wrap::-webkit-scrollbar{width:3px}
+.ov-wrap::-webkit-scrollbar-thumb{background:var(--bdr2);border-radius:2px}
 
-/* 下栏：内容面板 */
-.panels{flex:1;overflow-y:auto;padding:20px 24px}
-.panel{display:none}
-.panel.on{display:block}
+/* ── stat cards ── */
+.stat-row{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;flex-shrink:0}
+.sc{
+  background:var(--card);border:1px solid var(--bdr);border-radius:7px;
+  padding:13px 14px;backdrop-filter:blur(20px);
+  transition:border-color .25s,box-shadow .25s;position:relative;overflow:hidden
+}
+.sc::after{
+  content:'';position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,var(--neon),transparent);opacity:.35
+}
+.sc:hover{border-color:var(--bdr2);box-shadow:0 0 18px rgba(0,204,255,.09)}
+.sv{font-size:22px;font-weight:bold;line-height:1;margin-bottom:5px}
+.sv.b{color:var(--neon);text-shadow:0 0 10px rgba(0,204,255,.35)}
+.sv.g{color:var(--grn);text-shadow:0 0 10px rgba(0,255,136,.35)}
+.sv.a{color:var(--amb);text-shadow:0 0 10px rgba(255,170,0,.35)}
+.sv.r{color:var(--red);text-shadow:0 0 10px rgba(255,34,68,.35)}
+.sl{font-size:9px;color:var(--tx2);letter-spacing:.5px;text-transform:uppercase}
 
-/* ── 表格 ── */
-table{width:100%;border-collapse:collapse}
-th{background:#161b22;color:#8b949e;padding:6px 10px;text-align:left;border-bottom:1px solid #30363d;font-weight:normal;font-size:10px;letter-spacing:.5px;text-transform:uppercase;position:sticky;top:0}
-td{padding:6px 10px;border-bottom:1px solid #161b22;white-space:nowrap}
-tr:hover td{background:#161b22}
-.empty{color:#484f58;font-style:italic}
+/* ── chart ── */
+.chart-wrap{
+  background:var(--card);border:1px solid var(--bdr);border-radius:7px;
+  padding:12px 14px;flex-shrink:0;backdrop-filter:blur(20px)
+}
+.sec-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.sec-title{font-size:10px;color:var(--neon);letter-spacing:1.5px;text-transform:uppercase;font-weight:bold}
+.legend{display:flex;gap:12px}
+.leg{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--tx2)}
+.leg-line{width:14px;height:2px;border-radius:1px}
+canvas{display:block;width:100%;height:80px}
 
-/* ── 按钮 ── */
-.btn{border:none;padding:2px 9px;border-radius:3px;cursor:pointer;font-size:11px;font-family:inherit;line-height:1.6}
-.btn-red{background:#da3633;color:#fff}.btn-red:hover{background:#f85149}
-.btn-grn{background:#238636;color:#fff}.btn-grn:hover{background:#2ea043}
-.btn-gray{background:#30363d;color:#c9d1d9}.btn-gray:hover{background:#3d444e}
-.dim td{opacity:.5}.dim td:last-child{opacity:1}
-.sh{cursor:pointer;user-select:none}.sh:hover{color:#c9d1d9}.sa{color:#58a6ff}.arr{font-size:9px;opacity:.8}
-.cg{color:#3fb950}.cy{color:#d29922}.co{color:#e3b341}
+/* ── glass card ── */
+.glass{
+  background:var(--card);border:1px solid var(--bdr);border-radius:7px;
+  backdrop-filter:blur(20px);display:flex;flex-direction:column;overflow:hidden;
+  transition:border-color .2s
+}
+.glass:hover{border-color:rgba(0,180,255,.2)}
+.g-head{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:9px 12px;border-bottom:1px solid var(--bdr);flex-shrink:0
+}
+.g-body{flex:1;overflow-y:auto;padding:8px}
+.g-body::-webkit-scrollbar{width:3px}
+.g-body::-webkit-scrollbar-thumb{background:var(--bdr2);border-radius:2px}
+.ov-grid{display:grid;grid-template-columns:3fr 2fr;gap:12px;flex:1;min-height:220px}
+
+/* ── connection cards ── */
+.cc{
+  background:rgba(0,204,255,.025);border:1px solid var(--bdr);border-radius:6px;
+  padding:9px 11px;margin-bottom:5px;transition:all .18s;position:relative;overflow:hidden
+}
+.cc::before{
+  content:'';position:absolute;left:0;top:0;bottom:0;width:2px;
+  background:linear-gradient(180deg,var(--neon),var(--neon2))
+}
+.cc:hover{border-color:rgba(0,204,255,.24);box-shadow:0 0 12px rgba(0,204,255,.07);background:rgba(0,204,255,.045)}
+.cr1{display:flex;align-items:center;gap:7px;margin-bottom:5px}
+.ctarget{color:var(--tx);font-size:12px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cdur{font-size:10px;padding:1px 5px;border-radius:3px;flex-shrink:0}
+.cdur.n{color:var(--tx2)}.cdur.a{color:var(--amb)}.cdur.g{color:var(--grn)}
+.cr2{display:flex;align-items:center;gap:10px;font-size:10px;color:var(--tx2)}
+.cbytes{margin-left:auto;display:flex;gap:8px}
+.cup{color:var(--neon)}.cdn{color:#aa66ff}
+.cact{display:flex;gap:4px;margin-top:6px}
+
+/* ── proto badges ── */
+.pb{font-size:9px;padding:1px 6px;border-radius:3px;font-weight:bold;letter-spacing:.3px;flex-shrink:0}
+.pb-tls {background:rgba(0,204,255,.13);color:var(--neon);border:1px solid rgba(0,204,255,.28)}
+.pb-http{background:rgba(0,255,136,.1); color:var(--grn); border:1px solid rgba(0,255,136,.22)}
+.pb-dns {background:rgba(136,51,255,.13);color:#aa88ff;  border:1px solid rgba(136,51,255,.28)}
+.pb-tcp {background:rgba(255,170,0,.1); color:var(--amb); border:1px solid rgba(255,170,0,.22)}
+
+/* ── domain bars ── */
+.di{padding:7px 10px;border-bottom:1px solid rgba(0,180,255,.06)}
+.di:last-child{border-bottom:none}
+.di-row{display:flex;align-items:center;gap:8px}
+.di-name{flex:1;color:var(--tx);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.di-cnt{color:var(--tx2);font-size:10px;min-width:28px;text-align:right}
+.di-bytes{color:var(--neon);font-size:10px;min-width:56px;text-align:right}
+.di-bw{height:2px;background:rgba(0,204,255,.07);border-radius:1px;overflow:hidden;margin-top:4px}
+.di-bar{height:100%;border-radius:1px;background:linear-gradient(90deg,var(--neon2),var(--neon));transition:width .5s ease}
+
+/* ── blocked list ── */
+.al{display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid rgba(0,180,255,.06)}
+.al:last-child{border-bottom:none}
+.al-dot{
+  width:6px;height:6px;border-radius:50%;background:var(--red);box-shadow:0 0 6px var(--red);
+  flex-shrink:0;animation:pulse 2s ease-in-out infinite
+}
+.al-ip{color:var(--red);flex:1}
+
+/* ── table ── */
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{
+  background:rgba(0,204,255,.04);color:var(--tx2);padding:7px 10px;text-align:left;
+  border-bottom:1px solid var(--bdr);font-weight:normal;
+  font-size:10px;letter-spacing:.7px;text-transform:uppercase;
+  position:sticky;top:0;backdrop-filter:blur(10px)
+}
+.sh{cursor:pointer}.sh:hover{color:var(--tx)}.sa{color:var(--neon)}
+.arr{font-size:8px;opacity:.7}
+td{padding:6px 10px;border-bottom:1px solid rgba(0,204,255,.035);white-space:nowrap;color:var(--tx)}
+tr:hover td{background:rgba(0,204,255,.035)}
+.empty{color:var(--tx3);font-style:italic;text-align:center;padding:20px;display:block}
+
+/* ── buttons ── */
+.btn{
+  border:none;padding:3px 9px;border-radius:4px;cursor:pointer;
+  font-size:10px;font-family:inherit;line-height:1.6;transition:all .18s
+}
+.bk{background:rgba(255,170,0,.1);color:var(--amb);border:1px solid rgba(255,170,0,.22)}
+.bk:hover{background:rgba(255,170,0,.22);box-shadow:0 0 7px rgba(255,170,0,.18)}
+.bb{background:rgba(255,34,68,.1);color:var(--red);border:1px solid rgba(255,34,68,.22)}
+.bb:hover{background:rgba(255,34,68,.22);box-shadow:0 0 7px rgba(255,34,68,.18)}
+.bu{background:rgba(0,255,136,.08);color:var(--grn);border:1px solid rgba(0,255,136,.2)}
+.bu:hover{background:rgba(0,255,136,.18);box-shadow:0 0 7px rgba(0,255,136,.18)}
+
+/* ── color helpers ── */
+.cg{color:var(--grn)}.cy{color:var(--amb)}.co{color:#ff8800}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--bdr2);border-radius:2px}
 </style>
 </head>
 <body>
 <div class="layout">
 
-<!-- ── 左导航 ── -->
-<nav class="nav">
-  <div class="nav-brand">PyReality</div>
-  <div class="nav-menu">
-    <div class="nav-item on" onclick="show('conns')"  id="nav-conns" >活跃连接  <span class="badge" id="b-active">0</span></div>
-    <div class="nav-item"   onclick="show('recent')" id="nav-recent">连接记录  <span class="badge" id="b-recent">0</span></div>
-    <div class="nav-item"   onclick="show('domains')" id="nav-domains">域名分布</div>
-    <div class="nav-item"   onclick="show('blocked')" id="nav-blocked">黑名单    <span class="badge" id="b-blocked">0</span></div>
+<nav class="sidebar">
+  <div class="brand">
+    <div class="brand-name"><span class="dot"></span>PyReality</div>
+    <div class="brand-sub">NOC · Console</div>
   </div>
-  <div class="nav-ts" id="ts">—</div>
+  <div class="nav-menu">
+    <div class="nav-item on" onclick="show('overview')" id="nav-overview"><span>◈ 概览</span></div>
+    <div class="nav-item" onclick="show('conns')"   id="nav-conns"  ><span>◎ 活跃连接</span><span class="badge" id="b-active">0</span></div>
+    <div class="nav-item" onclick="show('recent')"  id="nav-recent" ><span>◷ 连接记录</span><span class="badge" id="b-recent">0</span></div>
+    <div class="nav-item" onclick="show('domains')" id="nav-domains"><span>◇ 域名分布</span></div>
+    <div class="nav-item" onclick="show('blocked')" id="nav-blocked"><span>⊘ 封锁名单</span><span class="badge r" id="b-blocked">0</span></div>
+  </div>
+  <div class="sidebar-ft">
+    <div>PyReality Proxy</div>
+    <div class="sidebar-ts" id="ts">—</div>
+  </div>
 </nav>
 
-<!-- ── 右侧 ── -->
-<div class="right">
-
-  <!-- 上栏：统计 -->
-  <div class="stats">
-    <div class="stat"><div class="stat-val" id="s-active">0</div><div class="stat-lbl">活跃连接</div></div>
-    <div class="stat"><div class="stat-val" id="s-total">0</div><div class="stat-lbl">累计连接</div></div>
-    <div class="stat"><div class="stat-val" id="s-up">—</div><div class="stat-lbl">总上行</div></div>
-    <div class="stat"><div class="stat-val" id="s-dn">—</div><div class="stat-lbl">总下行</div></div>
-    <div class="stat"><div class="stat-val red" id="s-blocked">0</div><div class="stat-lbl">封锁 IP</div></div>
+<div class="main">
+  <div class="topbar">
+    <div class="tb-title">Network Operations Center</div>
+    <div class="tb-online"><span class="dot"></span>ONLINE</div>
+    <div class="tb-sep"></div>
+    <div class="tb-m"><div class="v" id="t-up" style="color:var(--neon)">—</div><div class="l">上行总量</div></div>
+    <div class="tb-m"><div class="v" id="t-dn" style="color:#aa66ff">—</div><div class="l">下行总量</div></div>
+    <div class="tb-m"><div class="v" id="t-conns" style="color:var(--grn)">0</div><div class="l">活跃连接</div></div>
   </div>
 
-  <!-- 下栏：内容面板 -->
-  <div class="panels">
-
-    <div class="panel on" id="panel-conns">
-      <table><thead id="th-conns"></thead><tbody id="conns"></tbody></table>
+  <!-- OVERVIEW -->
+  <div class="panel on" id="panel-overview">
+    <div class="ov-wrap">
+      <div class="stat-row">
+        <div class="sc"><div class="sv b" id="s-active">0</div><div class="sl">活跃连接</div></div>
+        <div class="sc"><div class="sv b" id="s-total">0</div><div class="sl">累计连接</div></div>
+        <div class="sc"><div class="sv g" id="s-up">—</div><div class="sl">总上行</div></div>
+        <div class="sc"><div class="sv a" id="s-dn">—</div><div class="sl">总下行</div></div>
+        <div class="sc"><div class="sv r" id="s-blocked">0</div><div class="sl">封锁 IP</div></div>
+      </div>
+      <div class="chart-wrap">
+        <div class="sec-head">
+          <div class="sec-title">实时流量监控</div>
+          <div class="legend">
+            <div class="leg"><div class="leg-line" style="background:var(--neon)"></div>上行</div>
+            <div class="leg"><div class="leg-line" style="background:#aa66ff"></div>下行</div>
+          </div>
+        </div>
+        <canvas id="chart" height="80"></canvas>
+      </div>
+      <div class="ov-grid">
+        <div class="glass">
+          <div class="g-head">
+            <div class="sec-title">活跃连接</div>
+            <div style="font-size:10px;color:var(--tx2)">最近 5 条</div>
+          </div>
+          <div class="g-body" id="ov-conns"></div>
+        </div>
+        <div class="glass">
+          <div class="g-head">
+            <div class="sec-title">访问排行</div>
+            <div style="font-size:10px;color:var(--tx2)">TOP 10</div>
+          </div>
+          <div class="g-body" style="padding:0" id="ov-domains"></div>
+        </div>
+      </div>
     </div>
-
-    <div class="panel" id="panel-recent">
-      <table><thead id="th-recent"></thead><tbody id="recent"></tbody></table>
-    </div>
-
-    <div class="panel" id="panel-domains">
-      <table><thead id="th-domains"></thead><tbody id="domains"></tbody></table>
-    </div>
-
-    <div class="panel" id="panel-blocked">
-      <table><thead id="th-blocked"></thead><tbody id="blocked"></tbody></table>
-    </div>
-
   </div>
-</div>
-</div>
 
+  <!-- ACTIVE CONNS -->
+  <div class="panel" id="panel-conns">
+    <div style="padding:12px 18px 8px;flex-shrink:0;border-bottom:1px solid var(--bdr)">
+      <div class="sec-title">活跃连接</div>
+    </div>
+    <div style="flex:1;min-height:0;overflow-y:auto;padding:10px 18px" id="conns-list"></div>
+  </div>
+
+  <!-- RECENT -->
+  <div class="panel" id="panel-recent">
+    <div style="flex:1;min-height:0;padding:14px 18px;display:flex;flex-direction:column">
+      <div class="glass" style="flex:1;min-height:0">
+        <div class="g-head"><div class="sec-title">连接记录</div></div>
+        <div class="g-body" style="padding:0;overflow-x:auto">
+          <table><thead id="th-recent"></thead><tbody id="recent"></tbody></table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DOMAINS -->
+  <div class="panel" id="panel-domains">
+    <div style="flex:1;min-height:0;padding:14px 18px;display:flex;flex-direction:column">
+      <div class="glass" style="flex:1;min-height:0">
+        <div class="g-head">
+          <div class="sec-title">域名 / 目标分布</div>
+          <div style="font-size:10px;color:var(--tx2)">TOP 30</div>
+        </div>
+        <div class="g-body" style="padding:0" id="domains"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- BLOCKED -->
+  <div class="panel" id="panel-blocked">
+    <div style="flex:1;min-height:0;padding:14px 18px;display:flex;flex-direction:column">
+      <div class="glass" style="flex:1;min-height:0">
+        <div class="g-head">
+          <div class="sec-title">⊘ 封锁名单</div>
+          <div style="font-size:10px;color:var(--red);text-shadow:0 0 6px rgba(255,34,68,.35)" id="b-blocked2">0 个 IP</div>
+        </div>
+        <div class="g-body" style="padding:0" id="blocked"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div>
 <script>
 const token = new URLSearchParams(location.search).get('token') || '';
 const q = s => token ? s + (s.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token) : s;
 
-let cur = 'conns';
+const HLEN = 60;
+let histUp = [], histDn = [], prevUp = 0, prevDn = 0;
+
+const sort = {
+  recent:  {col:'closed_at', asc:false},
+  domains: {col:'bytes',     asc:false},
+};
+
 function show(id) {
-  cur = id;
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('on'));
   document.querySelectorAll('.panel').forEach(el => el.classList.remove('on'));
   document.getElementById('nav-' + id).classList.add('on');
@@ -145,25 +376,30 @@ function fmtD(s) {
 }
 function fmtT(ts) { return new Date(ts * 1000).toLocaleTimeString(); }
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function durCls(s) { return s > 300 ? 'cg' : s > 30 ? 'cy' : ''; }
+function bCls(b)   { return b > 10485760 ? 'co' : b > 1048576 ? 'cg' : ''; }
 
-// ── 排序 ──────────────────────────────────────────────────────────────────────
-const sort = {
-  conns:   { col:'id',        asc:true  },
-  recent:  { col:'closed_at', asc:false },
-  domains: { col:'conns',     asc:false },
-};
+function proto(target) {
+  const m = String(target).match(/:(\d+)$/);
+  const p = m ? +m[1] : 0;
+  if (p === 443) return '<span class="pb pb-tls">TLS</span>';
+  if (p === 80)  return '<span class="pb pb-http">HTTP</span>';
+  if (p === 53)  return '<span class="pb pb-dns">DNS</span>';
+  return '<span class="pb pb-tcp">TCP</span>';
+}
+
 function sortBy(tbl, col) {
   const s = sort[tbl];
-  s.asc = (s.col === col) ? !s.asc : true;
+  s.asc = s.col === col ? !s.asc : true;
   s.col = col;
   load();
 }
 function srt(arr, tbl) {
-  const { col, asc } = sort[tbl];
+  const {col, asc} = sort[tbl];
   return [...arr].sort((a, b) => {
     const av = a[col] ?? '', bv = b[col] ?? '';
-    const cmp = typeof av === 'number' ? av - bv : String(av).localeCompare(String(bv));
-    return asc ? cmp : -cmp;
+    const c = typeof av === 'number' ? av - bv : String(av).localeCompare(String(bv));
+    return asc ? c : -c;
   });
 }
 function sth(tbl, col, lbl) {
@@ -171,13 +407,80 @@ function sth(tbl, col, lbl) {
   const arw = on ? `<span class="arr">${s.asc ? '▲' : '▼'}</span>` : '';
   return `<th class="sh${on?' sa':''}" onclick="sortBy('${tbl}','${col}')">${lbl} ${arw}</th>`;
 }
-function durCls(s) { return s > 300 ? 'cg' : s > 30 ? 'cy' : ''; }
-function bCls(b)   { return b > 10485760 ? 'co' : b > 1048576 ? 'cg' : ''; }
 
 async function api(url) { await fetch(q(url), {method:'POST'}); load(); }
 function kill(id)    { api('/api/kill?id='    + id); }
 function block(ip)   { api('/api/block?ip='   + encodeURIComponent(ip)); }
 function unblock(ip) { api('/api/unblock?ip=' + encodeURIComponent(ip)); }
+
+function drawChart(up, dn) {
+  const canvas = document.getElementById('chart');
+  const W = canvas.offsetWidth;
+  if (!W) return;
+  canvas.width = W;
+  const H = canvas.height;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  ctx.strokeStyle = 'rgba(0,200,255,.05)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 4; i++) {
+    const y = Math.round(H * i / 4) + .5;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  for (let i = 1; i < 7; i++) {
+    const x = Math.round(W * i / 7) + .5;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+
+  const mx = Math.max(...up, ...dn, 1);
+
+  function line(data, color) {
+    const pts = data.map((v, i) => [i / (HLEN - 1) * W, H - (v / mx) * (H - 6) - 3]);
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, color + '44');
+    g.addColorStop(1, color + '00');
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], H);
+    pts.forEach(([x, y]) => ctx.lineTo(x, y));
+    ctx.lineTo(pts[pts.length - 1][0], H);
+    ctx.closePath();
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.beginPath();
+    pts.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 5;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+
+  line(up, '#00ccff');
+  line(dn, '#9944ee');
+}
+
+function connCard(c, actions) {
+  const dc = c.duration > 300 ? 'g' : c.duration > 30 ? 'a' : 'n';
+  const act = actions ? `<div class="cact">
+    <button class="btn bk" onclick="kill(${c.id})">断开</button>
+    <button class="btn bb" onclick="block(${JSON.stringify(c.client_ip)})">封锁</button>
+  </div>` : '';
+  return `<div class="cc">
+    <div class="cr1">${proto(c.target)}<span class="ctarget">${esc(c.target)}</span><span class="cdur ${dc}">${fmtD(c.duration)}</span></div>
+    <div class="cr2"><span>${esc(c.client_ip)}</span><span class="cbytes"><span class="cup">↑ ${fmtB(c.bytes_up)}</span><span class="cdn">↓ ${fmtB(c.bytes_down)}</span></span></div>
+    ${act}
+  </div>`;
+}
+
+function domainItem(x, maxB) {
+  const pct = maxB > 0 ? Math.max(2, x.bytes / maxB * 100) : 0;
+  return `<div class="di">
+    <div class="di-row"><span class="di-name">${esc(x.domain)}</span><span class="di-cnt">${x.conns}</span><span class="di-bytes">${fmtB(x.bytes)}</span></div>
+    <div class="di-bw"><div class="di-bar" style="width:${pct.toFixed(1)}%"></div></div>
+  </div>`;
+}
 
 async function load() {
   let d;
@@ -185,71 +488,76 @@ async function load() {
     const r = await fetch(q('/api/stats'));
     if (!r.ok) { document.getElementById('ts').textContent = '认证失败'; return; }
     d = await r.json();
-  } catch(e) { document.getElementById('ts').textContent = '连接失败'; return; }
+  } catch(e) { document.getElementById('ts').textContent = '连接中断'; return; }
 
   document.getElementById('ts').textContent = new Date().toLocaleTimeString();
+
+  const du = Math.max(0, d.total_bytes_up - prevUp);
+  const dd = Math.max(0, d.total_bytes_dn - prevDn);
+  prevUp = d.total_bytes_up; prevDn = d.total_bytes_dn;
+  histUp.push(du); if (histUp.length > HLEN) histUp.shift();
+  histDn.push(dd); if (histDn.length > HLEN) histDn.shift();
+  const padU = Array(HLEN - histUp.length).fill(0).concat(histUp);
+  const padD = Array(HLEN - histDn.length).fill(0).concat(histDn);
+  drawChart(padU, padD);
 
   document.getElementById('s-active').textContent  = d.active_count;
   document.getElementById('s-total').textContent   = d.total_conns;
   document.getElementById('s-up').textContent      = fmtB(d.total_bytes_up);
   document.getElementById('s-dn').textContent      = fmtB(d.total_bytes_dn);
   document.getElementById('s-blocked').textContent = d.blocked.length;
+  document.getElementById('t-up').textContent      = fmtB(d.total_bytes_up);
+  document.getElementById('t-dn').textContent      = fmtB(d.total_bytes_dn);
+  document.getElementById('t-conns').textContent   = d.active_count;
   document.getElementById('b-active').textContent  = d.active_count;
   document.getElementById('b-recent').textContent  = (d.recent||[]).length;
   document.getElementById('b-blocked').textContent = d.blocked.length;
+  document.getElementById('b-blocked2').textContent= d.blocked.length + ' 个 IP';
 
-  // 活跃连接
-  document.getElementById('th-conns').innerHTML =
-    `<tr>${sth('conns','id','ID')}${sth('conns','client_ip','客户端 IP')}${sth('conns','target','目标')}` +
-    `${sth('conns','duration','时长')}${sth('conns','bytes_up','上行')}${sth('conns','bytes_down','下行')}<th>操作</th></tr>`;
-  const ac = srt(d.connections, 'conns');
-  document.getElementById('conns').innerHTML = ac.length
-    ? ac.map(c =>
-        `<tr><td>${c.id}</td><td>${esc(c.client_ip)}</td><td>${esc(c.target)}</td>` +
-        `<td class="${durCls(c.duration)}">${fmtD(c.duration)}</td>` +
-        `<td class="${bCls(c.bytes_up)}">${fmtB(c.bytes_up)}</td>` +
-        `<td class="${bCls(c.bytes_down)}">${fmtB(c.bytes_down)}</td>` +
-        `<td><button class="btn btn-gray" onclick="kill(${c.id})">断开</button> ` +
-        `<button class="btn btn-red" onclick="block(${JSON.stringify(c.client_ip)})">封锁</button></td></tr>`
-      ).join('')
-    : `<tr><td colspan="7" class="empty">暂无活跃连接</td></tr>`;
+  const top5 = (d.connections||[]).slice(0, 5);
+  document.getElementById('ov-conns').innerHTML = top5.length
+    ? top5.map(c => connCard(c, false)).join('')
+    : '<span class="empty">暂无活跃连接</span>';
 
-  // 连接记录
+  const dm10 = srt(d.top_domains||[], 'domains').slice(0, 10);
+  const mb10 = dm10.reduce((m, x) => Math.max(m, x.bytes), 0);
+  document.getElementById('ov-domains').innerHTML = dm10.length
+    ? dm10.map(x => domainItem(x, mb10)).join('')
+    : '<span class="empty">暂无数据</span>';
+
+  const conns = d.connections || [];
+  document.getElementById('conns-list').innerHTML = conns.length
+    ? conns.map(c => connCard(c, true)).join('')
+    : '<span class="empty">暂无活跃连接</span>';
+
   document.getElementById('th-recent').innerHTML =
-    `<tr>${sth('recent','id','ID')}${sth('recent','client_ip','客户端 IP')}${sth('recent','target','目标')}` +
+    `<tr>${sth('recent','id','ID')}${sth('recent','client_ip','客户端')}${sth('recent','target','目标')}` +
     `${sth('recent','duration','时长')}${sth('recent','bytes_up','上行')}${sth('recent','bytes_down','下行')}` +
     `${sth('recent','closed_at','关闭时间')}<th>操作</th></tr>`;
   const rc = srt(d.recent||[], 'recent');
   document.getElementById('recent').innerHTML = rc.length
     ? rc.map(c =>
-        `<tr class="dim"><td>${c.id}</td><td>${esc(c.client_ip)}</td><td>${esc(c.target)}</td>` +
+        `<tr><td>${c.id}</td><td>${esc(c.client_ip)}</td><td>${esc(c.target)}</td>` +
         `<td class="${durCls(c.duration)}">${fmtD(c.duration)}</td>` +
         `<td class="${bCls(c.bytes_up)}">${fmtB(c.bytes_up)}</td>` +
         `<td class="${bCls(c.bytes_down)}">${fmtB(c.bytes_down)}</td>` +
         `<td>${fmtT(c.closed_at)}</td>` +
-        `<td><button class="btn btn-red" onclick="block(${JSON.stringify(c.client_ip)})">封锁</button></td></tr>`
+        `<td><button class="btn bb" onclick="block(${JSON.stringify(c.client_ip)})">封锁</button></td></tr>`
       ).join('')
-    : `<tr><td colspan="8" class="empty">暂无记录</td></tr>`;
+    : '<tr><td colspan="8" class="empty">暂无记录</td></tr>';
 
-  // 域名分布
-  document.getElementById('th-domains').innerHTML =
-    `<tr>${sth('domains','domain','域名 / 目标')}${sth('domains','conns','连接数')}${sth('domains','bytes','总流量')}</tr>`;
-  const dm = srt(d.top_domains||[], 'domains').slice(0,30);
-  document.getElementById('domains').innerHTML = dm.length
-    ? dm.map(x =>
-        `<tr><td>${esc(x.domain)}</td><td>${x.conns}</td>` +
-        `<td class="${bCls(x.bytes)}">${fmtB(x.bytes)}</td></tr>`
-      ).join('')
-    : `<tr><td colspan="3" class="empty">暂无数据</td></tr>`;
+  const allDm = srt(d.top_domains||[], 'domains').slice(0, 30);
+  const mbAll = allDm.reduce((m, x) => Math.max(m, x.bytes), 0);
+  document.getElementById('domains').innerHTML = allDm.length
+    ? allDm.map(x => domainItem(x, mbAll)).join('')
+    : '<span class="empty">暂无数据</span>';
 
-  // 黑名单（无排序，静态头）
-  document.getElementById('th-blocked').innerHTML = '<tr><th>IP 地址</th><th>操作</th></tr>';
   document.getElementById('blocked').innerHTML = d.blocked.length
     ? d.blocked.map(ip =>
-        `<tr><td>${esc(ip)}</td>` +
-        `<td><button class="btn btn-grn" onclick="unblock(${JSON.stringify(ip)})">解除</button></td></tr>`
+        `<div class="al"><div class="al-dot"></div><div class="al-ip">${esc(ip)}</div>` +
+        `<button class="btn bu" onclick="unblock(${JSON.stringify(ip)})">解除封锁</button></div>`
       ).join('')
-    : `<tr><td colspan="2" class="empty">无封锁 IP</td></tr>`;
+    : '<span class="empty">无封锁 IP</span>';
 }
 
 load();
