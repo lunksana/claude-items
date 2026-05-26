@@ -76,6 +76,10 @@ async def server_read_hello_and_decide(
         _ct, hello_raw = await asyncio.wait_for(_read_tls_record(client_reader), timeout=8.0)
     except Exception as e:
         logger.debug("Failed to read ClientHello: %s", e)
+        try:
+            client_writer.close()
+        except Exception:
+            pass
         return False, None
 
     session_id    = extract_session_id(hello_raw)

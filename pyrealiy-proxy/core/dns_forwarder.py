@@ -51,7 +51,7 @@ def _nxdomain(query: bytes) -> bytes:
     if len(query) < 12:
         return query
     h = bytearray(query[:12])
-    h[2] = (h[2] | 0x80) & 0xFE   # QR=1，清 TC
+    h[2] = (h[2] | 0x80) & 0xFE   # QR=1，清 RD（bit 0）
     h[3] = (h[3] & 0xF0) | 0x03   # RCODE=NXDOMAIN
     h[6] = h[7] = h[8] = h[9] = h[10] = h[11] = 0
     return bytes(h) + query[12:]

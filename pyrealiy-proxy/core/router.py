@@ -272,14 +272,19 @@ class _GeoIPTable:
         while i >= 0 and self._v4[i][0] <= addr_int:
             ni, _, bi, action = self._v4[i]
             if addr_int <= bi:
-                return action.lstrip("!") if action.startswith("!") else action
+                # inverse match: IP 在网络内 → 不命中，继续匹配其他规则
+                if action.startswith("!"):
+                    return None
+                return action
             i -= 1
         return None
 
     def _match_v6(self, addr: ipaddress.IPv6Address) -> str | None:
         for net, action in self._v6:
             if addr in net:
-                return action.lstrip("!") if action.startswith("!") else action
+                if action.startswith("!"):
+                    return None
+                return action
         return None
 
 

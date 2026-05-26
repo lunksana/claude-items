@@ -47,8 +47,10 @@ class StatsStore:
         self.recent:       deque[dict]                 = deque(maxlen=50)
         self.domain_conns: defaultdict[str, int]       = defaultdict(int)
         self.domain_bytes: defaultdict[str, int]       = defaultdict(int)
-        self.blocked:      set[str]                    = set()
-        self.total_conns   = 0
+        self.blocked:       set[str]                    = set()
+        self.total_conns    = 0
+        self.total_bytes_up = 0    # cumulative from closed connections
+        self.total_bytes_dn = 0
 
     # ── connection lifecycle ───────────────────────────────────────────────────
 
@@ -65,6 +67,8 @@ class StatsStore:
     def unregister(self, conn: ConnInfo) -> None:
         self.active.pop(conn.id, None)
         self.domain_bytes[conn.target_host] += conn.bytes_up + conn.bytes_down
+        self.total_bytes_up += conn.bytes_up
+        self.total_bytes_dn += conn.bytes_down
         self.recent.appendleft(conn.as_dict(closed_at=time.time()))
 
     # ── block list ─────────────────────────────────────────────────────────────
@@ -100,13 +104,18 @@ class StatsStore:
             key=lambda x: x["conns"],
             reverse=True,
         )[:50]
+        # include bytes from currently active connections
+        act_up = sum(c.bytes_up for c in self.active.values())
+        act_dn = sum(c.bytes_down for c in self.active.values())
         return {
-            "total_conns":  self.total_conns,
-            "active_count": len(self.active),
-            "blocked":      sorted(self.blocked),
-            "connections":  conns,
-            "recent":       list(self.recent),
-            "top_domains":  top_domains,
+            "total_conns":   self.total_conns,
+            "active_count":  len(self.active),
+            "total_bytes_up": self.total_bytes_up + act_up,
+            "total_bytes_dn": self.total_bytes_dn + act_dn,
+            "blocked":       sorted(self.blocked),
+            "connections":   conns,
+            "recent":        list(self.recent),
+            "top_domains":   top_domains,
         }
 
 
