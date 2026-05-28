@@ -470,7 +470,33 @@ def _detect_firewall() -> str:
     return "iptables"
 
 
-def _tproxy_scripts_ipt(server_ip: str, port: int, local_mode: bool,
+def _resolve_server_ips(host: str) -> list[str]:
+    """
+    把用户输入的服务端 (IP / 域名) 展开为 IPv4 字符串列表。
+    iptables/nftables 虽然允许域名，但只在规则插入瞬间解析一次；
+    域名背后多 IP 或后续变化会导致排除规则失效、流量环路。
+    所以在生成脚本前一次性解析，把所有 A 记录写成多条 RETURN 规则。
+    """
+    import ipaddress
+    if not host:
+        return []
+    try:
+        ipaddress.ip_address(host)
+        return [host]                      # 已是 IP 字面量
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None, family=socket.AF_INET)
+        ips = sorted({info[4][0] for info in infos})
+        if len(ips) > 1:
+            WARN(f"域名 {host} 解析到 {len(ips)} 个 IP，全部加入 RETURN：{', '.join(ips)}")
+        return ips
+    except Exception as e:
+        ERR(f"无法解析 {host}：{e}（防环路规则将被跳过，请改为填写 IP 重跑）")
+        return []
+
+
+def _tproxy_scripts_ipt(server_ips: list[str], port: int, local_mode: bool,
                          dns_port: int = 0, proxy_uid: int = 0) -> tuple[str, str]:
     a: list[str] = [
         "#!/bin/bash",
@@ -493,11 +519,10 @@ def _tproxy_scripts_ipt(server_ip: str, port: int, local_mode: bool,
             "iptables -t mangle -N PYREALIY_LOCAL",
             *[f"iptables -t mangle -A PYREALIY_LOCAL -d {c} -j RETURN" for c in _PRIVATES],
         ]
-        if server_ip:
-            a += [
-                "# 排除代理服务端，防止流量环路",
-                f"iptables -t mangle -A PYREALIY_LOCAL -d {server_ip} -j RETURN",
-            ]
+        if server_ips:
+            a += ["# 排除代理服务端，防止流量环路"]
+            a += [f"iptables -t mangle -A PYREALIY_LOCAL -d {ip} -j RETURN"
+                  for ip in server_ips]
         a += [
             (f"iptables -t mangle -A PYREALIY_LOCAL -p tcp"
              f" -j MARK --set-mark {_TPROXY_MARK}/{_TPROXY_MARK}"),
@@ -557,7 +582,7 @@ def _tproxy_scripts_ipt(server_ip: str, port: int, local_mode: bool,
     return "\n".join(a) + "\n", "\n".join(c) + "\n"
 
 
-def _tproxy_scripts_nft(server_ip: str, port: int, local_mode: bool,
+def _tproxy_scripts_nft(server_ips: list[str], port: int, local_mode: bool,
                          dns_port: int = 0, proxy_uid: int = 0) -> tuple[str, str]:
     privates = "{ " + ", ".join(_PRIVATES) + " }"
 
@@ -571,8 +596,8 @@ def _tproxy_scripts_nft(server_ip: str, port: int, local_mode: bool,
     output: list[str] = []
     if local_mode:
         output_rules = [f"        ip daddr {privates} return"]
-        if server_ip:
-            output_rules.append(f"        ip daddr {server_ip} return")
+        for ip in server_ips:
+            output_rules.append(f"        ip daddr {ip} return")
         output_rules.append(f"        meta l4proto tcp meta mark set {_TPROXY_MARK}")
         output = [
             "    chain output {",
@@ -640,11 +665,11 @@ def _tproxy_scripts_nft(server_ip: str, port: int, local_mode: bool,
     return "\n".join(a) + "\n", "\n".join(c) + "\n"
 
 
-def _tproxy_scripts(server_ip: str, port: int, local_mode: bool, backend: str,
+def _tproxy_scripts(server_ips: list[str], port: int, local_mode: bool, backend: str,
                      dns_port: int = 0, proxy_uid: int = 0) -> tuple[str, str]:
     if backend == "nftables":
-        return _tproxy_scripts_nft(server_ip, port, local_mode, dns_port, proxy_uid)
-    return _tproxy_scripts_ipt(server_ip, port, local_mode, dns_port, proxy_uid)
+        return _tproxy_scripts_nft(server_ips, port, local_mode, dns_port, proxy_uid)
+    return _tproxy_scripts_ipt(server_ips, port, local_mode, dns_port, proxy_uid)
 
 
 def configure_tproxy(server_ip: str, cfg: dict) -> None:
@@ -679,8 +704,12 @@ def configure_tproxy(server_ip: str, cfg: dict) -> None:
             cfg["dns_listen_host"] = "0.0.0.0"
             INFO(f"DNS 透明捕获已启用（owner uid={proxy_uid} 的进程将绕过重定向，防止环路）")
 
+    # 用户可能填了域名；iptables/nftables 只在插入时解析一次，
+    # 多 IP 或后续变化会破规则。提前解析为 IP 列表，多 IP 全部排除。
+    server_ips = _resolve_server_ips(server_ip)
+
     apply_content, cleanup_content = _tproxy_scripts(
-        server_ip, tproxy_port, local_mode, backend, dns_port, proxy_uid
+        server_ips, tproxy_port, local_mode, backend, dns_port, proxy_uid
     )
 
     apply_path   = "tproxy_rules.sh"

@@ -221,9 +221,13 @@ class _GeoIPTable:
     """
 
     def __init__(self) -> None:
-        # [(network_int, prefix_len, broadcast_int, action), ...]  sorted by network_int
+        # 正向规则：[(network_int, prefix_len, broadcast_int, action), ...]，按 network_int 排序
         self._v4: list[tuple[int, int, int, str]] = []
         self._v6: list[tuple[ipaddress.IPv6Network, str]] = []
+        # 反向规则：每条规则的网段聚成一组，IP "不在" 任一网段 → 命中该规则的 action
+        # 形态：[(sorted_intervals: list[(start_int, end_int)], action), ...]
+        self._v4_inverse: list[tuple[list[tuple[int, int]], str]] = []
+        self._v6_inverse: list[tuple[list[ipaddress.IPv6Network], str]] = []
         self._built = False
 
     def add_networks(
@@ -233,20 +237,30 @@ class _GeoIPTable:
         inverse: bool = False,
     ) -> None:
         assert not self._built, "Cannot add after build()"
+        if inverse:
+            # 反向规则必须把整条规则的所有网段一起存为一组，
+            # 才能在 match 时判定 "IP 不在任何一段里"。逐网段拆开存就丢了 "all of" 语义。
+            v4_ranges: list[tuple[int, int]] = []
+            v6_nets:   list[ipaddress.IPv6Network] = []
+            for net in networks:
+                if isinstance(net, ipaddress.IPv4Network):
+                    v4_ranges.append((int(net.network_address), int(net.broadcast_address)))
+                else:
+                    v6_nets.append(net)
+            if v4_ranges:
+                v4_ranges.sort()
+                self._v4_inverse.append((v4_ranges, action))
+            if v6_nets:
+                self._v6_inverse.append((v6_nets, action))
+            return
+
         for net in networks:
             if isinstance(net, ipaddress.IPv4Network):
                 ni = int(net.network_address)
                 bi = int(net.broadcast_address)
-                if inverse:
-                    # inverse match 少见，简化为直接存储并在 match() 时处理
-                    self._v4.append((ni, net.prefixlen, bi, f"!{action}"))
-                else:
-                    self._v4.append((ni, net.prefixlen, bi, action))
+                self._v4.append((ni, net.prefixlen, bi, action))
             else:
-                if inverse:
-                    self._v6.append((net, f"!{action}"))
-                else:
-                    self._v6.append((net, action))
+                self._v6.append((net, action))
 
     def build(self) -> None:
         self._v4.sort(key=lambda x: (x[0], x[1]))
@@ -257,8 +271,26 @@ class _GeoIPTable:
             return self._match_v4(int(addr))
         return self._match_v6(addr)
 
+    @staticmethod
+    def _v4_in_intervals(addr_int: int, intervals: list[tuple[int, int]]) -> bool:
+        """二分定位 + 向前扫描，判断 addr 是否落在某区间内（兼容重叠）"""
+        lo, hi = 0, len(intervals) - 1
+        best = -1
+        while lo <= hi:
+            mid = (lo + hi) >> 1
+            if intervals[mid][0] <= addr_int:
+                best = mid; lo = mid + 1
+            else:
+                hi = mid - 1
+        i = best
+        while i >= 0 and intervals[i][0] <= addr_int:
+            if intervals[i][1] >= addr_int:
+                return True
+            i -= 1
+        return False
+
     def _match_v4(self, addr_int: int) -> str | None:
-        # 二分找到最后一个 network_int <= addr_int 的候选，再验证
+        # 1. 正向表：二分找到最后一个 network_int <= addr_int 的候选，再验证
         lo, hi = 0, len(self._v4) - 1
         best = -1
         while lo <= hi:
@@ -267,23 +299,24 @@ class _GeoIPTable:
                 best = mid; lo = mid + 1
             else:
                 hi = mid - 1
-        # 向前扫描所有可能覆盖 addr_int 的 CIDR（可能有多个重叠）
         i = best
         while i >= 0 and self._v4[i][0] <= addr_int:
             ni, _, bi, action = self._v4[i]
             if addr_int <= bi:
-                # inverse match: IP 在网络内 → 不命中，继续匹配其他规则
-                if action.startswith("!"):
-                    return None
                 return action
             i -= 1
+        # 2. 反向表：IP 不在某条规则的任何网段 → 命中该规则
+        for intervals, action in self._v4_inverse:
+            if not self._v4_in_intervals(addr_int, intervals):
+                return action
         return None
 
     def _match_v6(self, addr: ipaddress.IPv6Address) -> str | None:
         for net, action in self._v6:
             if addr in net:
-                if action.startswith("!"):
-                    return None
+                return action
+        for nets, action in self._v6_inverse:
+            if not any(addr in n for n in nets):
                 return action
         return None
 
