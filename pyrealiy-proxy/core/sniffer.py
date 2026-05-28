@@ -106,15 +106,31 @@ async def sniff_domain(
       domain    提取到的域名（TLS SNI 或 HTTP Host），失败则 None
       buffered  已读出的字节，必须通过 PrefixedReader 还给后续逻辑
 
-    不会抛出异常：任何错误都退化为 (None, b"")。
+    循环读取直到提取成功 / 达到 _SNIFF_BYTES / 超时 / EOF。
+    单次 read() 在 TLS ClientHello 跨 TCP 段分片时会返回不完整数据，
+    导致 SNI 提取失败而退化到 IP 路由，损失精度。
     """
+    buffered = bytearray()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     try:
-        data = await asyncio.wait_for(reader.read(_SNIFF_BYTES), timeout=timeout)
+        while len(buffered) < _SNIFF_BYTES:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            chunk = await asyncio.wait_for(
+                reader.read(_SNIFF_BYTES - len(buffered)),
+                timeout=remaining,
+            )
+            if not chunk:
+                break
+            buffered.extend(chunk)
+            domain = sniff_tls_sni(bytes(buffered)) or sniff_http_host(bytes(buffered))
+            if domain:
+                return domain, bytes(buffered)
     except Exception:
-        return None, b""
-
-    domain = sniff_tls_sni(data) or sniff_http_host(data)
-    return domain, data
+        pass
+    return None, bytes(buffered)
 
 
 # ── PrefixedReader ─────────────────────────────────────────────────────────────

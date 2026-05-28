@@ -29,7 +29,7 @@ from core.dns_forwarder import DNSForwarder
 from core.sniffer import sniff_domain, PrefixedReader
 from core.geosite_cache import ensure_all as geo_ensure_all
 from core.router import build_router, DIRECT, REJECT
-from core.utils import get_logger, pack_address, relay
+from core.utils import get_logger, pack_address, relay, safe_close
 from core import brutal
 
 logger = get_logger("client")
@@ -104,10 +104,7 @@ async def _dispatch(
         except Exception:
             pass
         finally:
-            try:
-                server_writer.close()
-            except Exception:
-                pass
+            await safe_close(server_writer)
 
     async def tunnel_to_local():
         try:
@@ -119,10 +116,7 @@ async def _dispatch(
         except Exception:
             pass
         finally:
-            try:
-                local_writer.close()
-            except Exception:
-                pass
+            await safe_close(local_writer)
 
     task_a = asyncio.create_task(local_to_tunnel())
     task_b = asyncio.create_task(tunnel_to_local())
@@ -245,7 +239,10 @@ async def main(config_path: str) -> None:
     try:
         if tproxy_server:
             async with socks5_server, tproxy_server:
-                await socks5_server.serve_forever()
+                await asyncio.gather(
+                    socks5_server.serve_forever(),
+                    tproxy_server.serve_forever(),
+                )
         else:
             async with socks5_server:
                 await socks5_server.serve_forever()

@@ -30,7 +30,7 @@ from core.hello_auth import TokenReplayCache
 
 from core.tunnel import EncryptedTunnel
 
-from core.utils import get_logger, unpack_address
+from core.utils import get_logger, unpack_address, safe_close
 
 from core.stats import StatsStore
 
@@ -114,10 +114,7 @@ async def handle_client(
         except Exception:
             pass
         finally:
-            try:
-                target_writer.close()
-            except Exception:
-                pass
+            await safe_close(target_writer)
 
     async def target_to_tunnel():
         try:
@@ -130,10 +127,7 @@ async def handle_client(
         except Exception:
             pass
         finally:
-            try:
-                client_writer.close()
-            except Exception:
-                pass
+            await safe_close(client_writer)
 
     task_a = asyncio.create_task(tunnel_to_target())
     task_b = asyncio.create_task(target_to_tunnel())

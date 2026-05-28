@@ -154,22 +154,30 @@ class BrutalPool:
             self._building -= 1
 
     async def _build_one(self) -> _ReadyTunnel | None:
-        """建立一条完整的预认证隧道（TCP 连接 + 认证 + 加密握手）"""
-        cfg = self._cfg
-        server_writer = None
+        """
+        建立一条完整的预认证隧道（TCP 连接 + 认证 + 加密握手）。
+
+        整体用 _BUILD_TIMEOUT 包裹：任何一步（连接/drain/握手读取）卡住都会
+        在硬上限内被取消，避免坏连接长期占用 _building 计数导致池容量空缺。
+        """
         try:
-            # 1. 建立 TCP 连接
+            return await asyncio.wait_for(self._build_one_inner(), timeout=_BUILD_TIMEOUT)
+        except Exception as e:
+            logger.debug("Failed to build pool connection: %s", e)
+            return None
+
+    async def _build_one_inner(self) -> _ReadyTunnel:
+        cfg = self._cfg
+        server_writer: asyncio.StreamWriter | None = None
+        try:
+            # 1. 建立 TCP 连接（外层已有总超时，这里不再单独 wait_for）
             if self._rate_bps:
-                server_reader, server_writer = await asyncio.wait_for(
-                    brutal.open_brutal_connection(
-                        cfg["server_host"], cfg["server_port"], self._rate_bps
-                    ),
-                    timeout=_BUILD_TIMEOUT,
+                server_reader, server_writer = await brutal.open_brutal_connection(
+                    cfg["server_host"], cfg["server_port"], self._rate_bps
                 )
             else:
-                server_reader, server_writer = await asyncio.wait_for(
-                    asyncio.open_connection(cfg["server_host"], cfg["server_port"], limit=262144),
-                    timeout=_BUILD_TIMEOUT,
+                server_reader, server_writer = await asyncio.open_connection(
+                    cfg["server_host"], cfg["server_port"], limit=262144
                 )
 
             # 2. 发送含认证 token 的 ClientHello，提取 client_random 用于密钥派生
@@ -187,18 +195,15 @@ class BrutalPool:
 
             # 5. 派生会话密钥，无需额外传输 salt
             tunnel = EncryptedTunnel(server_reader, server_writer, cfg["password"])
-            await asyncio.wait_for(
-                tunnel.do_handshake_as_initiator(client_random), timeout=2.0
-            )
+            await tunnel.do_handshake_as_initiator(client_random)
 
             return _ReadyTunnel(tunnel, server_writer)
 
-        except Exception as e:
-            logger.debug("Failed to build pool connection: %s", e)
-            # 无论在哪一步失败，都必须关闭已打开的 writer，释放文件描述符
+        except BaseException:
+            # 用 BaseException 捕获 wait_for 触发的 CancelledError，保证 fd 释放
             if server_writer is not None:
                 try:
                     server_writer.close()
                 except Exception:
                     pass
-            return None
+            raise

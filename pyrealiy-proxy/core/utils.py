@@ -36,6 +36,26 @@ def unpack_address(data: bytes) -> tuple[str, int, int]:
 
 _RELAY_BUF       = 32768      # 单次读取大小，平衡延迟与吞吐
 _DRAIN_THRESHOLD = 64 * 1024  # 写缓冲积压超过此值才 drain，避免每帧切换协程
+_CLOSE_TIMEOUT   = 2.0        # wait_closed 上限：避免对端不发 FIN 时永久挂起
+
+
+async def safe_close(writer: asyncio.StreamWriter | None) -> None:
+    """
+    异步静默关闭：close() + wait_closed()，带超时与异常吞咽。
+
+    用 wait_closed 是为了在高并发短连接下让 OS 立即释放 fd，
+    避免 asyncio 内部 ResourceWarning 与 fd 累积。
+    """
+    if writer is None:
+        return
+    try:
+        writer.close()
+    except Exception:
+        return
+    try:
+        await asyncio.wait_for(writer.wait_closed(), timeout=_CLOSE_TIMEOUT)
+    except Exception:
+        pass
 
 
 async def relay(reader_a: asyncio.StreamReader, writer_b: asyncio.StreamWriter,
@@ -53,10 +73,7 @@ async def relay(reader_a: asyncio.StreamReader, writer_b: asyncio.StreamWriter,
         except Exception:
             pass
         finally:
-            try:
-                writer.close()
-            except Exception:
-                pass
+            await safe_close(writer)
 
     task_a = asyncio.create_task(pipe(reader_a, writer_b))
     task_b = asyncio.create_task(pipe(reader_b, writer_a))
