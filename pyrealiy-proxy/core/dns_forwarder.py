@@ -46,15 +46,44 @@ def _extract_domain(data: bytes) -> str | None:
         return None
 
 
+def _question_end(data: bytes) -> int:
+    """返回 question section 结束后的字节偏移；解析失败时回退到长度上限"""
+    try:
+        qdcount = int.from_bytes(data[4:6], "big")
+        pos = 12
+        for _ in range(qdcount):
+            # QNAME：labels 直到 0x00（question 段不允许指针压缩）
+            while pos < len(data):
+                n = data[pos]
+                if n == 0:
+                    pos += 1
+                    break
+                if n & 0xC0:           # 防御性：偶遇指针就跳两字节
+                    pos += 2
+                    break
+                pos += 1 + n
+            pos += 4  # QTYPE(2) + QCLASS(2)
+            if pos > len(data):
+                return len(data)
+        return pos
+    except Exception:
+        return len(data)
+
+
 def _nxdomain(query: bytes) -> bytes:
-    """保留原始 ID，置 QR=1 RCODE=3，清空 answer/authority/additional"""
+    """保留原始 ID 与 question 段，置 QR=1 RCODE=3，清空 answer/authority/additional。
+
+    必须只保留 question 段；如果带尾部 EDNS0/OPT 等 additional record，
+    报头宣称 ARCOUNT=0 但附带数据会让严格 resolver 判 malformed。
+    """
     if len(query) < 12:
         return query
+    end = _question_end(query)
     h = bytearray(query[:12])
-    h[2] = (h[2] | 0x80) & 0xFE   # QR=1，清 RD（bit 0）
-    h[3] = (h[3] & 0xF0) | 0x03   # RCODE=NXDOMAIN
+    h[2] = h[2] | 0x80                # QR=1，保留 Opcode/AA/TC/RD 等其他位
+    h[3] = (h[3] & 0xF0) | 0x03       # RCODE=NXDOMAIN
     h[6] = h[7] = h[8] = h[9] = h[10] = h[11] = 0
-    return bytes(h) + query[12:]
+    return bytes(h) + query[12:end]
 
 
 # ── 查询后端 ───────────────────────────────────────────────────────────────────

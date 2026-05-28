@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -41,16 +41,42 @@ class ConnInfo:
 
 
 class StatsStore:
+    # domain_conns/domain_bytes 用 LRU OrderedDict 防止长跑 OOM
+    # 5000 域名 ≈ 250KB，足够覆盖绝大多数活跃站点
+    MAX_DOMAINS = 5000
+
     def __init__(self) -> None:
         self._counter    = 0
         self.active:       dict[int, ConnInfo]         = {}
         self.recent:       deque[dict]                 = deque(maxlen=50)
-        self.domain_conns: defaultdict[str, int]       = defaultdict(int)
-        self.domain_bytes: defaultdict[str, int]       = defaultdict(int)
+        self.domain_conns: OrderedDict[str, int]       = OrderedDict()
+        self.domain_bytes: OrderedDict[str, int]       = OrderedDict()
         self.blocked:       set[str]                    = set()
         self.total_conns    = 0
         self.total_bytes_up = 0    # cumulative from closed connections
         self.total_bytes_dn = 0
+
+    # ── LRU 维护 ───────────────────────────────────────────────────────────────
+
+    def _touch_conn(self, host: str) -> None:
+        if host in self.domain_conns:
+            self.domain_conns[host] += 1
+            self.domain_conns.move_to_end(host)
+        else:
+            if len(self.domain_conns) >= self.MAX_DOMAINS:
+                self.domain_conns.popitem(last=False)  # 淘汰最久未访问
+            self.domain_conns[host] = 1
+
+    def _touch_bytes(self, host: str, delta: int) -> None:
+        if delta <= 0:
+            return
+        if host in self.domain_bytes:
+            self.domain_bytes[host] += delta
+            self.domain_bytes.move_to_end(host)
+        else:
+            if len(self.domain_bytes) >= self.MAX_DOMAINS:
+                self.domain_bytes.popitem(last=False)
+            self.domain_bytes[host] = delta
 
     # ── connection lifecycle ───────────────────────────────────────────────────
 
@@ -61,12 +87,12 @@ class StatsStore:
         conn = ConnInfo(self._counter, client_ip, target_host, target_port,
                         writer=writer)
         self.active[conn.id] = conn
-        self.domain_conns[target_host] += 1
+        self._touch_conn(target_host)
         return conn
 
     def unregister(self, conn: ConnInfo) -> None:
         self.active.pop(conn.id, None)
-        self.domain_bytes[conn.target_host] += conn.bytes_up + conn.bytes_down
+        self._touch_bytes(conn.target_host, conn.bytes_up + conn.bytes_down)
         self.total_bytes_up += conn.bytes_up
         self.total_bytes_dn += conn.bytes_down
         self.recent.appendleft(conn.as_dict(closed_at=time.time()))
@@ -99,7 +125,7 @@ class StatsStore:
                                               key=lambda c: c.started)]
         top_domains = sorted(
             ({"domain": d, "conns": self.domain_conns[d],
-              "bytes": self.domain_bytes[d]}
+              "bytes": self.domain_bytes.get(d, 0)}     # 未关闭的连接还没累计 bytes
              for d in self.domain_conns),
             key=lambda x: x["conns"],
             reverse=True,
