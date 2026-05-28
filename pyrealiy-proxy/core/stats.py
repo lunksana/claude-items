@@ -123,13 +123,25 @@ class StatsStore:
     def snapshot(self) -> dict:
         conns = [c.as_dict() for c in sorted(self.active.values(),
                                               key=lambda c: c.started)]
-        top_domains = sorted(
-            ({"domain": d, "conns": self.domain_conns[d],
-              "bytes": self.domain_bytes.get(d, 0)}     # 未关闭的连接还没累计 bytes
-             for d in self.domain_conns),
-            key=lambda x: x["conns"],
-            reverse=True,
-        )[:50]
+
+        # top_domains 由前端按多种维度排序展示（默认按 bytes）。
+        # 服务端必须把"按 conns top N"和"按 bytes top N"两个维度的并集都送出去，
+        # 否则前端切换排序维度时，会看到流量大但连接少的域名被裁掉（口径不一致 bug）
+        TOP_N = 50
+        all_domains = [
+            {"domain": d, "conns": self.domain_conns[d],
+             "bytes":  self.domain_bytes.get(d, 0)}
+            for d in self.domain_conns
+        ]
+        by_conns = sorted(all_domains, key=lambda x: x["conns"], reverse=True)[:TOP_N]
+        by_bytes = sorted(all_domains, key=lambda x: x["bytes"], reverse=True)[:TOP_N]
+        seen: set[str] = set()
+        top_domains: list[dict] = []
+        for d in by_conns + by_bytes:
+            if d["domain"] not in seen:
+                seen.add(d["domain"])
+                top_domains.append(d)
+
         # include bytes from currently active connections
         act_up = sum(c.bytes_up for c in self.active.values())
         act_dn = sum(c.bytes_down for c in self.active.values())

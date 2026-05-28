@@ -114,20 +114,20 @@ def install_brutal_official() -> bool:
 def install_brutal_dkms() -> bool:
     """通过 DKMS 安装 tcp_brutal（持久化，重启后仍有效）"""
     INFO("尝试通过 DKMS 安装 tcp_brutal ...")
+    # 含 $(...) shell 替换的步骤必须用字符串 + shell=True 才能展开；
+    # 之前传 list + shell=True 会导致 sh 只把第一个元素当命令、其余作为 $0..$N，
+    # 实际执行的是无参 apt-get，全部步骤静默失败
     steps = [
-        (["apt-get", "update", "-q"],                           "更新软件源"),
-        (["apt-get", "install", "-y", "dkms", "linux-headers-$(uname -r)"],
-                                                                "安装 DKMS 和内核头文件"),
-        (["git", "clone", "--depth=1",
-          "https://github.com/apernet/tcp-brutal", "/tmp/tcp-brutal"],
-                                                                "克隆源码"),
-        (["bash", "-c", "cd /tmp/tcp-brutal && make dkms"],     "DKMS 安装模块"),
-        (["modprobe", "tcp_brutal"],                            "加载模块"),
+        ("apt-get update -q",                                                 "更新软件源"),
+        ('apt-get install -y dkms "linux-headers-$(uname -r)"',               "安装 DKMS 和内核头文件"),
+        ("git clone --depth=1 https://github.com/apernet/tcp-brutal /tmp/tcp-brutal",
+                                                                              "克隆源码"),
+        ("cd /tmp/tcp-brutal && make dkms",                                   "DKMS 安装模块"),
+        ("modprobe tcp_brutal",                                               "加载模块"),
     ]
     for cmd, desc in steps:
         INFO(desc)
-        r = _run(cmd if not any("$(" in c for c in cmd) else cmd,
-                 shell=("$(" in " ".join(cmd)))
+        r = subprocess.run(cmd, shell=True, executable="/bin/bash")
         if r.returncode != 0:
             ERR(f"步骤失败：{desc}")
             return False

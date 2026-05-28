@@ -134,6 +134,9 @@ async def _ensure_typed(
     meta: dict,
 ) -> dict[str, str]:
     """并发确保一组同类型源可用，返回 {source_name: dat_path}"""
+    # 先过滤出有效条目，tasks 与 valid 一一对应；zip 必须用过滤后的列表，
+    # 否则一个坏条目会让后续 source 与 result 错位（已修复 bug）
+    valid = [s for s in sources if s.get("name") and s.get("url")]
     tasks = [
         _ensure_one(
             key         = f"{type_prefix}-{s['name']}",
@@ -142,13 +145,13 @@ async def _ensure_typed(
             update_days = s.get("update_days", default_update_days),
             meta        = meta,
         )
-        for s in sources if s.get("name") and s.get("url")
+        for s in valid
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     return {
         s["name"]: _dat_path(cache_dir, f"{type_prefix}-{s['name']}")
-        for s, ok in zip(sources, results)
-        if ok is True and s.get("name") and s.get("url")
+        for s, ok in zip(valid, results)
+        if ok is True
     }
 
 
