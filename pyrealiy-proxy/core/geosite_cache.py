@@ -173,31 +173,26 @@ async def _https_request_once(
             if data:
                 await tunnel.send(data)
 
-        # 跟踪是否收到过任何对端字节，区分"服务端立即关闭"vs"握手中途超时"
+        # 跟踪是否收到过任何对端字节，握手阶段全 EOF 时给出针对性诊断
         received_any = [False]
 
         async def feed(timeout: float) -> bool:
+            """
+            从隧道喂数据给 TLS。返回 False 表示"没有更多数据"——超时或对端关闭都算。
+            对端关闭并不必然是错误：HTTP/1.1 Connection: close 的末尾本来就是 EOF，
+            上层会根据 _parse_http_response + Content-Length 判断响应是否完整。
+            """
             try:
                 data = await asyncio.wait_for(tunnel.recv(), timeout=timeout)
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError):
                 return False
-            except asyncio.IncompleteReadError:
-                # 隧道被服务端关闭：常见原因是服务端 VPS 无法 dial 目标主机
-                # （DNS 解析失败 / 出口被阻 / GFW 反向干扰）
-                if not received_any[0]:
-                    raise IOError(
-                        f"server closed tunnel before any data for {host}:{port} "
-                        f"— VPS likely can't reach the target "
-                        f"(check server logs for 'Cannot connect to {host}:{port}')"
-                    )
-                raise IOError(f"server closed tunnel mid-transfer for {host}:{port}")
             if not data:
                 return False
             received_any[0] = True
             incoming.write(data)
             return True
 
-        # TLS 握手
+        # TLS 握手：握手期间断开是硬错误，需要明确报错
         while True:
             try:
                 sslobj.do_handshake()
@@ -205,7 +200,13 @@ async def _https_request_once(
             except ssl.SSLWantReadError:
                 await flush()
                 if not await feed(_TUNNEL_HS_TIMEOUT):
-                    raise IOError(f"TLS handshake timeout to {host}:{port}")
+                    if not received_any[0]:
+                        raise IOError(
+                            f"server closed tunnel before any data for {host}:{port} "
+                            f"— VPS likely can't reach the target "
+                            f"(check server logs for 'Cannot connect to {host}:{port}')"
+                        )
+                    raise IOError(f"TLS handshake aborted to {host}:{port}")
             except ssl.SSLWantWriteError:
                 await flush()
         await flush()
@@ -246,7 +247,7 @@ async def _https_request_once(
 def _parse_http_response(raw: bytes) -> tuple[int, list[tuple[str, str]], bytes]:
     end = raw.find(b"\r\n\r\n")
     if end < 0:
-        raise IOError("malformed response: no header terminator")
+        raise IOError("malformed response: no header terminator (body too short)")
     head = raw[:end].decode("latin-1")
     body = raw[end + 4:]
 
@@ -262,9 +263,20 @@ def _parse_http_response(raw: bytes) -> tuple[int, list[tuple[str, str]], bytes]
             k, v = line.split(":", 1)
             headers.append((k.strip(), v.strip()))
 
-    if any(k.lower() == "transfer-encoding" and "chunked" in v.lower()
-           for k, v in headers):
+    is_chunked = any(k.lower() == "transfer-encoding" and "chunked" in v.lower()
+                     for k, v in headers)
+    cl_str = next((v for k, v in headers if k.lower() == "content-length"), None)
+
+    if is_chunked:
         body = _dechunk(body)
+    elif cl_str is not None and cl_str.strip().isdigit():
+        expected = int(cl_str.strip())
+        if len(body) < expected:
+            raise IOError(
+                f"truncated body: got {len(body)} of {expected} bytes "
+                f"(tunnel closed before full response received)"
+            )
+        body = body[:expected]   # 去掉 Content-Length 之外多读的字节
 
     return status, headers, body
 
