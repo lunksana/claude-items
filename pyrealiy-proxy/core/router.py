@@ -1,12 +1,14 @@
 """
-分流路由
+分流路由（Clash 兼容语义）
 
-规则写在 config_client.json 的 "rules" 数组，格式与 Clash 兼容。
+规则写在 config_client.json 的 "rules" 数组，**按配置顺序从上到下扫描，首条命中即返回**，
+后续规则不再执行。这与 Clash / sing-box / Surge 行为一致。
 
 规则类型：
   DOMAIN,example.com,DIRECT
   DOMAIN-SUFFIX,google.com,PROXY
   DOMAIN-KEYWORD,youtube,PROXY
+  DOMAIN-REGEX,^(.+\\.)?google\\.com$,PROXY
   IP-CIDR,192.168.0.0/16,DIRECT
   GEOSITE,[source:]tag,ACTION      geosite.dat 域名规则，可指定源
   GEOIP,[source:]code,ACTION       geoip.dat  IP 归属地规则，可指定源
@@ -22,35 +24,39 @@ GEOSITE / GEOIP 引用示例：
   GEOSITE,cn,DIRECT                 ← 省略 source，使用第一个 geosite 源
   GEOIP,loyalsoldier:cn,DIRECT
   GEOIP,cn,DIRECT                   ← 省略 source，使用第一个 geoip 源
+
+实现方式：
+  每条规则被解析为一个独立的 _Rule 对象，自带类型相关的优化匹配器
+  （DOMAIN/exact 用 == ；SUFFIX 用 endswith；GEOSITE 内部自带 Bloom Filter
+  + 三套字典；GEOIP 内部按 v4/v6 拆分并对 v4 做排序+二分；DOMAIN-REGEX 用
+  固定字面量预筛）。Router.match() 线性扫描列表，首条返回 True 即给出 action。
 """
 
 from __future__ import annotations
 
 import ipaddress
 import re
-import struct
+from typing import Callable
 
 from .bloom import BloomFilter
-from .utils  import get_logger
+from .utils import get_logger
 
 logger = get_logger("router")
 
 PROXY  = "PROXY"
 DIRECT = "DIRECT"
 REJECT = "REJECT"
-
 _ACTIONS = {PROXY, DIRECT, REJECT}
 
 # 从正则 pattern 提取最长固定字面量，用于跳过明显不匹配的主机名
-# 策略：反转义 \X → X，去掉其余特殊字符，取最长含点的片段
-_UNESCAPE = re.compile(r'\\(.)')
-_NON_LIT  = re.compile(r'[^a-zA-Z0-9.-]')
+_UNESCAPE = re.compile(r"\\(.)")
+_NON_LIT  = re.compile(r"[^a-zA-Z0-9.-]")
 
 def _extract_literal(pattern: str) -> str:
     s = _UNESCAPE.sub(lambda m: m.group(1), pattern)
-    s = _NON_LIT.sub(' ', s)
-    parts = [p for p in s.split() if '.' in p and len(p) >= 4]
-    return max(parts, key=len) if parts else ''
+    s = _NON_LIT.sub(" ", s)
+    parts = [p for p in s.split() if "." in p and len(p) >= 4]
+    return max(parts, key=len) if parts else ""
 
 # geosite Domain.Type
 _GEO_KEYWORD = 0
@@ -134,10 +140,6 @@ def load_geosite_dat(path: str) -> dict[str, list[tuple[int, str]]]:
 
 
 # ── geoip.dat 解析 ────────────────────────────────────────────────────────────
-#
-# 协议：GeoIPList { repeated GeoIP entry = 1; }
-#       GeoIP { string country_code = 1; repeated CIDR cidr = 2; bool inverse_match = 3; }
-#       CIDR  { bytes ip = 1; uint32 prefix = 2; }
 
 def _parse_cidr_msg(mv: memoryview) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
     pos = 0; ip_bytes = b""; prefix = 0
@@ -211,235 +213,202 @@ def load_geoip_dat(path: str) -> dict[str, tuple[list, bool]]:
     return result
 
 
-# ── GeoIP 快速查找 ─────────────────────────────────────────────────────────────
+# ── 单条规则匹配器 ─────────────────────────────────────────────────────────────
 
-class _GeoIPTable:
+_AddrType = ipaddress.IPv4Address | ipaddress.IPv6Address | None
+
+
+class _Rule:
+    """单条规则基类。子类实现 _matches；action 由调用方读取。"""
+    __slots__ = ("action", "desc")
+    def __init__(self, action: str, desc: str = ""):
+        self.action = action.upper()
+        self.desc   = desc
+    def matches(self, host: str, addr: _AddrType) -> bool:
+        raise NotImplementedError
+
+
+class _ExactRule(_Rule):
+    __slots__ = ("_d",)
+    def __init__(self, domain: str, action: str):
+        super().__init__(action, f"DOMAIN {domain}")
+        self._d = domain.lower()
+    def matches(self, host, _addr):
+        return host == self._d
+
+
+class _SuffixRule(_Rule):
+    __slots__ = ("_d", "_dot")
+    def __init__(self, domain: str, action: str):
+        super().__init__(action, f"DOMAIN-SUFFIX {domain}")
+        self._d   = domain.lower()
+        self._dot = "." + self._d
+    def matches(self, host, _addr):
+        return host == self._d or host.endswith(self._dot)
+
+
+class _KeywordRule(_Rule):
+    __slots__ = ("_k",)
+    def __init__(self, keyword: str, action: str):
+        super().__init__(action, f"DOMAIN-KEYWORD {keyword}")
+        self._k = keyword.lower()
+    def matches(self, host, _addr):
+        return self._k in host
+
+
+class _RegexRule(_Rule):
+    """带固定字面量预筛的正则规则；字面量为空时直接跑正则引擎"""
+    __slots__ = ("_lit", "_pat")
+    def __init__(self, pattern: str, action: str, compiled: re.Pattern):
+        super().__init__(action, f"DOMAIN-REGEX {pattern}")
+        self._lit = _extract_literal(pattern)
+        self._pat = compiled
+    def matches(self, host, _addr):
+        if self._lit and self._lit not in host:
+            return False
+        return self._pat.search(host) is not None
+
+
+class _CidrRule(_Rule):
+    __slots__ = ("_net",)
+    def __init__(self, cidr: str, action: str, net):
+        super().__init__(action, f"IP-CIDR {cidr}")
+        self._net = net
+    def matches(self, _host, addr):
+        return addr is not None and addr in self._net
+
+
+class _GeositeRule(_Rule):
     """
-    将多个 geoip 源的规则合并成有序查找表。
-    IPv4 按网络地址排序后二分定位候选段，再逐一验证包含关系；
-    IPv6 数量通常较少，直接线性扫描。
+    一条 GEOSITE 规则展开后内部维护 exact/suffix/keyword 三套表，
+    suffix 量超过阈值时启用 Bloom Filter 预筛，与展开前同等查询性能。
     """
+    __slots__ = ("_exact", "_suffix", "_keywords", "_bloom")
+    _BLOOM_THRESHOLD = 64
 
-    def __init__(self) -> None:
-        # 正向规则：[(network_int, prefix_len, broadcast_int, action), ...]，按 network_int 排序
-        self._v4: list[tuple[int, int, int, str]] = []
-        self._v6: list[tuple[ipaddress.IPv6Network, str]] = []
-        # 反向规则：每条规则的网段聚成一组，IP "不在" 任一网段 → 命中该规则的 action
-        # 形态：[(sorted_intervals: list[(start_int, end_int)], action), ...]
-        self._v4_inverse: list[tuple[list[tuple[int, int]], str]] = []
-        self._v6_inverse: list[tuple[list[ipaddress.IPv6Network], str]] = []
-        self._built = False
+    def __init__(self, tag: str, action: str, entries: list[tuple[int, str]]):
+        super().__init__(action, f"GEOSITE {tag}")
+        self._exact:    set[str]  = set()
+        self._suffix:   set[str]  = set()
+        self._keywords: list[str] = []
+        for dtype, value in entries:
+            v = value.lower()
+            if   dtype == _GEO_EXACT:   self._exact.add(v)
+            elif dtype == _GEO_SUFFIX:  self._suffix.add(v)
+            elif dtype == _GEO_KEYWORD: self._keywords.append(v)
+        if len(self._suffix) >= self._BLOOM_THRESHOLD:
+            self._bloom = BloomFilter(capacity=len(self._suffix))
+            for s in self._suffix:
+                self._bloom.add(s)
+        else:
+            self._bloom = None
 
-    def add_networks(
-        self,
-        networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network],
-        action: str,
-        inverse: bool = False,
-    ) -> None:
-        assert not self._built, "Cannot add after build()"
-        if inverse:
-            # 反向规则必须把整条规则的所有网段一起存为一组，
-            # 才能在 match 时判定 "IP 不在任何一段里"。逐网段拆开存就丢了 "all of" 语义。
-            v4_ranges: list[tuple[int, int]] = []
-            v6_nets:   list[ipaddress.IPv6Network] = []
-            for net in networks:
-                if isinstance(net, ipaddress.IPv4Network):
-                    v4_ranges.append((int(net.network_address), int(net.broadcast_address)))
-                else:
-                    v6_nets.append(net)
-            if v4_ranges:
-                v4_ranges.sort()
-                self._v4_inverse.append((v4_ranges, action))
-            if v6_nets:
-                self._v6_inverse.append((v6_nets, action))
-            return
+    def matches(self, host, _addr):
+        if host in self._exact:
+            return True
+        if self._suffix:
+            parts = host.split(".")
+            for i in range(len(parts) - 1):
+                sfx = ".".join(parts[i:])
+                if self._bloom is not None and sfx not in self._bloom:
+                    continue
+                if sfx in self._suffix:
+                    return True
+        for kw in self._keywords:
+            if kw in host:
+                return True
+        return False
 
+
+class _GeoipRule(_Rule):
+    """
+    GEOIP 规则：v4 排序 + 二分；v6 线性。
+    inverse=True 时语义反转——IP 不在任何网段视为命中。
+    """
+    __slots__ = ("_v4", "_v6", "_inverse")
+
+    def __init__(self, code: str, action: str, networks: list, inverse: bool):
+        super().__init__(action, f"GEOIP {'!' if inverse else ''}{code}")
+        v4: list[tuple[int, int]] = []
+        v6: list[ipaddress.IPv6Network] = []
         for net in networks:
             if isinstance(net, ipaddress.IPv4Network):
-                ni = int(net.network_address)
-                bi = int(net.broadcast_address)
-                self._v4.append((ni, net.prefixlen, bi, action))
+                v4.append((int(net.network_address), int(net.broadcast_address)))
             else:
-                self._v6.append((net, action))
+                v6.append(net)
+        v4.sort()
+        self._v4 = v4
+        self._v6 = v6
+        self._inverse = inverse
 
-    def build(self) -> None:
-        self._v4.sort(key=lambda x: (x[0], x[1]))
-        self._built = True
-
-    def match(self, addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str | None:
+    def matches(self, _host, addr):
+        if addr is None:
+            return False
         if isinstance(addr, ipaddress.IPv4Address):
-            return self._match_v4(int(addr))
-        return self._match_v6(addr)
+            inside = self._v4_contains(int(addr))
+        else:
+            inside = any(addr in n for n in self._v6)
+        return inside != self._inverse
 
-    @staticmethod
-    def _v4_in_intervals(addr_int: int, intervals: list[tuple[int, int]]) -> bool:
-        """二分定位 + 向前扫描，判断 addr 是否落在某区间内（兼容重叠）"""
-        lo, hi = 0, len(intervals) - 1
+    def _v4_contains(self, addr_int: int) -> bool:
+        v4 = self._v4
+        lo, hi = 0, len(v4) - 1
         best = -1
         while lo <= hi:
             mid = (lo + hi) >> 1
-            if intervals[mid][0] <= addr_int:
+            if v4[mid][0] <= addr_int:
                 best = mid; lo = mid + 1
             else:
                 hi = mid - 1
         i = best
-        while i >= 0 and intervals[i][0] <= addr_int:
-            if intervals[i][1] >= addr_int:
+        while i >= 0 and v4[i][0] <= addr_int:
+            if v4[i][1] >= addr_int:
                 return True
             i -= 1
         return False
 
-    def _match_v4(self, addr_int: int) -> str | None:
-        # 1. 正向表：二分找到最后一个 network_int <= addr_int 的候选，再验证
-        lo, hi = 0, len(self._v4) - 1
-        best = -1
-        while lo <= hi:
-            mid = (lo + hi) >> 1
-            if self._v4[mid][0] <= addr_int:
-                best = mid; lo = mid + 1
-            else:
-                hi = mid - 1
-        i = best
-        while i >= 0 and self._v4[i][0] <= addr_int:
-            ni, _, bi, action = self._v4[i]
-            if addr_int <= bi:
-                return action
-            i -= 1
-        # 2. 反向表：IP 不在某条规则的任何网段 → 命中该规则
-        for intervals, action in self._v4_inverse:
-            if not self._v4_in_intervals(addr_int, intervals):
-                return action
-        return None
 
-    def _match_v6(self, addr: ipaddress.IPv6Address) -> str | None:
-        for net, action in self._v6:
-            if addr in net:
-                return action
-        for nets, action in self._v6_inverse:
-            if not any(addr in n for n in nets):
-                return action
-        return None
-
-
-# ── 路由器 ─────────────────────────────────────────────────────────────────────
+# ── Router ────────────────────────────────────────────────────────────────────
 
 class Router:
+    """
+    按配置顺序扫描 self._rules，首条 matches() 返回 True 即给出 action。
+    未命中任何规则时返回 FINAL 指定的默认动作。
+    """
+
     def __init__(self, default: str = PROXY):
-        self._default  = default
-        self._exact:   dict[str, str] = {}
-        self._suffix:  dict[str, str] = {}
-        self._keyword: list[tuple[str, str]] = []
-        # 有可提取字面量的正则：[(literal, [(pattern, action), ...]), ...]
-        # match() 先用 `literal in h`（C 层 BM 算法）预筛，命中才进正则引擎
-        self._regex_groups:   list[tuple[str, list[tuple[re.Pattern, str]]]] = []
-        # 无法提取字面量的正则，始终跑引擎
-        self._regex_fallback: list[tuple[re.Pattern, str]] = []
-        self._cidr:    list[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, str]] = []
-        self._geoip_table = _GeoIPTable()
-        self._suffix_bf: BloomFilter | None = None
-
-    def add_exact(self, domain: str, action: str) -> None:
-        self._exact[domain.lower()] = action.upper()
-
-    def add_suffix(self, domain: str, action: str) -> None:
-        self._suffix[domain.lower()] = action.upper()
-
-    def add_keyword(self, keyword: str, action: str) -> None:
-        self._keyword.append((keyword.lower(), action.upper()))
-
-    def add_regex(self, pattern: str, action: str) -> None:
-        try:
-            compiled = re.compile(pattern, re.IGNORECASE)
-        except re.error as e:
-            logger.warning("Invalid regex pattern '%s': %s", pattern, e)
-            return
-        lit = _extract_literal(pattern)
-        if lit:
-            for g_lit, g_list in self._regex_groups:
-                if g_lit == lit:
-                    g_list.append((compiled, action.upper()))
-                    return
-            self._regex_groups.append((lit, [(compiled, action.upper())]))
-        else:
-            self._regex_fallback.append((compiled, action.upper()))
-
-    def add_cidr(self, cidr: str, action: str) -> None:
-        try:
-            self._cidr.append((ipaddress.ip_network(cidr, strict=False), action.upper()))
-        except ValueError:
-            logger.warning("Invalid CIDR: %s", cidr)
-
-    def add_geoip(
-        self,
-        networks: list,
-        action: str,
-        inverse: bool = False,
-    ) -> None:
-        self._geoip_table.add_networks(networks, action.upper(), inverse)
+        self._default = default.upper()
+        self._rules: list[_Rule] = []
 
     def set_default(self, action: str) -> None:
         self._default = action.upper()
 
+    def add(self, rule: _Rule) -> None:
+        self._rules.append(rule)
+
     def build(self) -> None:
-        n = max(len(self._suffix), 1)
-        self._suffix_bf = BloomFilter(capacity=n)
-        for domain in self._suffix:
-            self._suffix_bf.add(domain)
-        self._geoip_table.build()
-        n_regex = (sum(len(g[1]) for g in self._regex_groups)
-                   + len(self._regex_fallback))
+        """统计日志（无后处理：各规则自带优化结构）"""
+        counts: dict[str, int] = {}
+        for r in self._rules:
+            cls = type(r).__name__
+            counts[cls] = counts.get(cls, 0) + 1
         logger.info(
-            "Router built: %d exact / %d suffix / %d keyword / %d regex / %d cidr | default=%s",
-            len(self._exact), len(self._suffix),
-            len(self._keyword), n_regex, len(self._cidr),
+            "Router built: %d rules total | %s | default=%s",
+            len(self._rules),
+            ", ".join(f"{k}={v}" for k, v in counts.items()),
             self._default,
         )
 
     def match(self, host: str) -> str:
         h = host.lower().rstrip(".")
-
-        # IP 地址：先查静态 CIDR，再查 GeoIP 表
+        addr: _AddrType
         try:
             addr = ipaddress.ip_address(h)
-            for net, action in self._cidr:
-                if addr in net:
-                    return action
-            geo_action = self._geoip_table.match(addr)
-            if geo_action:
-                return geo_action
-            return self._default
         except ValueError:
-            pass
-
-        # 精确匹配
-        if h in self._exact:
-            return self._exact[h]
-
-        # 后缀匹配（BF 预过滤）
-        parts = h.split(".")
-        for i in range(len(parts) - 1):
-            suffix = ".".join(parts[i:])
-            if self._suffix_bf and suffix not in self._suffix_bf:
-                continue
-            action = self._suffix.get(suffix)
-            if action:
-                return action
-
-        # 关键词（线性）
-        for kw, action in self._keyword:
-            if kw in h:
-                return action
-
-        # 正则：字面量预筛（C 层 `in`）→ 命中才进正则引擎
-        for lit, patterns in self._regex_groups:
-            if lit in h:
-                for pat, action in patterns:
-                    if pat.search(h):
-                        return action
-        for pat, action in self._regex_fallback:
-            if pat.search(h):
-                return action
-
+            addr = None
+        for rule in self._rules:
+            if rule.matches(h, addr):
+                return rule.action
         return self._default
 
 
@@ -463,7 +432,8 @@ def build_router(
                 logger.warning("geosite source '%s' not available", name)
                 _site_cache[name] = {}
             else:
-                try:    _site_cache[name] = load_geosite_dat(path)
+                try:
+                    _site_cache[name] = load_geosite_dat(path)
                 except OSError as e:
                     logger.warning("Cannot read geosite '%s': %s", path, e)
                     _site_cache[name] = {}
@@ -476,7 +446,8 @@ def build_router(
                 logger.warning("geoip source '%s' not available", name)
                 _ip_cache[name] = {}
             else:
-                try:    _ip_cache[name] = load_geoip_dat(path)
+                try:
+                    _ip_cache[name] = load_geoip_dat(path)
                 except OSError as e:
                     logger.warning("Cannot read geoip '%s': %s", path, e)
                     _ip_cache[name] = {}
@@ -509,23 +480,33 @@ def build_router(
             continue
 
         if rule_type == "DOMAIN":
-            router.add_exact(value, action)
+            router.add(_ExactRule(value, action))
             logger.info("Rule: DOMAIN          %-40s → %s", value, action)
 
         elif rule_type == "DOMAIN-SUFFIX":
-            router.add_suffix(value, action)
+            router.add(_SuffixRule(value, action))
             logger.info("Rule: DOMAIN-SUFFIX   %-40s → %s", value, action)
 
         elif rule_type == "DOMAIN-KEYWORD":
-            router.add_keyword(value, action)
+            router.add(_KeywordRule(value, action))
             logger.info("Rule: DOMAIN-KEYWORD  %-40s → %s", value, action)
 
         elif rule_type == "DOMAIN-REGEX":
-            router.add_regex(value, action)
+            try:
+                compiled = re.compile(value, re.IGNORECASE)
+            except re.error as e:
+                logger.warning("Invalid regex pattern '%s': %s", value, e)
+                continue
+            router.add(_RegexRule(value, action, compiled))
             logger.info("Rule: DOMAIN-REGEX    %-40s → %s", value, action)
 
         elif rule_type == "IP-CIDR":
-            router.add_cidr(value, action)
+            try:
+                net = ipaddress.ip_network(value, strict=False)
+            except ValueError:
+                logger.warning("Invalid CIDR: %s", value)
+                continue
+            router.add(_CidrRule(value, action, net))
             logger.info("Rule: IP-CIDR         %-40s → %s", value, action)
 
         elif rule_type == "GEOSITE":
@@ -534,7 +515,13 @@ def build_router(
             if not src:
                 logger.warning("GEOSITE '%s': no source, skipped", value)
                 continue
-            _apply_geosite(router, _get_site(src), tag.upper(), action, src)
+            entries = _get_site(src).get(tag.upper())
+            if entries is None:
+                logger.warning("GEOSITE tag '%s' not in '%s'", tag, src)
+                continue
+            router.add(_GeositeRule(f"{src}:{tag}", action, entries))
+            logger.info("Rule: GEOSITE         %-40s → %s  (%d entries)",
+                        f"{src}:{tag}", action, len(entries))
 
         elif rule_type == "GEOIP":
             src, code = (value.split(":", 1) if ":" in value
@@ -542,37 +529,14 @@ def build_router(
             if not src:
                 logger.warning("GEOIP '%s': no source, skipped", value)
                 continue
-            _apply_geoip(router, _get_ip(src), code.upper(), action, src)
+            entry = _get_ip(src).get(code.upper())
+            if entry is None:
+                logger.warning("GEOIP code '%s' not in '%s'", code, src)
+                continue
+            networks, inverse = entry
+            router.add(_GeoipRule(f"{src}:{code}", action, networks, inverse))
+            logger.info("Rule: GEOIP           %-40s → %s  (%d networks, inverse=%s)",
+                        f"{src}:{code}", action, len(networks), inverse)
 
     router.build()
     return router
-
-
-def _apply_geosite(router, geosite, tag, action, source=""):
-    entries = geosite.get(tag)
-    if entries is None:
-        logger.warning("GEOSITE tag '%s' not in '%s'", tag, source)
-        return
-    n_exact = n_suffix = n_kw = n_skip = 0
-    for dtype, value in entries:
-        if dtype == _GEO_EXACT:
-            router.add_exact(value, action);   n_exact  += 1
-        elif dtype == _GEO_SUFFIX:
-            router.add_suffix(value, action);  n_suffix += 1
-        elif dtype == _GEO_KEYWORD:
-            router.add_keyword(value, action); n_kw     += 1
-        else:
-            n_skip += 1
-    logger.info("GEOSITE[%s]:%s → %s  exact=%d suffix=%d kw=%d skip=%d",
-                source, tag, action, n_exact, n_suffix, n_kw, n_skip)
-
-
-def _apply_geoip(router, geoip, code, action, source=""):
-    entry = geoip.get(code)
-    if entry is None:
-        logger.warning("GEOIP code '%s' not in '%s'", code, source)
-        return
-    networks, inverse = entry
-    router.add_geoip(networks, action, inverse)
-    logger.info("GEOIP[%s]:%s → %s  networks=%d inverse=%s",
-                source, code, action, len(networks), inverse)

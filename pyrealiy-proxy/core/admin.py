@@ -7,6 +7,7 @@ import json
 from urllib.parse import urlparse, parse_qs
 
 from .stats import StatsStore
+from .utils import safe_close
 
 # ── embedded dashboard ─────────────────────────────────────────────────────────
 
@@ -576,7 +577,7 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
     try:
         raw = await asyncio.wait_for(reader.read(8192), timeout=5.0)
     except Exception:
-        writer.close()
+        await safe_close(writer)
         return
 
     try:
@@ -584,7 +585,7 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         parts = first_line.split(" ")
         method, raw_path = parts[0], parts[1]
     except Exception:
-        writer.close()
+        await safe_close(writer)
         return
 
     parsed = urlparse(raw_path)
@@ -596,27 +597,27 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         return vals[0] if vals else ""
 
     if token and p("token") != token:
-        _respond(writer, 401, b"application/json", b'{"error":"unauthorized"}')
+        await _respond(writer, 401, b"application/json", b'{"error":"unauthorized"}')
         return
 
     if path in ("/", ""):
-        _respond(writer, 200, b"text/html; charset=utf-8", _HTML_BYTES)
+        await _respond(writer, 200, b"text/html; charset=utf-8", _HTML_BYTES)
 
     elif path == "/api/stats":
-        _respond(writer, 200, b"application/json",
-                 json.dumps(store.snapshot()).encode())
+        await _respond(writer, 200, b"application/json",
+                       json.dumps(store.snapshot()).encode())
 
     elif path == "/api/block" and method == "POST":
         ip = p("ip")
         if ip:
             store.block(ip)
-        _respond(writer, 200, b"application/json", b'{"ok":true}')
+        await _respond(writer, 200, b"application/json", b'{"ok":true}')
 
     elif path == "/api/unblock" and method == "POST":
         ip = p("ip")
         if ip:
             store.unblock(ip)
-        _respond(writer, 200, b"application/json", b'{"ok":true}')
+        await _respond(writer, 200, b"application/json", b'{"ok":true}')
 
     elif path == "/api/kill" and method == "POST":
         try:
@@ -624,15 +625,23 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
             ok = store.kill(conn_id)
         except (ValueError, TypeError):
             ok = False
-        _respond(writer, 200, b"application/json",
-                 b'{"ok":true}' if ok else b'{"ok":false}')
+        await _respond(writer, 200, b"application/json",
+                       b'{"ok":true}' if ok else b'{"ok":false}')
 
     else:
-        _respond(writer, 404, b"text/plain", b"Not Found")
+        await _respond(writer, 404, b"text/plain", b"Not Found")
 
 
-def _respond(writer: asyncio.StreamWriter, status: int,
-             content_type: bytes, body: bytes) -> None:
+async def _respond(writer: asyncio.StreamWriter, status: int,
+                   content_type: bytes, body: bytes) -> None:
+    """
+    发送 HTTP 响应：write → drain → safe_close。
+
+    drain() 等写缓冲下到 low water mark 再返回，确保 24KB HTML 这类大响应
+    在 close() 触发 transport 关闭前已被实际推到 OS socket buffer，
+    避免边写边断带来的截断风险。
+    safe_close 接着做 close + wait_closed，让 fd 立刻释放。
+    """
     phrases = {200: b"OK", 401: b"Unauthorized", 404: b"Not Found"}
     phrase  = phrases.get(status, b"Error")
     header  = (
@@ -642,8 +651,12 @@ def _respond(writer: asyncio.StreamWriter, status: int,
         b"Connection: close\r\n"
         b"\r\n"
     )
-    writer.write(header + body)
-    writer.close()
+    try:
+        writer.write(header + body)
+        await writer.drain()
+    except Exception:
+        pass
+    await safe_close(writer)
 
 
 async def start_admin(store: StatsStore, host: str, port: int,

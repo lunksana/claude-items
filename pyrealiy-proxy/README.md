@@ -410,18 +410,18 @@ echo 1 > /proc/sys/net/ipv4/ip_forward
 
 ## 分流规则
 
-规则写在 `config_client.json` 的 `rules` 数组中。**配置顺序不影响匹配顺序** —— 实际匹配按下方 [匹配顺序与性能](#匹配顺序与性能) 中的固定类型优先级进行（CIDR/GeoIP → 精确域名 → 后缀 → 关键词 → 正则 → FINAL），命中即返回。同类型规则按"更具体的优先生效"的常识可预测，跨类型重叠时以优先级表为准。
+规则写在 `config_client.json` 的 `rules` 数组中，**按配置顺序从上到下扫描，首条命中即返回**（与 Clash / sing-box / Surge 行为一致）。后续规则不再执行。`FINAL` 放在最后作为默认动作。
 
 | 规则类型 | 示例 | 说明 |
 |---|---|---|
-| `DOMAIN` | `DOMAIN,example.com,DIRECT` | 精确域名匹配，O(1) 哈希查找 |
-| `DOMAIN-SUFFIX` | `DOMAIN-SUFFIX,google.com,PROXY` | 后缀匹配（含本身及所有子域名），Bloom Filter 预过滤 |
-| `DOMAIN-KEYWORD` | `DOMAIN-KEYWORD,youtube,PROXY` | 域名中含关键词，线性扫描 |
-| `DOMAIN-REGEX` | `DOMAIN-REGEX,^(.+\.)?google\.com$,PROXY` | 正则匹配（Python `re`，`search` 模式），字面量预筛 |
-| `IP-CIDR` | `IP-CIDR,192.168.0.0/16,DIRECT` | IPv4 CIDR，先于域名规则匹配 |
+| `DOMAIN` | `DOMAIN,example.com,DIRECT` | 精确域名匹配（含本身，不含子域名）|
+| `DOMAIN-SUFFIX` | `DOMAIN-SUFFIX,google.com,PROXY` | 后缀匹配（含本身及所有子域名）|
+| `DOMAIN-KEYWORD` | `DOMAIN-KEYWORD,youtube,PROXY` | 主机名中含关键词即命中 |
+| `DOMAIN-REGEX` | `DOMAIN-REGEX,^(.+\.)?google\.com$,PROXY` | 正则匹配（Python `re`，`search` 模式）|
+| `IP-CIDR` | `IP-CIDR,192.168.0.0/16,DIRECT` | IPv4/IPv6 CIDR 匹配 |
 | `GEOSITE` | `GEOSITE,[source:]tag,ACTION` | geosite.dat 中的 tag，可指定源 |
-| `GEOIP` | `GEOIP,[source:]code,ACTION` | geoip.dat 中的国家/地区代码，二分查找 |
-| `FINAL` | `FINAL,PROXY` | 默认动作，放最后 |
+| `GEOIP` | `GEOIP,[source:]code,ACTION` | geoip.dat 中的国家/地区代码，支持 inverse_match |
+| `FINAL` | `FINAL,PROXY` | 兜底动作，未命中任何规则时生效 |
 
 > **TProxy 模式补充说明**：TProxy 只能从内核获得目标 IP，但客户端会在连接建立后立即嗅探初始字节提取 TLS SNI / HTTP Host，因此域名类规则（DOMAIN、DOMAIN-SUFFIX、GEOSITE 等）在 TProxy 模式下同样有效。无法嗅探到域名时（非 TLS/HTTP 协议）自动退化为 IP 规则匹配。
 
@@ -435,20 +435,25 @@ echo 1 > /proc/sys/net/ipv4/ip_forward
 
 ### 匹配顺序与性能
 
-每次连接按以下顺序匹配，命中即返回，后续规则不再执行：
+规则按**配置顺序**线性扫描，每条规则独立判断是否命中。每种规则类型自带内部优化以保证扫描成本最小化：
 
-```
-IP 地址  →  IP-CIDR（线性）→  GEOIP（二分）
-域名     →  DOMAIN（O(1)）→  DOMAIN-SUFFIX（BF + O(1)）
-         →  DOMAIN-KEYWORD（线性）→  DOMAIN-REGEX（字面量预筛 + 正则引擎）
-         →  FINAL（默认动作）
-```
+| 规则 | 单次判断成本 | 内部优化 |
+|---|---|---|
+| `DOMAIN` | O(1) | 字符串相等 |
+| `DOMAIN-SUFFIX` | O(1) | `endswith` |
+| `DOMAIN-KEYWORD` | O(1) | C 层 `in` |
+| `DOMAIN-REGEX` | O(1)~O(P) | 固定字面量预筛 → 不含则跳过正则引擎 |
+| `IP-CIDR` | O(1) | `IPAddress in IPNetwork` |
+| `GEOSITE` | O(log·parts) | 内部 exact 集 + suffix 集（≥64 项启用 Bloom Filter）+ keyword 列表 |
+| `GEOIP` | O(log n) | v4 排序后二分；v6 线性；inverse_match 通过 XOR 翻转语义 |
 
-**DOMAIN-SUFFIX** 使用 Bloom Filter 作前置过滤：加载 geosite 大型 tag（如 `cn`）后后缀表有数万条目，BF 是紧凑 bitset 常驻 CPU 缓存，对 miss 路径可避免大 hash table 的 cache miss。
+**关键点**：GEOSITE/GEOIP 这类"展开后有数万条目"的规则**只算一条规则**，其内部条目通过 Bloom Filter + 哈希表在 O(log·parts) 内完成判断，不会拖慢扫描。
 
-**DOMAIN-REGEX** 使用字面量预筛：启动时从每条正则中提取固定子串（如 `^(.+\.)?openai\.com$` 提取 `openai.com`），匹配时先用 C 层 `in` 操作检查该子串是否出现在主机名中，不包含则跳过正则引擎，包含才运行完整正则。对于域名类正则规则，绝大多数主机名在预筛阶段即可排除。
+**DOMAIN-REGEX** 启动时从每条正则中提取固定子串（如 `^(.+\.)?openai\.com$` 提取 `openai.com`），匹配时先用 C 层 `in` 操作检查该子串是否出现在主机名中，不包含则跳过正则引擎，包含才运行完整正则。绝大多数主机名在预筛阶段即可排除。
 
-> **建议**：尽量让正则 pattern 包含清晰的固定子串（如完整域名片段），预筛效果更好。纯通配符写法（如 `.*`）无法提取字面量，每次都要走正则引擎。
+> **顺序建议**：把高频命中规则（如 `GEOSITE,cn,DIRECT`、`GEOIP,cn,DIRECT`）放靠前，可以让大多数请求在前几条规则就命中返回，减少后续扫描。
+>
+> **正则建议**：让 pattern 包含清晰的固定子串（如完整域名片段），预筛效果更好。纯通配符写法（如 `.*`）无法提取字面量，每次都要走正则引擎。
 
 ### GeoSite / GeoIP 多源配置
 

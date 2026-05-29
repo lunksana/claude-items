@@ -405,6 +405,13 @@ def configure_rules() -> dict:
     final = "DIRECT" if final_action.strip() == "2" else "PROXY"
 
     # ── 组装规则 ─────────────────────────────────────────────────────────────
+    # router 已改为 Clash 兼容的"配置顺序首中即返回"语义，
+    # 因此即使用户输入选号是乱序（"12,1,4"），生成的规则也必须按 catalog 顺序排列。
+    # _GEOSITE_CATALOG / _GEOIP_CATALOG 已按 REJECT → DIRECT → PROXY 分块排好，
+    # 所以按 idx 排序后输出即可得到正确的优先级：屏蔽 > 直连 > 代理 > 默认。
+    site_sel = sorted(set(site_sel))
+    ip_sel   = sorted(set(ip_sel))
+
     rules: list[str] = []
 
     for idx in site_sel:
@@ -415,7 +422,7 @@ def configure_rules() -> dict:
         _, code, action, _, _ = _GEOIP_CATALOG[idx - 1]
         rules.append(f"GEOIP,loyalsoldier:{code},{action}")
 
-    # 静态局域网 CIDR（始终加入）
+    # 静态局域网 CIDR（始终加入，放最末以兜住未被上面 GEOIP private 覆盖的情况）
     for cidr in ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"):
         rules.append(f"IP-CIDR,{cidr},DIRECT")
 
