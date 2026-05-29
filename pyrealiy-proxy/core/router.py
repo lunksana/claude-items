@@ -219,12 +219,21 @@ _AddrType = ipaddress.IPv4Address | ipaddress.IPv6Address | None
 
 
 class _Rule:
-    """单条规则基类。子类实现 _matches；action 由调用方读取。"""
+    """
+    单条规则基类。
+
+    matches() 返回值有三态：
+      False / None    未命中
+      True            命中（无额外细节，沿用 self.desc 作日志）
+      str             命中（附带子匹配细节，如 GEOSITE 内部哪条 exact/suffix/keyword）
+
+    日志归因：dispatch 日志中显示 [rule.desc (detail)]，detail 为空时省略。
+    """
     __slots__ = ("action", "desc")
     def __init__(self, action: str, desc: str = ""):
         self.action = action.upper()
         self.desc   = desc
-    def matches(self, host: str, addr: _AddrType) -> bool:
+    def matches(self, host: str, addr: _AddrType):
         raise NotImplementedError
 
 
@@ -305,7 +314,7 @@ class _GeositeRule(_Rule):
 
     def matches(self, host, _addr):
         if host in self._exact:
-            return True
+            return f"exact {host}"
         if self._suffix:
             parts = host.split(".")
             for i in range(len(parts) - 1):
@@ -313,10 +322,10 @@ class _GeositeRule(_Rule):
                 if self._bloom is not None and sfx not in self._bloom:
                     continue
                 if sfx in self._suffix:
-                    return True
+                    return f"suffix {sfx}"
         for kw in self._keywords:
             if kw in host:
-                return True
+                return f"keyword {kw}"
         return False
 
 
@@ -384,6 +393,8 @@ class Router:
         self._default = action.upper()
 
     def add(self, rule: _Rule) -> None:
+        # 给规则编号，方便日志归因到具体 config 行
+        rule.desc = f"#{len(self._rules) + 1} {rule.desc}"
         self._rules.append(rule)
 
     def build(self) -> None:
@@ -404,6 +415,8 @@ class Router:
         返回 (action, source)：
           action — 命中的动作 PROXY/DIRECT/REJECT
           source — 命中的规则描述（用于日志归因），未命中任何规则时为 "FINAL"
+                   规则带 #N 索引，便于对应到 config 中的具体行；GEOSITE 额外
+                   附带 (exact X / suffix X / keyword X) 细化哪条子条目命中
         """
         h = host.lower().rstrip(".")
         addr: _AddrType
@@ -412,8 +425,12 @@ class Router:
         except ValueError:
             addr = None
         for rule in self._rules:
-            if rule.matches(h, addr):
-                return rule.action, rule.desc
+            result = rule.matches(h, addr)
+            if not result:
+                continue
+            if isinstance(result, str):
+                return rule.action, f"{rule.desc} ({result})"
+            return rule.action, rule.desc
         return self._default, "FINAL"
 
 

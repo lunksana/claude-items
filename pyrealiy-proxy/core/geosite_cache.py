@@ -173,13 +173,27 @@ async def _https_request_once(
             if data:
                 await tunnel.send(data)
 
+        # 跟踪是否收到过任何对端字节，区分"服务端立即关闭"vs"握手中途超时"
+        received_any = [False]
+
         async def feed(timeout: float) -> bool:
             try:
                 data = await asyncio.wait_for(tunnel.recv(), timeout=timeout)
             except asyncio.TimeoutError:
                 return False
+            except asyncio.IncompleteReadError:
+                # 隧道被服务端关闭：常见原因是服务端 VPS 无法 dial 目标主机
+                # （DNS 解析失败 / 出口被阻 / GFW 反向干扰）
+                if not received_any[0]:
+                    raise IOError(
+                        f"server closed tunnel before any data for {host}:{port} "
+                        f"— VPS likely can't reach the target "
+                        f"(check server logs for 'Cannot connect to {host}:{port}')"
+                    )
+                raise IOError(f"server closed tunnel mid-transfer for {host}:{port}")
             if not data:
                 return False
+            received_any[0] = True
             incoming.write(data)
             return True
 
@@ -191,7 +205,7 @@ async def _https_request_once(
             except ssl.SSLWantReadError:
                 await flush()
                 if not await feed(_TUNNEL_HS_TIMEOUT):
-                    raise IOError("TLS handshake timeout / tunnel closed")
+                    raise IOError(f"TLS handshake timeout to {host}:{port}")
             except ssl.SSLWantWriteError:
                 await flush()
         await flush()
@@ -276,12 +290,16 @@ def _dechunk(data: bytes) -> bytes:
 
 async def _ensure_one(
     key: str,
-    url: str,
+    url,                             # str 或 list[str]：支持多镜像 fallback
     cache_dir: str,
     update_days: float,
     meta: dict,
-    pool=None,                       # 给定则优先经隧道下载
+    pool=None,                       # 给定则每个 URL 都先试隧道再走直连
 ) -> bool:
+    urls = [url] if isinstance(url, str) else [u for u in url if u]
+    if not urls:
+        return False
+
     dest             = _dat_path(cache_dir, key)
     downloaded_at    = meta["sources"].get(key, {}).get("downloaded_at", 0)
     age_days         = (time.time() - downloaded_at) / 86400
@@ -291,30 +309,35 @@ async def _ensure_one(
         logger.debug("geo[%s] up-to-date (%.1f days old)", key, age_days)
         return True
 
-    logger.info("Downloading geo[%s] from %s ...", key, url)
+    logger.info("Downloading geo[%s] from %d mirror(s) ...", key, len(urls))
 
-    # 优先：经我们自己的加密隧道（弱网更稳）
-    if pool is not None:
+    for i, u in enumerate(urls, start=1):
+        # 优先：经我们自己的加密隧道（弱网更稳）
+        if pool is not None:
+            try:
+                await _download_via_tunnel(u, dest, pool)
+                meta["sources"][key] = {"url": u, "downloaded_at": int(time.time())}
+                logger.info("geo[%s] saved via tunnel (mirror %d/%d, %d KB): %s",
+                            key, i, len(urls), os.path.getsize(dest) // 1024, u)
+                return True
+            except Exception as e:
+                logger.warning("geo[%s] tunnel mirror %d/%d failed: %s",
+                               key, i, len(urls), e)
+
+        # 兜底：直连
         try:
-            await _download_via_tunnel(url, dest, pool)
-            meta["sources"][key] = {"url": url, "downloaded_at": int(time.time())}
-            logger.info("geo[%s] saved via tunnel (%d KB)",
-                        key, os.path.getsize(dest) // 1024)
+            await asyncio.to_thread(_download, u, dest)
+            meta["sources"][key] = {"url": u, "downloaded_at": int(time.time())}
+            logger.info("geo[%s] saved direct (mirror %d/%d, %d KB): %s",
+                        key, i, len(urls), os.path.getsize(dest) // 1024, u)
             return True
         except Exception as e:
-            logger.warning("geo[%s] tunnel download failed: %s; falling back to direct",
-                           key, e)
+            logger.warning("geo[%s] direct mirror %d/%d failed: %s",
+                           key, i, len(urls), e)
 
-    # 兜底：直连
-    try:
-        await asyncio.to_thread(_download, url, dest)
-        meta["sources"][key] = {"url": url, "downloaded_at": int(time.time())}
-        logger.info("geo[%s] saved direct (%d KB)",
-                    key, os.path.getsize(dest) // 1024)
-        return True
-    except Exception as e:
-        logger.warning("geo[%s] download failed: %s", key, e)
-        return os.path.exists(dest)   # 降级：仍有旧文件则继续用
+    logger.warning("geo[%s] all %d mirrors failed; using cached file if any",
+                   key, len(urls))
+    return os.path.exists(dest)
 
 
 # ── 公共入口 ───────────────────────────────────────────────────────────────────
@@ -330,7 +353,10 @@ async def _ensure_typed(
     """并发确保一组同类型源可用，返回 {source_name: dat_path}"""
     # 先过滤出有效条目，tasks 与 valid 一一对应；zip 必须用过滤后的列表，
     # 否则一个坏条目会让后续 source 与 result 错位（已修复 bug）
-    valid = [s for s in sources if s.get("name") and s.get("url")]
+    def _has_url(s):
+        u = s.get("url")
+        return bool(u if isinstance(u, str) else (u and any(u)))
+    valid = [s for s in sources if s.get("name") and _has_url(s)]
     tasks = [
         _ensure_one(
             key         = f"{type_prefix}-{s['name']}",

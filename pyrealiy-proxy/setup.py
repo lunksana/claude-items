@@ -304,12 +304,18 @@ _GEOIP_CATALOG = [
      "RFC1918 私有地址段（10.x、172.16.x、192.168.x）"),
 ]
 
-_LOYALSOLDIER_SITE_URL = (
-    "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
-)
-_LOYALSOLDIER_IP_URL = (
-    "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
-)
+# 多镜像 fallback：首选官方源（隧道走得通时最快最新），失败按序回落到 CN 友好的 CDN
+# 注：第三方代理镜像（gh-proxy / ghfast 等）会随时间变化，必要时手动替换
+_LOYALSOLDIER_SITE_URLS = [
+    "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat",
+    "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geosite.dat",
+    "https://gh-proxy.com/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat",
+]
+_LOYALSOLDIER_IP_URLS = [
+    "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat",
+    "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/geoip.dat",
+    "https://gh-proxy.com/https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat",
+]
 
 _ACTION_COLOR = {"REJECT": "31", "DIRECT": "32", "PROXY": "33"}
 _ACTION_LABEL = {"REJECT": "屏蔽", "DIRECT": "直连", "PROXY": "代理"}
@@ -439,10 +445,10 @@ def configure_rules() -> dict:
         "geosite_dir":         ".geosite",
         "geosite_update_days": 7,
         "geosite_sources": [
-            {"name": "loyalsoldier", "url": _LOYALSOLDIER_SITE_URL}
+            {"name": "loyalsoldier", "url": _LOYALSOLDIER_SITE_URLS}
         ] if needs_site else [],
         "geoip_sources": [
-            {"name": "loyalsoldier", "url": _LOYALSOLDIER_IP_URL}
+            {"name": "loyalsoldier", "url": _LOYALSOLDIER_IP_URLS}
         ] if needs_ip else [],
         "rules": rules,
     }
