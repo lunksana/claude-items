@@ -92,7 +92,7 @@ async def handle_client(
 
     target_host, target_port, _ = unpack_address(addr_packet)
     conn = store.register(client_ip, target_host, target_port, client_writer)
-    logger.info("Proxy %s → %s:%d [id=%d]", peer, target_host, target_port, conn.id)
+    logger.info("Proxy %s -> %s:%d [id=%d]", peer, target_host, target_port, conn.id)
 
     # 阶段4：连接目标，双向中继
     try:
@@ -152,7 +152,7 @@ def _raise_fd_limit() -> None:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         if soft < hard:
             resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
-            logger.info("File descriptor limit raised: %d → %d", soft, hard)
+            logger.info("File descriptor limit raised: %d -> %d", soft, hard)
     except Exception as e:
         logger.warning("Could not raise fd limit: %s", e)
 
@@ -186,7 +186,7 @@ async def main(config_path: str) -> None:
                 break
 
     logger.info(
-        "Listening on %s:%d | camouflage → %s | cache ready: %s",
+        "Listening on %s:%d | camouflage -> %s | cache ready: %s",
         cfg["listen_host"],
         cfg["listen_port"],
         cfg["camouflage_host"],

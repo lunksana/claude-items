@@ -399,7 +399,12 @@ class Router:
             self._default,
         )
 
-    def match(self, host: str) -> str:
+    def match(self, host: str) -> tuple[str, str]:
+        """
+        返回 (action, source)：
+          action — 命中的动作 PROXY/DIRECT/REJECT
+          source — 命中的规则描述（用于日志归因），未命中任何规则时为 "FINAL"
+        """
         h = host.lower().rstrip(".")
         addr: _AddrType
         try:
@@ -408,8 +413,8 @@ class Router:
             addr = None
         for rule in self._rules:
             if rule.matches(h, addr):
-                return rule.action
-        return self._default
+                return rule.action, rule.desc
+        return self._default, "FINAL"
 
 
 # ── 工厂函数 ───────────────────────────────────────────────────────────────────
@@ -481,15 +486,15 @@ def build_router(
 
         if rule_type == "DOMAIN":
             router.add(_ExactRule(value, action))
-            logger.info("Rule: DOMAIN          %-40s → %s", value, action)
+            logger.info("Rule: DOMAIN          %-40s -> %s", value, action)
 
         elif rule_type == "DOMAIN-SUFFIX":
             router.add(_SuffixRule(value, action))
-            logger.info("Rule: DOMAIN-SUFFIX   %-40s → %s", value, action)
+            logger.info("Rule: DOMAIN-SUFFIX   %-40s -> %s", value, action)
 
         elif rule_type == "DOMAIN-KEYWORD":
             router.add(_KeywordRule(value, action))
-            logger.info("Rule: DOMAIN-KEYWORD  %-40s → %s", value, action)
+            logger.info("Rule: DOMAIN-KEYWORD  %-40s -> %s", value, action)
 
         elif rule_type == "DOMAIN-REGEX":
             try:
@@ -498,7 +503,7 @@ def build_router(
                 logger.warning("Invalid regex pattern '%s': %s", value, e)
                 continue
             router.add(_RegexRule(value, action, compiled))
-            logger.info("Rule: DOMAIN-REGEX    %-40s → %s", value, action)
+            logger.info("Rule: DOMAIN-REGEX    %-40s -> %s", value, action)
 
         elif rule_type == "IP-CIDR":
             try:
@@ -507,7 +512,7 @@ def build_router(
                 logger.warning("Invalid CIDR: %s", value)
                 continue
             router.add(_CidrRule(value, action, net))
-            logger.info("Rule: IP-CIDR         %-40s → %s", value, action)
+            logger.info("Rule: IP-CIDR         %-40s -> %s", value, action)
 
         elif rule_type == "GEOSITE":
             src, tag = (value.split(":", 1) if ":" in value
@@ -520,7 +525,7 @@ def build_router(
                 logger.warning("GEOSITE tag '%s' not in '%s'", tag, src)
                 continue
             router.add(_GeositeRule(f"{src}:{tag}", action, entries))
-            logger.info("Rule: GEOSITE         %-40s → %s  (%d entries)",
+            logger.info("Rule: GEOSITE         %-40s -> %s  (%d entries)",
                         f"{src}:{tag}", action, len(entries))
 
         elif rule_type == "GEOIP":
@@ -535,7 +540,7 @@ def build_router(
                 continue
             networks, inverse = entry
             router.add(_GeoipRule(f"{src}:{code}", action, networks, inverse))
-            logger.info("Rule: GEOIP           %-40s → %s  (%d networks, inverse=%s)",
+            logger.info("Rule: GEOIP           %-40s -> %s  (%d networks, inverse=%s)",
                         f"{src}:{code}", action, len(networks), inverse)
 
     router.build()

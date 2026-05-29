@@ -74,5 +74,5 @@ async def parse_socks5_request(
     writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
     await writer.drain()
 
-    logger.info("SOCKS5 → %s:%d", host, port)
+    logger.info("SOCKS5 -> %s:%d", host, port)
     return host, port

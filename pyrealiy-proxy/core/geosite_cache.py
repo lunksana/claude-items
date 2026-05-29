@@ -40,15 +40,22 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import ssl
 import time
+import urllib.parse
 import urllib.request
 
-from .utils import get_logger
+from .utils import get_logger, pack_address
 
 logger = get_logger("geo_cache")
 
 _META_VERSION = 1
 _META_FILE    = "meta.json"
+
+# 隧道下载相关
+_TUNNEL_MAX_REDIRECTS = 5
+_TUNNEL_HS_TIMEOUT    = 15.0   # TLS 握手单次 recv 等待
+_TUNNEL_BODY_TIMEOUT  = 60.0   # 响应体单次 recv 等待
 
 
 # ── 元数据读写 ─────────────────────────────────────────────────────────────────
@@ -81,7 +88,7 @@ def _dat_path(cache_dir: str, key: str) -> str:
 
 
 def _download(url: str, dest: str) -> None:
-    """同步下载（在线程池中调用），原子写入"""
+    """同步直连下载（在线程池中调用），原子写入。tunnel 路径失败时的兜底。"""
     tmp = dest + ".tmp"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "pyrealiy-proxy/1.0"})
@@ -97,12 +104,183 @@ def _download(url: str, dest: str) -> None:
         raise
 
 
+# ── 隧道下载（优先路径）─────────────────────────────────────────────────────────
+
+async def _download_via_tunnel(url: str, dest: str, pool) -> None:
+    """
+    经我们自己的加密隧道下载：pool 拿一条 tunnel → server 为我们连 host:443 →
+    在 tunnel 上跑真实 TLS（ssl.MemoryBIO 模式）到 GitHub → 普通 HTTP/1.1 GET。
+
+    这样弱网下不依赖宿主机直连 GitHub 的成功率，借用 VPS 出口带宽。
+    """
+    body = await _https_get_via_pool(url, pool)
+    tmp = dest + ".tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(body)
+        os.replace(tmp, dest)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+async def _https_get_via_pool(url: str, pool) -> bytes:
+    for _ in range(_TUNNEL_MAX_REDIRECTS + 1):
+        u = urllib.parse.urlparse(url)
+        if u.scheme != "https":
+            raise ValueError(f"only https supported, got {u.scheme!r}")
+        host = u.hostname or ""
+        port = u.port or 443
+        path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+
+        status, headers, body = await _https_request_once(host, port, path, pool)
+
+        if 300 <= status < 400:
+            loc = next((v for k, v in headers if k.lower() == "location"), None)
+            if not loc:
+                raise IOError(f"redirect {status} missing Location")
+            url = loc if loc.startswith(("http://", "https://")) else f"https://{host}{loc}"
+            logger.debug("geo redirect %d -> %s", status, url)
+            continue
+        if status != 200:
+            raise IOError(f"HTTP {status}")
+        return body
+    raise IOError(f"too many redirects ({_TUNNEL_MAX_REDIRECTS})")
+
+
+async def _https_request_once(
+    host: str, port: int, path: str, pool,
+) -> tuple[int, list[tuple[str, str]], bytes]:
+    ready = await pool.acquire()
+    if ready is None:
+        raise OSError("no tunnel available")
+    tunnel = ready.tunnel
+    try:
+        # 服务端按这条地址 dial 目标主机
+        await tunnel.send(pack_address(host, port))
+
+        # MemoryBIO：incoming 喂网络数据给 TLS，outgoing 收 TLS 要发的数据
+        ctx = ssl.create_default_context()
+        incoming = ssl.MemoryBIO()
+        outgoing = ssl.MemoryBIO()
+        sslobj   = ctx.wrap_bio(incoming, outgoing, server_hostname=host)
+
+        async def flush() -> None:
+            data = outgoing.read()
+            if data:
+                await tunnel.send(data)
+
+        async def feed(timeout: float) -> bool:
+            try:
+                data = await asyncio.wait_for(tunnel.recv(), timeout=timeout)
+            except asyncio.TimeoutError:
+                return False
+            if not data:
+                return False
+            incoming.write(data)
+            return True
+
+        # TLS 握手
+        while True:
+            try:
+                sslobj.do_handshake()
+                break
+            except ssl.SSLWantReadError:
+                await flush()
+                if not await feed(_TUNNEL_HS_TIMEOUT):
+                    raise IOError("TLS handshake timeout / tunnel closed")
+            except ssl.SSLWantWriteError:
+                await flush()
+        await flush()
+
+        # HTTP GET
+        req = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            f"User-Agent: pyrealiy-proxy/1.0\r\n"
+            f"Accept: */*\r\n"
+            f"Connection: close\r\n\r\n"
+        ).encode("ascii")
+        sslobj.write(req)
+        await flush()
+
+        # 读到对端 close
+        raw = bytearray()
+        while True:
+            try:
+                chunk = sslobj.read(65536)
+            except ssl.SSLWantReadError:
+                if not await feed(_TUNNEL_BODY_TIMEOUT):
+                    break
+                continue
+            except ssl.SSLZeroReturnError:
+                break
+            if not chunk:
+                if not await feed(_TUNNEL_BODY_TIMEOUT):
+                    break
+                continue
+            raw.extend(chunk)
+
+        return _parse_http_response(bytes(raw))
+    finally:
+        ready.close()
+
+
+def _parse_http_response(raw: bytes) -> tuple[int, list[tuple[str, str]], bytes]:
+    end = raw.find(b"\r\n\r\n")
+    if end < 0:
+        raise IOError("malformed response: no header terminator")
+    head = raw[:end].decode("latin-1")
+    body = raw[end + 4:]
+
+    lines = head.split("\r\n")
+    try:
+        status = int(lines[0].split(" ", 2)[1])
+    except (IndexError, ValueError):
+        raise IOError(f"bad status line: {lines[0]!r}")
+
+    headers: list[tuple[str, str]] = []
+    for line in lines[1:]:
+        if ":" in line:
+            k, v = line.split(":", 1)
+            headers.append((k.strip(), v.strip()))
+
+    if any(k.lower() == "transfer-encoding" and "chunked" in v.lower()
+           for k, v in headers):
+        body = _dechunk(body)
+
+    return status, headers, body
+
+
+def _dechunk(data: bytes) -> bytes:
+    out = bytearray()
+    pos = 0
+    while pos < len(data):
+        nl = data.find(b"\r\n", pos)
+        if nl < 0:
+            break
+        try:
+            size = int(data[pos:nl].split(b";", 1)[0].strip(), 16)
+        except ValueError:
+            break
+        if size == 0:
+            break
+        pos = nl + 2
+        out.extend(data[pos:pos + size])
+        pos += size + 2
+    return bytes(out)
+
+
 async def _ensure_one(
     key: str,
     url: str,
     cache_dir: str,
     update_days: float,
     meta: dict,
+    pool=None,                       # 给定则优先经隧道下载
 ) -> bool:
     dest             = _dat_path(cache_dir, key)
     downloaded_at    = meta["sources"].get(key, {}).get("downloaded_at", 0)
@@ -114,10 +292,25 @@ async def _ensure_one(
         return True
 
     logger.info("Downloading geo[%s] from %s ...", key, url)
+
+    # 优先：经我们自己的加密隧道（弱网更稳）
+    if pool is not None:
+        try:
+            await _download_via_tunnel(url, dest, pool)
+            meta["sources"][key] = {"url": url, "downloaded_at": int(time.time())}
+            logger.info("geo[%s] saved via tunnel (%d KB)",
+                        key, os.path.getsize(dest) // 1024)
+            return True
+        except Exception as e:
+            logger.warning("geo[%s] tunnel download failed: %s; falling back to direct",
+                           key, e)
+
+    # 兜底：直连
     try:
         await asyncio.to_thread(_download, url, dest)
         meta["sources"][key] = {"url": url, "downloaded_at": int(time.time())}
-        logger.info("geo[%s] saved (%d KB)", key, os.path.getsize(dest) // 1024)
+        logger.info("geo[%s] saved direct (%d KB)",
+                    key, os.path.getsize(dest) // 1024)
         return True
     except Exception as e:
         logger.warning("geo[%s] download failed: %s", key, e)
@@ -132,6 +325,7 @@ async def _ensure_typed(
     cache_dir: str,
     default_update_days: float,
     meta: dict,
+    pool=None,
 ) -> dict[str, str]:
     """并发确保一组同类型源可用，返回 {source_name: dat_path}"""
     # 先过滤出有效条目，tasks 与 valid 一一对应；zip 必须用过滤后的列表，
@@ -144,6 +338,7 @@ async def _ensure_typed(
             cache_dir   = cache_dir,
             update_days = s.get("update_days", default_update_days),
             meta        = meta,
+            pool        = pool,
         )
         for s in valid
     ]
@@ -155,10 +350,13 @@ async def _ensure_typed(
     }
 
 
-async def ensure_all(cfg: dict) -> tuple[dict[str, str], dict[str, str]]:
+async def ensure_all(cfg: dict, pool=None) -> tuple[dict[str, str], dict[str, str]]:
     """
     并发下载/刷新所有 geosite 和 geoip 源。
     返回 (site_paths, ip_paths)，均为 {source_name: dat_path}。
+
+    给定 pool 时，下载优先经我们自己的加密隧道（弱网下比直连 GitHub 稳）；
+    隧道失败自动 fallback 直连。
 
     兼容旧版单源字段 geosite_url / geosite_path：
       自动转换为名为 "default" 的 geosite 源。
@@ -189,8 +387,8 @@ async def ensure_all(cfg: dict) -> tuple[dict[str, str], dict[str, str]]:
     meta = _read_meta(cache_dir)
 
     # geosite 和 geoip 并发下载
-    site_task = _ensure_typed("site", site_sources, cache_dir, default_days, meta)
-    ip_task   = _ensure_typed("ip",   ip_sources,   cache_dir, default_days, meta)
+    site_task = _ensure_typed("site", site_sources, cache_dir, default_days, meta, pool)
+    ip_task   = _ensure_typed("ip",   ip_sources,   cache_dir, default_days, meta, pool)
     site_paths, ip_paths = await asyncio.gather(site_task, ip_task)
 
     site_paths.update(site_fallback)

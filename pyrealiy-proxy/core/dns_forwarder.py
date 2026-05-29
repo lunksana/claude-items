@@ -219,7 +219,7 @@ class DNSForwarder:
             local_addr=(self._host, self._port),
         )
         logger.info(
-            "DNS forwarder on %s:%d  (CN→%s  foreign→%s via tunnel)",
+            "DNS forwarder on %s:%d  (CN->%s  foreign->%s via tunnel)",
             self._host, self._port, self._cn_dns, self._remote_dns,
         )
 
@@ -233,15 +233,15 @@ class DNSForwarder:
         if domain is None:
             return None
 
-        action = self._router.match(domain)
+        action, source = self._router.match(domain)
         try:
             if action == REJECT:
-                logger.debug("DNS REJECT  %s", domain)
+                logger.debug("DNS REJECT  %s  [%s]", domain, source)
                 return _nxdomain(data)
             if action == DIRECT:
-                logger.debug("DNS DIRECT  %s → %s", domain, self._cn_dns)
+                logger.debug("DNS DIRECT  %s -> %s  [%s]", domain, self._cn_dns, source)
                 return await _udp_query(data, self._cn_dns)
-            logger.debug("DNS PROXY   %s → %s (tunnel)", domain, self._remote_dns)
+            logger.debug("DNS PROXY   %s -> %s (tunnel)  [%s]", domain, self._remote_dns, source)
             return await self._dns_tunnel.query(data)
         except Exception as e:
             logger.warning("DNS query failed for %s: %s", domain, e)

@@ -51,18 +51,18 @@ async def _dispatch(
                   None 时退化为 target_host（IP 或 SOCKS5 提供的域名）。
     target_host:  实际连接目标（TProxy 模式下始终是原始 IP）。
     """
-    route_key = routing_host or target_host
-    action    = router.match(route_key)
+    route_key      = routing_host or target_host
+    action, source = router.match(route_key)
 
     label = f"{routing_host} ({target_host}:{target_port})" if routing_host else f"{target_host}:{target_port}"
 
     if action == REJECT:
-        logger.info("REJECT  %s", label)
+        logger.info("REJECT  %s  [%s]", label, source)
         local_writer.close()
         return
 
     if action == DIRECT:
-        logger.info("DIRECT  %s", label)
+        logger.info("DIRECT  %s  [%s]", label, source)
         try:
             target_reader, target_writer = await asyncio.open_connection(
                 target_host, target_port
@@ -75,7 +75,7 @@ async def _dispatch(
         return
 
     # ── 代理分支 ─────────────────────────────────────────────────────────────
-    logger.info("PROXY   %s", label)
+    logger.info("PROXY   %s  [%s]", label, source)
 
     ready = await pool.acquire()
     if ready is None:
@@ -168,7 +168,7 @@ def _raise_fd_limit() -> None:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         if soft < hard:
             resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
-            logger.info("File descriptor limit raised: %d → %d", soft, hard)
+            logger.info("File descriptor limit raised: %d -> %d", soft, hard)
     except Exception as e:
         logger.warning("Could not raise fd limit: %s", e)
 
@@ -195,11 +195,13 @@ async def main(config_path: str) -> None:
             )
             cfg["brutal_rate_bps"] = 0
 
-    available_site, available_ip = await geo_ensure_all(cfg)
-    router = build_router(cfg, available_site, available_ip)
-
+    # 先建池：geo 数据下载也要复用同一份隧道（弱网下避免直连 GitHub 慢/失败）
     pool = BrutalPool(cfg)
     await pool.warmup()
+
+    # 把 pool 传给 geo_ensure_all：优先经隧道下载，失败回落直连
+    available_site, available_ip = await geo_ensure_all(cfg, pool=pool)
+    router = build_router(cfg, available_site, available_ip)
 
     socks5_server = await asyncio.start_server(
         lambda r, w: handle_local_connection(r, w, pool, router),
