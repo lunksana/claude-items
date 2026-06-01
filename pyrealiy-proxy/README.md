@@ -20,7 +20,7 @@
 
 | 项目 | 最低版本 |
 |---|---|
-| Python | 3.10 |
+| Python | 3.9（推荐 3.10+ 以获得更好性能） |
 | cryptography | 42.0.0 |
 | uvloop（可选） | 任意 |
 | tcp_brutal 内核模块（可选，仅服务端） | Linux 内核 ≥ 4.9 |
@@ -778,3 +778,65 @@ ss -tin dst <客户端IP> | grep brutal
     "FINAL,PROXY"
 ]
 ```
+
+
+---
+
+## 开发与测试
+
+### 多版本 Python 兼容性测试
+
+PyReality 目标支持 **Python 3.9+**。仓库附带跨版本冒烟测试脚本，跑一次能快速发现"在某个 Python 上语法不兼容"或"模块导入崩"这类回归。
+
+#### 1. 安装 [uv](https://github.com/astral-sh/uv)（一次性）
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+#### 2. 跑全版本矩阵
+
+```bash
+bash scripts/test-py-matrix.sh
+```
+
+脚本会：
+
+- 用 `uv python install` 确保 3.9 / 3.10 / 3.11 / 3.12 / 3.13 都装好
+- 为每个版本分别在 `.venvs/py3.x` 建独立虚拟环境
+- 装 `cryptography` 后对全部 16 个 `core.*` 模块 + `client.py` / `server.py` / `setup.py` 做 `import` 测试
+- 任何版本失败立即用红色提示，并以 exit code 1 退出
+
+#### 3. 跑子集（调试单个版本）
+
+```bash
+PY_VERSIONS="3.9 3.10" bash scripts/test-py-matrix.sh
+```
+
+#### 4. 默认开发版本
+
+仓库根目录的 `.python-version` 指向 `3.12`。本地用 `uv venv` 不带参数会自动用这个版本。
+
+### 添加新依赖时
+
+如果引入 `cryptography` 以外的第三方包，同步更新 `scripts/test-py-matrix.sh` 里 `uv pip install` 一行。理想情况下未来迁移到 `pyproject.toml` + `uv sync`。
+
+### 写新代码时的版本兼容性
+
+PyReality 通过 `from __future__ import annotations` 让**类型注解**走字符串延迟求值，所以 `def f(x: int | None)` 在 3.9 也合法。但下面这些**运行时表达式**仍要求 3.10+：
+
+```python
+_T = int | None                  # ✗ 赋值语句右值，3.9 抛 TypeError
+isinstance(x, int | str)          # ✗ isinstance 第二参，3.9 抛 TypeError
+def f(): pass; type(f) | None     # ✗ 任何表达式位置的 |
+```
+
+3.9 兼容写法：
+
+```python
+from typing import Union, Optional
+_T = Optional[int]                # 或 Union[int, None]
+isinstance(x, (int, str))         # 用 tuple
+```
+
+矩阵测试脚本会拦下这类回归。

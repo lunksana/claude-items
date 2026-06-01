@@ -55,7 +55,7 @@ async def handle_client(
     # 封锁 IP 直接断开（在握手前，避免浪费资源）
     if store.is_blocked(client_ip):
         logger.info("Blocked %s", client_ip)
-        client_writer.close()
+        await safe_close(client_writer)
         return
 
     logger.info("New connection from %s", peer)
@@ -87,7 +87,7 @@ async def handle_client(
         addr_packet = await tunnel.recv()
     except Exception:
         logger.debug("Connection from %s closed before sending target address", peer)
-        client_writer.close()
+        await safe_close(client_writer)
         return
 
     target_host, target_port, _ = unpack_address(addr_packet)
@@ -99,7 +99,7 @@ async def handle_client(
         target_reader, target_writer = await asyncio.open_connection(target_host, target_port, limit=262144)
     except Exception as e:
         logger.error("Cannot connect to %s:%d: %s", target_host, target_port, e)
-        client_writer.close()
+        await safe_close(client_writer)
         store.unregister(conn)
         return
 

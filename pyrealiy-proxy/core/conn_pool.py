@@ -99,13 +99,19 @@ class BrutalPool:
         # 因此可以用普通 int 代替 Lock 来防止并发超建。
         self._building  = 0
 
-    async def warmup(self) -> None:
-        """启动时并发预建所有连接"""
+    async def warmup(self) -> int:
+        """启动时并发预建所有连接，返回成功数。调用方可据此决定是否走 tunnel 路径"""
         tasks = [self._build_and_enqueue() for _ in range(self._pool_size)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         ok = sum(1 for r in results if r is True)
         logger.info("Pool warmed up: %d/%d connections ready (rate=%.0f Mbps each)",
                     ok, self._pool_size, self._rate_bps / 1e6)
+        return ok
+
+    @property
+    def ready_count(self) -> int:
+        """当前可用隧道数（队列长度）"""
+        return self._queue.qsize()
 
     async def acquire(self) -> _ReadyTunnel | None:
         """

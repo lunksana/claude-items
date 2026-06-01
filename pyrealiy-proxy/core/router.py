@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from typing import Callable
+from typing import Callable, Union
 
 from .bloom import BloomFilter
 from .utils import get_logger
@@ -215,7 +215,9 @@ def load_geoip_dat(path: str) -> dict[str, tuple[list, bool]]:
 
 # ── 单条规则匹配器 ─────────────────────────────────────────────────────────────
 
-_AddrType = ipaddress.IPv4Address | ipaddress.IPv6Address | None
+# 兼容 Python 3.9：X | Y | None 这种运行时联合类型语法是 PEP 604 引入的，要 3.10+
+# 这里是赋值语句不是注解，from __future__ import annotations 也救不了 → 用 typing.Union
+_AddrType = Union[ipaddress.IPv4Address, ipaddress.IPv6Address, None]
 
 
 class _Rule:
@@ -388,13 +390,16 @@ class Router:
     def __init__(self, default: str = PROXY):
         self._default = default.upper()
         self._rules: list[_Rule] = []
+        # 独立计数器：以后若引入 remove/replace，索引仍单调递增不会乱序
+        self._next_idx = 1
 
     def set_default(self, action: str) -> None:
         self._default = action.upper()
 
     def add(self, rule: _Rule) -> None:
         # 给规则编号，方便日志归因到具体 config 行
-        rule.desc = f"#{len(self._rules) + 1} {rule.desc}"
+        rule.desc = f"#{self._next_idx} {rule.desc}"
+        self._next_idx += 1
         self._rules.append(rule)
 
     def build(self) -> None:

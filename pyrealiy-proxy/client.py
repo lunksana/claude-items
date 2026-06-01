@@ -58,7 +58,7 @@ async def _dispatch(
 
     if action == REJECT:
         logger.info("REJECT  %s  [%s]", label, source)
-        local_writer.close()
+        await safe_close(local_writer)
         return
 
     if action == DIRECT:
@@ -69,7 +69,7 @@ async def _dispatch(
             )
         except Exception as e:
             logger.error("Direct connect %s:%d failed: %s", target_host, target_port, e)
-            local_writer.close()
+            await safe_close(local_writer)
             return
         await relay(local_reader, target_writer, target_reader, local_writer)
         return
@@ -80,7 +80,7 @@ async def _dispatch(
     ready = await pool.acquire()
     if ready is None:
         logger.error("No available tunnel for %s:%d", target_host, target_port)
-        local_writer.close()
+        await safe_close(local_writer)
         return
 
     tunnel = ready.tunnel
@@ -90,8 +90,8 @@ async def _dispatch(
         await tunnel.send(pack_address(target_host, target_port))
     except Exception as e:
         logger.error("Failed to send target address: %s", e)
-        ready.close()
-        local_writer.close()
+        await safe_close(server_writer)
+        await safe_close(local_writer)
         return
 
     async def local_to_tunnel():
@@ -140,7 +140,7 @@ async def handle_local_connection(
 ) -> None:
     target = await parse_socks5_request(local_reader, local_writer)
     if target is None:
-        local_writer.close()
+        await safe_close(local_writer)
         return
     await _dispatch(local_reader, local_writer, target[0], target[1], pool, router)
 
@@ -197,10 +197,15 @@ async def main(config_path: str) -> None:
 
     # 先建池：geo 数据下载也要复用同一份隧道（弱网下避免直连 GitHub 慢/失败）
     pool = BrutalPool(cfg)
-    await pool.warmup()
+    ready_count = await pool.warmup()
 
-    # 把 pool 传给 geo_ensure_all：优先经隧道下载，失败回落直连
-    available_site, available_ip = await geo_ensure_all(cfg, pool=pool)
+    # warmup 0 说明服务端不通；继续把 pool 传给 geo 只会反复尝试 + acquire 超时，
+    # 单文件最多浪费 ~75s。直接禁用 tunnel 路径走 direct，省启动时间。
+    pool_for_geo = pool if ready_count > 0 else None
+    if pool_for_geo is None:
+        logger.warning("Pool empty after warmup; geo download will go direct only")
+
+    available_site, available_ip = await geo_ensure_all(cfg, pool=pool_for_geo)
     router = build_router(cfg, available_site, available_ip)
 
     socks5_server = await asyncio.start_server(

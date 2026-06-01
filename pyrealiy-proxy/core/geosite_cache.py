@@ -53,9 +53,10 @@ _META_VERSION = 1
 _META_FILE    = "meta.json"
 
 # 隧道下载相关
-_TUNNEL_MAX_REDIRECTS = 5
-_TUNNEL_HS_TIMEOUT    = 15.0   # TLS 握手单次 recv 等待
-_TUNNEL_BODY_TIMEOUT  = 60.0   # 响应体单次 recv 等待
+_TUNNEL_MAX_REDIRECTS  = 5
+_TUNNEL_HS_TIMEOUT     = 15.0    # TLS 握手单次 recv 等待
+_TUNNEL_BODY_TIMEOUT   = 60.0    # 响应体单次 recv 等待
+_TUNNEL_REQUEST_BUDGET = 180.0   # 单次 GET（含握手+全部 body）总时长上界，防慢速 DoS
 
 
 # ── 元数据读写 ─────────────────────────────────────────────────────────────────
@@ -88,11 +89,18 @@ def _dat_path(cache_dir: str, key: str) -> str:
 
 
 def _download(url: str, dest: str) -> None:
-    """同步直连下载（在线程池中调用），原子写入。tunnel 路径失败时的兜底。"""
+    """
+    同步直连下载（在线程池中调用），原子写入。tunnel 路径失败时的兜底。
+
+    用显式空 ProxyHandler 屏蔽宿主机的 HTTP_PROXY/HTTPS_PROXY/NO_PROXY 环境变量 ——
+    否则用户从旧代理迁移过来若没清 env，fallback 会被劫持到死掉的旧代理，
+    日志只会看到 "direct download failed" 但说不清根因。
+    """
     tmp = dest + ".tmp"
     try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         req = urllib.request.Request(url, headers={"User-Agent": "pyrealiy-proxy/1.0"})
-        with urllib.request.urlopen(req, timeout=60) as resp, open(tmp, "wb") as f:
+        with opener.open(req, timeout=60) as resp, open(tmp, "wb") as f:
             while chunk := resp.read(65536):
                 f.write(chunk)
         os.replace(tmp, dest)
@@ -136,7 +144,11 @@ async def _https_get_via_pool(url: str, pool) -> bytes:
         port = u.port or 443
         path = (u.path or "/") + (f"?{u.query}" if u.query else "")
 
-        status, headers, body = await _https_request_once(host, port, path, pool)
+        # 总超时：避免对端慢速喂数据让一个请求拖太久
+        status, headers, body = await asyncio.wait_for(
+            _https_request_once(host, port, path, pool),
+            timeout=_TUNNEL_REQUEST_BUDGET,
+        )
 
         if 300 <= status < 400:
             loc = next((v for k, v in headers if k.lower() == "location"), None)
@@ -282,8 +294,14 @@ def _parse_http_response(raw: bytes) -> tuple[int, list[tuple[str, str]], bytes]
 
 
 def _dechunk(data: bytes) -> bytes:
+    """
+    解 HTTP/1.1 chunked 编码。
+    严格要求看到 size=0 终止符，否则视为截断，抛错；
+    否则中途断开会无声写出残缺 .dat。
+    """
     out = bytearray()
     pos = 0
+    seen_terminator = False
     while pos < len(data):
         nl = data.find(b"\r\n", pos)
         if nl < 0:
@@ -293,10 +311,18 @@ def _dechunk(data: bytes) -> bytes:
         except ValueError:
             break
         if size == 0:
+            seen_terminator = True
             break
         pos = nl + 2
+        if pos + size > len(data):
+            break                  # chunk 头声明的字节数读不全 → 截断
         out.extend(data[pos:pos + size])
-        pos += size + 2
+        pos += size + 2            # 跳过 chunk 数据 + 尾部 CRLF
+    if not seen_terminator:
+        raise IOError(
+            f"chunked body truncated: no 0-size terminator chunk "
+            f"({len(out)} bytes decoded so far)"
+        )
     return bytes(out)
 
 

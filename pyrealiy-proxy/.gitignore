@@ -20,6 +20,7 @@ build/
 
 # 虚拟环境
 .venv/
+.venvs/
 venv/
 env/
 
