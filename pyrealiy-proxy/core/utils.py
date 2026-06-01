@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import logging
 
+import socket
+
 import struct
 
 import asyncio
@@ -17,6 +19,30 @@ logging.basicConfig(
 
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
+
+
+# ── asyncio 噪音抑制 ──────────────────────────────────────────────────────────
+
+def install_stale_gaierror_handler(loop: asyncio.AbstractEventLoop) -> None:
+    """
+    asyncio 默认会把"Future exception was never retrieved"打 ERROR。
+    pool 的 wait_for 超时取消任务时，asyncio 在线程池里跑的 getaddrinfo
+    future 不可取消，等它真把 gaierror 报回来时已经没人 await 那个 future 了——
+    这是 stale future 的副作用，不是真正的错误。降级到 DEBUG 避免吓人。
+
+    client 和 server 都该装：server 处理 client 发来的域名 target 时
+    同样可能在 open_connection 内部产生 stale getaddrinfo future。
+    """
+    _logger = get_logger("asyncio")
+
+    def _handler(_loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, socket.gaierror):
+            _logger.debug("stale getaddrinfo future (ignored): %s", exc)
+            return
+        _loop.default_exception_handler(context)
+
+    loop.set_exception_handler(_handler)
 
 
 def pack_address(host: str, port: int) -> bytes:

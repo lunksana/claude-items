@@ -7,12 +7,12 @@ PyReality 交互式部署脚本
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import platform
 import re
 import socket
-import struct
 import subprocess
 import sys
 
@@ -37,6 +37,174 @@ def ask_yn(prompt: str, default: bool = True) -> bool:
     hint = "Y/n" if default else "y/N"
     val = ask(f"{prompt} ({hint})", "y" if default else "n").lower()
     return val in ("y", "yes", "")
+
+
+# ── 输入校验 ──────────────────────────────────────────────────────────────────
+# 历史教训：一次 server_host 写成 "172.245145.188"（缺一个点），客户端
+# 把它当域名扔进 getaddrinfo → gaierror → SYN 一个都没发出去，排查耗了大半天。
+# 所有 IP / 端口 / 域名输入都强制循环校验，输错立即重输，让低级错误进不了配置。
+
+# RFC 1035 简化：每段 1-63 字符、字母数字或中划线、不能首尾连字符
+_DOMAIN_RE = re.compile(
+    r"^(?=.{1,253}$)"
+    r"(?!-)[a-zA-Z0-9-]{1,63}(?<!-)"
+    r"(?:\.(?!-)[a-zA-Z0-9-]{1,63}(?<!-))*$"
+)
+
+
+def _looks_like_ip(s: str) -> bool:
+    try:
+        ipaddress.ip_address(s)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_valid_hostname(s: str) -> bool:
+    """允许单标签（如 'localhost' / 'router'），匹配 RFC 1035 一般主机名"""
+    return bool(_DOMAIN_RE.match(s))
+
+
+def _is_valid_fqdn(s: str) -> bool:
+    """必须含至少一个点 —— 用于 camouflage_host，SNI 用单标签没意义"""
+    return _is_valid_hostname(s) and "." in s
+
+
+def ask_port(prompt: str, default: str = "") -> int:
+    """端口（1-65535）。返回 int。输错立即重输。"""
+    while True:
+        v = ask(prompt, default).strip()
+        try:
+            p = int(v)
+            if 1 <= p <= 65535:
+                return p
+            ERR(f"端口必须在 1-65535 范围，{p} 越界")
+        except ValueError:
+            ERR(f"端口必须是整数，{v!r} 不是")
+
+
+def ask_ip(prompt: str, default: str = "") -> str:
+    """必须是合法 IP 字面量。用于 DNS 服务器、监听地址等不接受域名的字段。"""
+    while True:
+        v = ask(prompt, default).strip()
+        if _looks_like_ip(v):
+            return v
+        ERR(f"必须是合法 IP（v4 或 v6），{v!r} 不是 — 看是否漏点 / 多空格 / 含非法字符")
+
+
+def ask_ip_or_domain(prompt: str, default: str = "",
+                     verify_dns: bool = True) -> str:
+    """
+    IP 字面量或合法主机名（允许单标签，如 localhost）。
+    这是踩过坑的字段（server_host），所以默认要试一次 DNS 解析，
+    解析不到给警告并让用户确认是否照填。
+
+    AF_UNSPEC 同时拿 A 和 AAAA，IPv6-only 也能用。
+    """
+    while True:
+        v = ask(prompt, default).strip()
+        if not v:
+            ERR("不能为空")
+            continue
+        if _looks_like_ip(v):
+            return v
+        if not _is_valid_hostname(v):
+            ERR(f"既不是合法 IP 也不是合法主机名：{v!r}（典型问题：多空格 / 含 http:// / 含端口）")
+            continue
+        if verify_dns:
+            try:
+                socket.getaddrinfo(v, None, family=socket.AF_UNSPEC)
+            except socket.gaierror as e:
+                WARN(f"DNS 解析 {v} 失败：{e}")
+                if not ask_yn(f"仍然使用 {v}（可能是临时网络问题或域名暂未生效）", default=False):
+                    continue
+        return v
+
+
+def ask_domain(prompt: str, default: str = "") -> str:
+    """
+    必须是 FQDN（含至少一个点）。用于 camouflage_host：
+      - IP 不能作为 SNI
+      - 单标签（如 localhost）作为 SNI 没意义，无法伪装成真实公网站点
+    """
+    while True:
+        v = ask(prompt, default).strip()
+        if _looks_like_ip(v):
+            ERR(f"camouflage 必须是域名而非 IP，{v} 是 IP（SNI 不接受 IP 字面量）")
+            continue
+        if not _is_valid_fqdn(v):
+            ERR(f"不是合法 FQDN：{v!r}（必须至少含一个点，单标签如 'localhost' 不能作 SNI）")
+            continue
+        return v
+
+
+def _probe_camouflage(host: str, port: int = 443, timeout: float = 10.0) -> tuple[bool, str]:
+    """
+    对 camouflage 目标做一次真实 TLS 1.3 握手测试 + 证书链验证。
+
+    pyrealiy 服务端启动时会从这个站点缓存 TLS 1.3 握手记录用于回放伪装，
+    所以必须满足：
+      - DNS 解析得通
+      - TCP 443 可达
+      - 协商 TLS **1.3**（我们的缓存格式不支持 1.2）
+      - 证书链有效（避免被 GFW 中间人塞假证）
+
+    返回 (ok, message)，message 是给用户看的中文反馈。
+    """
+    import ssl as _ssl
+    import time as _time
+
+    ctx = _ssl.create_default_context()
+    ctx.minimum_version = _ssl.TLSVersion.TLSv1_3   # 不接受 1.2 协商下来
+
+    start = _time.monotonic()
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                version = ssock.version()
+                elapsed = (_time.monotonic() - start) * 1000
+                if version == "TLSv1.3":
+                    return True, f"TLS 1.3 握手 OK（{elapsed:.0f} ms）"
+                return False, f"握手成功但协商版本是 {version}，需要 TLS 1.3"
+    except socket.gaierror as e:
+        return False, f"DNS 解析失败：{e}"
+    except socket.timeout:
+        return False, f"连接超时（{timeout:.0f}s 内无响应）"
+    except _ssl.SSLCertVerificationError as e:
+        return False, f"证书验证失败：{e.verify_message}（可能被中间人或证书过期）"
+    except _ssl.SSLError as e:
+        return False, f"TLS 握手失败：{e}（站点可能不支持 TLS 1.3）"
+    except ConnectionRefusedError:
+        return False, f"端口 {port} 拒绝连接（站点未在该端口提供 TLS）"
+    except OSError as e:
+        return False, f"网络错误：{e}"
+
+
+def ask_camouflage_host(prompt: str, default: str = "") -> str:
+    """
+    询问 camouflage 域名 + 自动做一次 TLS 1.3 握手测试。
+
+    失败时让用户选：
+      [1] 改填别的域名（推荐）
+      [2] 仍使用此域名（启动时可能失败，或本地网络问题导致探测失误）
+    """
+    while True:
+        v = ask_domain(prompt, default)
+        INFO(f"正在测试 {v}:443 是否可作为 camouflage 目标 ...")
+        ok, msg = _probe_camouflage(v)
+        if ok:
+            OK(msg)
+            return v
+        ERR(msg)
+        choice = ask(
+            "如何处理？[1] 改填别的域名（推荐） [2] 仍使用此域名",
+            "1",
+        ).strip()
+        if choice == "2":
+            WARN(f"强制使用 {v}，pyrealiy server 启动时若 'Handshake cache warmup failed' "
+                 f"则探测流量得不到伪装，仅密钥认证仍有效")
+            return v
+        # 其它输入（含 "1"）→ 循环重输
 
 
 # ── 系统检测 ──────────────────────────────────────────────────────────────────
@@ -207,9 +375,9 @@ def handle_brutal_install() -> bool:
 def configure_server(brutal_available: bool) -> None:
     TITLE("服务端配置")
 
-    listen_port   = ask("监听端口", "443")
+    listen_port   = ask_port("监听端口", "443")
     password      = ask("连接密码（建议用随机字符串）")
-    camouflage    = ask("伪装域名", "www.apple.com")
+    camouflage    = ask_camouflage_host("伪装域名", "www.apple.com")
 
     rate_bps = 0
     if brutal_available:
@@ -228,13 +396,13 @@ def configure_server(brutal_available: bool) -> None:
     # ── Web 管理面板 ──────────────────────────────────────────────────────────
     admin_cfg: dict = {"admin_port": 0}
     if ask_yn("是否启用 Web 管理面板（监控连接、封锁 IP）？", default=False):
-        admin_host  = ask("面板监听地址（建议 127.0.0.1 仅本机，0.0.0.0 公网暴露需设令牌）",
-                          "127.0.0.1")
-        admin_port  = ask("面板端口", "8080")
+        admin_host  = ask_ip("面板监听地址（建议 127.0.0.1 仅本机，0.0.0.0 公网暴露需设令牌）",
+                             "127.0.0.1")
+        admin_port  = ask_port("面板端口", "8080")
         admin_token = ask("访问令牌（留空则不验证，建议随机字符串）", "")
         admin_cfg   = {
             "admin_host":  admin_host,
-            "admin_port":  int(admin_port),
+            "admin_port":  admin_port,
             "admin_token": admin_token,
         }
         token_hint = f"?token={admin_token}" if admin_token else ""
@@ -245,7 +413,7 @@ def configure_server(brutal_available: bool) -> None:
 
     cfg = {
         "listen_host":    "0.0.0.0",
-        "listen_port":    int(listen_port),
+        "listen_port":    listen_port,
         "password":       password,
         "camouflage_host": camouflage,
         "camouflage_port": 443,
@@ -490,14 +658,10 @@ def _resolve_server_ips(host: str) -> list[str]:
     域名背后多 IP 或后续变化会导致排除规则失效、流量环路。
     所以在生成脚本前一次性解析，把所有 A 记录写成多条 RETURN 规则。
     """
-    import ipaddress
     if not host:
         return []
-    try:
-        ipaddress.ip_address(host)
+    if _looks_like_ip(host):
         return [host]                      # 已是 IP 字面量
-    except ValueError:
-        pass
     try:
         infos = socket.getaddrinfo(host, None, family=socket.AF_INET)
         ips = sorted({info[4][0] for info in infos})
@@ -691,7 +855,7 @@ def configure_tproxy(server_ip: str, cfg: dict) -> None:
     if not ask_yn("是否启用 TProxy 透明代理（需要 root / CAP_NET_ADMIN）？", default=False):
         return
 
-    tproxy_port = int(ask("TProxy 监听端口", "7893"))
+    tproxy_port = ask_port("TProxy 监听端口", "7893")
     cfg["tproxy_port"] = tproxy_port
 
     mode = ask(
@@ -755,21 +919,21 @@ def configure_tproxy(server_ip: str, cfg: dict) -> None:
 def configure_client() -> None:
     TITLE("客户端配置")
 
-    server_host = ask("服务端 IP 或域名")
-    server_port = ask("服务端端口", "443")
+    server_host = ask_ip_or_domain("服务端 IP 或域名")
+    server_port = ask_port("服务端端口", "443")
     password    = ask("连接密码（与服务端一致）")
-    camouflage  = ask("伪装域名（与服务端一致）", "www.apple.com")
-    socks5_port = ask("本地 SOCKS5 端口", "1080")
+    camouflage  = ask_camouflage_host("伪装域名（与服务端一致）", "www.apple.com")
+    socks5_port = ask_port("本地 SOCKS5 端口", "1080")
 
     # ── DNS 转发器 ────────────────────────────────────────────────────────────
     dns_cfg: dict = {}
     if ask_yn("是否启用本地 DNS 转发器（防止 DNS 泄漏）？"):
-        dns_port = ask("DNS 监听端口（5353 无需 root，53 需要 root）", "5353")
-        cn_dns   = ask("国内 DNS 服务器", "223.5.5.5")
-        remote   = ask("境外 DNS 服务器（通过隧道解析）", "8.8.8.8")
+        dns_port = ask_port("DNS 监听端口（5353 无需 root，53 需要 root）", "5353")
+        cn_dns   = ask_ip("国内 DNS 服务器", "223.5.5.5")
+        remote   = ask_ip("境外 DNS 服务器（通过隧道解析）", "8.8.8.8")
         dns_cfg  = {
             "dns_listen_host": "127.0.0.1",
-            "dns_listen_port": int(dns_port),
+            "dns_listen_port": dns_port,
             "cn_dns":          cn_dns,
             "remote_dns":      remote,
         }
@@ -782,9 +946,9 @@ def configure_client() -> None:
 
     cfg = {
         "socks5_host":    "0.0.0.0",
-        "socks5_port":    int(socks5_port),
+        "socks5_port":    socks5_port,
         "server_host":    server_host,
-        "server_port":    int(server_port),
+        "server_port":    server_port,
         "password":       password,
         "camouflage_host": camouflage,
         "brutal_rate_bps": 0,

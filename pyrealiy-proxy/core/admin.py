@@ -381,7 +381,7 @@ function durCls(s) { return s > 300 ? 'cg' : s > 30 ? 'cy' : ''; }
 function bCls(b)   { return b > 10485760 ? 'co' : b > 1048576 ? 'cg' : ''; }
 
 function proto(target) {
-  const m = String(target).match(/:(\d+)$/);
+  const m = String(target).match(/:(\\d+)$/);
   const p = m ? +m[1] : 0;
   if (p === 443) return '<span class="pb pb-tls">TLS</span>';
   if (p === 80)  return '<span class="pb pb-http">HTTP</span>';

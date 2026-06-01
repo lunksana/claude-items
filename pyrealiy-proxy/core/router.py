@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from typing import Callable, Union
+from typing import Union
 
 from .bloom import BloomFilter
 from .utils import get_logger

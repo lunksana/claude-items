@@ -19,8 +19,10 @@ Brutal 多连接策略：
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import resource
+import socket
 import sys
 
 from core.socks5 import parse_socks5_request
@@ -29,10 +31,62 @@ from core.dns_forwarder import DNSForwarder
 from core.sniffer import sniff_domain, PrefixedReader
 from core.geosite_cache import ensure_all as geo_ensure_all
 from core.router import build_router, DIRECT, REJECT
-from core.utils import get_logger, pack_address, relay, safe_close
+from core.utils import (get_logger, pack_address, relay, safe_close,
+                        install_stale_gaierror_handler)
 from core import brutal
 
 logger = get_logger("client")
+
+
+# ── 启动期辅助 ────────────────────────────────────────────────────────────────
+
+def _resolve_server_host(cfg: dict) -> None:
+    """
+    把 cfg['server_host'] 中的域名一次性解析为 IP 并替换。
+
+    每条 pool 隧道都对 server_host 做一次 open_connection；如果它是域名，
+    asyncio 在线程池执行器里发 getaddrinfo —— 这个 future 不可取消，
+    pool 的 wait_for 超时后没人接住它的结果，gaierror 就成了 stale future
+    的未消费异常，asyncio 抱怨"Future exception was never retrieved"。
+
+    启动一次性解析既消除噪音根源，又能在启动期快速暴露"客户端连不上服务端"。
+    """
+    # strip 防止手编 JSON 时混入空格 / BOM：否则 ipaddress 解析失败 → 当域名 →
+    # getaddrinfo 也失败 → 错误信息会指向 "DNS 不通"，把用户引到错的方向
+    raw  = cfg["server_host"]
+    host = raw.strip()
+    if host != raw:
+        logger.warning("server_host %r had surrounding whitespace, stripped to %r", raw, host)
+    cfg["server_host"] = host
+
+    try:
+        ipaddress.ip_address(host)
+        return                                  # 已经是 IP
+    except ValueError:
+        pass
+
+    # AF_UNSPEC 同时拿 A 和 AAAA，IPv6-only 服务也能用；
+    # IPv4 优先（兼容性好），实在没 v4 再用 v6
+    try:
+        infos = socket.getaddrinfo(host, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM)
+        v4 = sorted({info[4][0] for info in infos if info[0] == socket.AF_INET})
+        v6 = sorted({info[4][0] for info in infos if info[0] == socket.AF_INET6})
+    except socket.gaierror as e:
+        logger.error("Cannot resolve server_host %s: %s — 请检查 DNS / hosts / VPN", host, e)
+        raise SystemExit(1)
+
+    ips = v4 + v6                               # v4 优先
+    if not ips:
+        logger.error("No A/AAAA record for server_host %s", host)
+        raise SystemExit(1)
+
+    cfg["_server_host_original"] = host         # 保留原始域名留作日志
+    cfg["server_host"] = ips[0]
+    if len(ips) > 1:
+        logger.info("server_host %s -> %d IPs, using %s (others: %s)",
+                    host, len(ips), ips[0], ", ".join(ips[1:]))
+    else:
+        logger.info("server_host %s -> %s", host, ips[0])
 
 
 async def _dispatch(
@@ -176,8 +230,14 @@ def _raise_fd_limit() -> None:
 async def main(config_path: str) -> None:
     _raise_fd_limit()
 
+    # 把可能漏接的 gaierror 降到 DEBUG（详见 install_stale_gaierror_handler 注释）
+    install_stale_gaierror_handler(asyncio.get_running_loop())
+
     with open(config_path) as f:
         cfg = json.load(f)
+
+    # 启动期把 server_host 域名解析为 IP，省下每次 build 的 getaddrinfo + 噪音
+    _resolve_server_host(cfg)
 
     rate_bps  = cfg.get("brutal_rate_bps", 0)
     pool_size = cfg.get("brutal_pool_size", 10)

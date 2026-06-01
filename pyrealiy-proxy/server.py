@@ -30,7 +30,8 @@ from core.hello_auth import TokenReplayCache
 
 from core.tunnel import EncryptedTunnel
 
-from core.utils import get_logger, unpack_address, safe_close
+from core.utils import (get_logger, unpack_address, safe_close,
+                        install_stale_gaierror_handler)
 
 from core.stats import StatsStore
 
@@ -159,6 +160,9 @@ def _raise_fd_limit() -> None:
 
 async def main(config_path: str) -> None:
     _raise_fd_limit()
+
+    # 静音 stale getaddrinfo future 的噪音（详见 utils.install_stale_gaierror_handler）
+    install_stale_gaierror_handler(asyncio.get_running_loop())
 
     with open(config_path) as f:
         cfg = json.load(f)
