@@ -116,28 +116,36 @@ async def _udp_query(data: bytes, host: str, port: int = 53) -> bytes:
 
 class _DnsTunnel:
     """
-    长寿命 DNS-over-TCP 隧道。
+    长寿命 DNS-over-TCP 隧道 + 并发 query pipeline。
 
-    问题：原实现每次 DNS 查询都 acquire 一条池连接，握手一遍，发完一帧丢弃。
-    Chrome 单页加载触发 20+ DNS 查询时，池连接会被反复借走重建，每条
-    重建耗时 ~200ms（TLS 1.3 伪装握手），严重挤占代理带宽。
-
-    方案：从池中借出 **一条** 隧道并永久持有，所有 DNS 查询复用它。
-    多查询用 asyncio.Lock 串行化——DNS 单查询 < 50ms，串行化比重建握手
-    便宜得多；如果隧道掉线则惰性重建。
-
-    与 BrutalPool 的关系：占用 1 个池槽位（池会自动补满），不另开连接。
+    设计要点：
+      - **单条**池连接持有；所有 DNS 查询经它发出
+      - 查询用我们自己的内部 tx_id（递增计数器）替换客户端原始 ID，保证唯一性，
+        响应回来时再还原成客户端期望的 ID
+      - 后台 reader 任务从隧道连续读 DNS-over-TCP 帧，按 tx_id 派发到 pending future
+      - 并发上限 = MAX_INFLIGHT，超出时排队等待 slot（防止单 client 滥用拖垮 server）
+      - 隧道掉线：reader 异常退出 → 所有 pending future 收到 OSError → 下次 query
+        重试时惰性重建隧道；in-flight 查询都失败（端到端 resolver 会按其 timeout 重发）
     """
 
+    MAX_INFLIGHT = 64
+
     def __init__(self, pool, remote_dns: str):
-        self._pool       = pool
-        self._remote_dns = remote_dns
-        self._ready      = None
-        self._lock       = asyncio.Lock()  # 串行化 query
+        self._pool        = pool
+        self._remote_dns  = remote_dns
+        self._ready       = None
+        self._reader_task = None
+        self._setup_lock  = asyncio.Lock()        # 只串行化"建立隧道"，不串行化 query
+        self._inflight    = asyncio.Semaphore(self.MAX_INFLIGHT)
+        # 内部 tx_id → (Future, 客户端原始 tx_id bytes)
+        self._pending     = {}
+        self._next_tx     = 1                     # 0 留给"未初始化"
 
     async def query(self, data: bytes) -> bytes:
-        async with self._lock:
-            # 一次重试机会：第一次失败时丢弃旧隧道、换新的再试
+        if len(data) < 2:
+            raise ValueError("DNS query too short")
+
+        async with self._inflight:
             for attempt in (0, 1):
                 try:
                     await self._ensure_ready()
@@ -148,27 +156,76 @@ class _DnsTunnel:
                         raise
 
     async def _ensure_ready(self) -> None:
-        if self._ready is not None:
+        if self._ready is not None and self._reader_task and not self._reader_task.done():
             return
-        ready = await self._pool.acquire()
-        if ready is None:
-            raise OSError("no tunnel available for DNS")
-        # 只在首次发送目标地址，后续所有 DNS 查询复用同一目标连接
-        await ready.tunnel.send(pack_address(self._remote_dns, 53))
-        self._ready = ready
+        async with self._setup_lock:
+            # 双重检查（其它 coroutine 可能在我们等锁期间已经建好）
+            if self._ready is not None and self._reader_task and not self._reader_task.done():
+                return
+            ready = await self._pool.acquire()
+            if ready is None:
+                raise OSError("no tunnel available for DNS")
+            await ready.tunnel.send(pack_address(self._remote_dns, 53))
+            self._ready       = ready
+            self._reader_task = asyncio.create_task(self._reader_loop())
 
     async def _send_recv(self, data: bytes) -> bytes:
-        await self._ready.tunnel.send(struct.pack("!H", len(data)) + data)
+        # 用内部 tx_id 替换客户端 ID，保证唯一（客户端 ID 可能重复或可预测）
+        original_id = data[:2]
+        tx_id       = self._next_tx
+        self._next_tx = (self._next_tx + 1) & 0xFFFF
+        if self._next_tx == 0:
+            self._next_tx = 1                       # 跳过 0
+
+        rewritten = tx_id.to_bytes(2, "big") + data[2:]
+        loop = asyncio.get_event_loop()
+        fut  = loop.create_future()
+        self._pending[tx_id] = (fut, original_id)
+        try:
+            await self._ready.tunnel.send(struct.pack("!H", len(rewritten)) + rewritten)
+            resp = await asyncio.wait_for(fut, timeout=_TUNNEL_TIMEOUT)
+            # 还原客户端原始 tx_id
+            return original_id + resp[2:]
+        finally:
+            self._pending.pop(tx_id, None)
+
+    async def _reader_loop(self) -> None:
+        """
+        持续从隧道读 DNS-over-TCP 帧（2 字节长度 + DNS 报文），
+        按内部 tx_id 派发给对应 future。
+        隧道结束 / 任何异常 → 唤醒所有 pending future 并退出。
+        """
         buf = bytearray()
-        while True:
-            chunk = await asyncio.wait_for(self._ready.tunnel.recv(), timeout=_TUNNEL_TIMEOUT)
-            buf.extend(chunk)
-            if len(buf) >= 2:
-                resp_len = struct.unpack("!H", bytes(buf[:2]))[0]
-                if len(buf) >= 2 + resp_len:
-                    return bytes(buf[2: 2 + resp_len])
+        try:
+            while True:
+                chunk = await self._ready.tunnel.recv()
+                if not chunk:
+                    raise OSError("DNS tunnel EOF")
+                buf.extend(chunk)
+                # 可能一次 recv 拿到多帧，全部处理掉
+                while len(buf) >= 2:
+                    frame_len = struct.unpack("!H", bytes(buf[:2]))[0]
+                    if len(buf) < 2 + frame_len:
+                        break
+                    if frame_len < 2:
+                        del buf[:2 + frame_len]
+                        continue
+                    resp     = bytes(buf[2: 2 + frame_len])
+                    del buf[:2 + frame_len]
+                    resp_tx  = int.from_bytes(resp[:2], "big")
+                    entry    = self._pending.get(resp_tx)
+                    if entry is not None and not entry[0].done():
+                        entry[0].set_result(resp)
+        except Exception as e:
+            err = e if isinstance(e, Exception) else OSError(str(e))
+            for fut, _ in self._pending.values():
+                if not fut.done():
+                    fut.set_exception(err)
 
     def _drop_tunnel(self) -> None:
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+        self._reader_task = None
         if self._ready is not None:
             try:
                 self._ready.close()

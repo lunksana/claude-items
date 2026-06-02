@@ -154,7 +154,12 @@ async def _https_get_via_pool(url: str, pool) -> bytes:
             loc = next((v for k, v in headers if k.lower() == "location"), None)
             if not loc:
                 raise IOError(f"redirect {status} missing Location")
-            url = loc if loc.startswith(("http://", "https://")) else f"https://{host}{loc}"
+            # 用 urljoin 而非手拼，正确处理 RFC 3986 的所有相对形式：
+            #   绝对 URL          https://x/y         → 用 loc
+            #   scheme-relative   //x/y               → 用 https://x/y
+            #   path-absolute     /y                  → 用 当前 host:port/y（保留端口）
+            #   path-relative     y / ./y / ../y      → 按当前 path 解析
+            url = urllib.parse.urljoin(url, loc.strip())
             logger.debug("geo redirect %d -> %s", status, url)
             continue
         if status != 200:
@@ -196,7 +201,7 @@ async def _https_request_once(
             """
             try:
                 data = await asyncio.wait_for(tunnel.recv(), timeout=timeout)
-            except (asyncio.TimeoutError, asyncio.IncompleteReadError):
+            except (asyncio.TimeoutError, asyncio.IncompleteReadError, EOFError):
                 return False
             if not data:
                 return False

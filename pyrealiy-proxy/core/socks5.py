@@ -74,5 +74,5 @@ async def parse_socks5_request(
     writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
     await writer.drain()
 
-    logger.info("SOCKS5 -> %s:%d", host, port)
+    logger.debug("SOCKS5 -> %s:%d", host, port)   # 高频，降到 DEBUG（client._dispatch 还会按 access_log 打 INFO）
     return host, port

@@ -250,6 +250,15 @@ ssh -L 8080:127.0.0.1:8080 user@your-vps
 | `geoip_sources` | geoip 源列表，格式与 `geosite_sources` 相同 |
 | `rules` | 分流规则，见下方说明 |
 
+#### 高级调优字段（可选，默认值适合家用场景）
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `access_log` | `false` | 是否打每连接的 dispatch INFO 日志（`PROXY/DIRECT/REJECT  host:port  [#N rule]`）。高并发下打开会显著拖慢吞吐，**建议生产关、调试时再开**。关闭后启动日志、错误日志不受影响 |
+| `drain_threshold` | `65536` | 写缓冲达到该字节数才触发 `drain()`。家用百兆带宽 64KB 足够；**跨境长肥管道**（200ms RTT × 100Mbps = 2.5MB BDP）调到 `262144`（256KB）或 `1048576`（1MB）能让 pipeline 填满，吞吐更稳。代价：单连接内存占用上升、短包延迟可能略恶化 |
+
+服务端 `config_server.json` 同样支持 `access_log` 和 `drain_threshold`，含义一致。
+
 启动：
 
 ```bash

@@ -65,6 +65,27 @@ _DRAIN_THRESHOLD = 64 * 1024  # 写缓冲积压超过此值才 drain，避免每
 _CLOSE_TIMEOUT   = 2.0        # wait_closed 上限：避免对端不发 FIN 时永久挂起
 
 
+def set_drain_threshold(n: int) -> None:
+    """
+    运行时调整 drain 阈值（relay + EncryptedTunnel.send 共用）。
+    跨境长肥管道（高 BDP）调到 256KB~1MB 能让 pipeline 填满，吞吐更稳。
+    代价：单条连接内存上升、bufferbloat 可能恶化延迟（短包场景反而变差）。
+    """
+    global _DRAIN_THRESHOLD
+    _DRAIN_THRESHOLD = int(n)
+    # 同步给 tunnel 模块用的同名常量
+    try:
+        from . import tunnel as _t
+        _t._DRAIN_THRESHOLD = int(n)
+    except ImportError:
+        pass
+
+
+def get_drain_threshold() -> int:
+    """供 client/server 在 inline drain 检查里取当前阈值（set_drain_threshold 之后变化跟得上）"""
+    return _DRAIN_THRESHOLD
+
+
 async def safe_close(writer: asyncio.StreamWriter | None) -> None:
     """
     异步静默关闭：close() + wait_closed()，带超时与异常吞咽。

@@ -3,11 +3,47 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 from urllib.parse import urlparse, parse_qs
 
 from .stats import StatsStore
 from .utils import safe_close
+
+
+def _parse_headers(raw: bytes) -> dict:
+    """从原始请求字节里抽出 header 字典（key 小写化），用于 CSRF 校验"""
+    headers: dict[str, str] = {}
+    try:
+        head_end = raw.find(b"\r\n\r\n")
+        if head_end < 0:
+            head_end = len(raw)
+        block = raw[:head_end].decode("latin-1")
+        for line in block.split("\r\n")[1:]:    # 跳过请求行
+            if ":" in line:
+                k, v = line.split(":", 1)
+                headers[k.strip().lower()] = v.strip()
+    except Exception:
+        pass
+    return headers
+
+
+def _csrf_ok(method: str, headers: dict) -> bool:
+    """
+    POST 同源校验：
+      - 浏览器同源 fetch/form POST 都会带 Origin = scheme://host:port
+      - 校验 Origin 末段是 //{Host} → 真同源才放行
+      - 不带 Origin 时一律放行（curl / 脚本场景）
+
+    GET 是幂等的，无 CSRF 风险，不检查。
+    """
+    if method != "POST":
+        return True
+    origin = headers.get("origin", "")
+    if not origin:
+        return True
+    host = headers.get("host", "")
+    return bool(host) and origin.endswith("//" + host)
 
 # ── embedded dashboard ─────────────────────────────────────────────────────────
 
@@ -588,16 +624,23 @@ async def _handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
         await safe_close(writer)
         return
 
-    parsed = urlparse(raw_path)
-    path   = parsed.path
-    params = parse_qs(parsed.query)
+    parsed  = urlparse(raw_path)
+    path    = parsed.path
+    params  = parse_qs(parsed.query)
+    headers = _parse_headers(raw)
 
     def p(key: str) -> str:
         vals = params.get(key, [])
         return vals[0] if vals else ""
 
-    if token and p("token") != token:
+    # 鉴权：用 hmac.compare_digest 防时序攻击（字符串 != 会在首个差异字节短路）
+    if token and not hmac.compare_digest(p("token"), token):
         await _respond(writer, 401, b"application/json", b'{"error":"unauthorized"}')
+        return
+
+    # CSRF：POST 必须同源（防止用户在别处浏览时被 fetch 触发管理操作）
+    if not _csrf_ok(method, headers):
+        await _respond(writer, 403, b"application/json", b'{"error":"cross-origin POST denied"}')
         return
 
     if path in ("/", ""):
@@ -642,7 +685,7 @@ async def _respond(writer: asyncio.StreamWriter, status: int,
     避免边写边断带来的截断风险。
     safe_close 接着做 close + wait_closed，让 fd 立刻释放。
     """
-    phrases = {200: b"OK", 401: b"Unauthorized", 404: b"Not Found"}
+    phrases = {200: b"OK", 401: b"Unauthorized", 403: b"Forbidden", 404: b"Not Found"}
     phrase  = phrases.get(status, b"Error")
     header  = (
         b"HTTP/1.1 " + str(status).encode() + b" " + phrase + b"\r\n"

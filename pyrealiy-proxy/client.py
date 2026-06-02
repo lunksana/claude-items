@@ -32,7 +32,8 @@ from core.sniffer import sniff_domain, PrefixedReader
 from core.geosite_cache import ensure_all as geo_ensure_all
 from core.router import build_router, DIRECT, REJECT
 from core.utils import (get_logger, pack_address, relay, safe_close,
-                        install_stale_gaierror_handler)
+                        install_stale_gaierror_handler, set_drain_threshold,
+                        get_drain_threshold)
 from core import brutal
 
 logger = get_logger("client")
@@ -89,6 +90,16 @@ def _resolve_server_host(cfg: dict) -> None:
         logger.info("server_host %s -> %s", host, ips[0])
 
 
+_ACCESS_LOG = False     # 由 main() 从 cfg 读出后设置
+
+
+def _alog(level: str, fmt: str, *args) -> None:
+    """每连接的 dispatch 日志：默认关，cfg['access_log']=true 时开"""
+    if not _ACCESS_LOG:
+        return
+    getattr(logger, level)(fmt, *args)
+
+
 async def _dispatch(
     local_reader,
     local_writer: asyncio.StreamWriter,
@@ -111,12 +122,12 @@ async def _dispatch(
     label = f"{routing_host} ({target_host}:{target_port})" if routing_host else f"{target_host}:{target_port}"
 
     if action == REJECT:
-        logger.info("REJECT  %s  [%s]", label, source)
+        _alog("info", "REJECT  %s  [%s]", label, source)
         await safe_close(local_writer)
         return
 
     if action == DIRECT:
-        logger.info("DIRECT  %s  [%s]", label, source)
+        _alog("info", "DIRECT  %s  [%s]", label, source)
         try:
             target_reader, target_writer = await asyncio.open_connection(
                 target_host, target_port
@@ -129,7 +140,7 @@ async def _dispatch(
         return
 
     # ── 代理分支 ─────────────────────────────────────────────────────────────
-    logger.info("PROXY   %s  [%s]", label, source)
+    _alog("info", "PROXY   %s  [%s]", label, source)
 
     ready = await pool.acquire()
     if ready is None:
@@ -158,6 +169,8 @@ async def _dispatch(
         except Exception:
             pass
         finally:
+            # 主动关方：先发 TLS close_notify alert 再 FIN，外观更像真实 HTTPS 关闭
+            await tunnel.send_close_notify()
             await safe_close(server_writer)
 
     async def tunnel_to_local():
@@ -165,7 +178,7 @@ async def _dispatch(
             while True:
                 data = await tunnel.recv()
                 local_writer.write(data)
-                if local_writer.transport.get_write_buffer_size() > 65536:
+                if local_writer.transport.get_write_buffer_size() > get_drain_threshold():
                     await local_writer.drain()
         except Exception:
             pass
@@ -235,6 +248,18 @@ async def main(config_path: str) -> None:
 
     with open(config_path) as f:
         cfg = json.load(f)
+
+    # access_log 开关：默认关，开后才打 dispatch INFO 日志
+    global _ACCESS_LOG
+    _ACCESS_LOG = bool(cfg.get("access_log", False))
+    if _ACCESS_LOG:
+        logger.info("access_log enabled (per-connection dispatch logging on)")
+
+    # drain 阈值：默认 64KB，跨境高 BDP 可调到 256KB~1MB
+    drain_thr = int(cfg.get("drain_threshold", 64 * 1024))
+    if drain_thr != 64 * 1024:
+        set_drain_threshold(drain_thr)
+        logger.info("drain_threshold set to %d bytes", drain_thr)
 
     # 启动期把 server_host 域名解析为 IP，省下每次 build 的 getaddrinfo + 噪音
     _resolve_server_host(cfg)

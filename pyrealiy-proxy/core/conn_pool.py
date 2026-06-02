@@ -22,6 +22,7 @@ Brutal 连接预建池
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 
 
@@ -39,6 +40,10 @@ logger = get_logger("conn_pool")
 
 _BUILD_TIMEOUT = 20.0   # 单条连接建立（TCP+认证+握手模拟）的总超时秒数
 _MAX_IDLE_SEC  = 120    # 池中空闲连接最长存活时间（超过后丢弃重建，避免长期无流量被识别）
+
+# 反指纹 jitter：避免"启动时 N 条 TLS 1.3 在 1s 内同 IP 出"这种代理特征
+_WARMUP_JITTER_RANGE = (0.10, 0.50)   # 每条 warmup build 之间间隔（秒）
+_IDLE_JITTER         = 30.0           # _MAX_IDLE_SEC ± 该值随机化每条 tunnel 的实际寿命
 
 
 async def _read_server_handshake(reader: asyncio.StreamReader) -> None:
@@ -66,16 +71,18 @@ async def _read_server_handshake(reader: asyncio.StreamReader) -> None:
 
 
 class _ReadyTunnel:
-    __slots__ = ("tunnel", "writer", "_created_at")
+    __slots__ = ("tunnel", "writer", "_created_at", "_lifetime")
 
     def __init__(self, tunnel: EncryptedTunnel, writer: asyncio.StreamWriter):
         self.tunnel     = tunnel
         self.writer     = writer
         self._created_at = time.monotonic()
+        # 每条 tunnel 单独 jitter，避免一批 tunnel 同时过期"齐刷刷重建"的特征
+        self._lifetime  = _MAX_IDLE_SEC + random.uniform(-_IDLE_JITTER, _IDLE_JITTER)
 
     @property
     def is_stale(self) -> bool:
-        return time.monotonic() - self._created_at > _MAX_IDLE_SEC
+        return time.monotonic() - self._created_at > self._lifetime
 
     def close(self):
         try:
@@ -100,11 +107,20 @@ class BrutalPool:
         self._building  = 0
 
     async def warmup(self) -> int:
-        """启动时并发预建所有连接，返回成功数。调用方可据此决定是否走 tunnel 路径"""
-        tasks = [self._build_and_enqueue() for _ in range(self._pool_size)]
+        """
+        启动时阶梯预建所有连接，每条之间插一段 jitter（100~500ms），
+        避免"同 IP 1 秒内 N 条 TLS 1.3 ClientHello"这种特征过于明显。
+        总耗时上界 ≈ pool_size × 0.5s + 单条 build 时间，10 条池约 5~7s。
+        """
+        tasks = [
+            self._build_and_enqueue(
+                delay=0.0 if i == 0 else random.uniform(*_WARMUP_JITTER_RANGE)
+            )
+            for i in range(self._pool_size)
+        ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         ok = sum(1 for r in results if r is True)
-        logger.info("Pool warmed up: %d/%d connections ready (rate=%.0f Mbps each)",
+        logger.info("Pool warmed up: %d/%d connections ready (rate=%.0f Mbps each, staggered)",
                     ok, self._pool_size, self._rate_bps / 1e6)
         return ok
 
@@ -134,18 +150,27 @@ class BrutalPool:
 
     def _schedule_refills(self) -> None:
         """
-        计算缺口并创建对应数量的补充任务，同时运行（允许并发）。
-        缺口 = pool_size - (已就绪数 + 正在建立数)
+        计算缺口并创建对应数量的补充任务。
+
+        首条立即建（保证 acquire 等待时延最低）；后续条加 jitter 间隔
+        （同 warmup 范围），避免"池空时一次性 N 条新 ClientHello 同 IP 同秒"
+        这种指纹特征只在启动时有所改善但运行期照样可见的问题。
         """
         deficit = self._pool_size - self._queue.qsize() - self._building
-        for _ in range(max(0, deficit)):
-            asyncio.create_task(self._build_and_enqueue())
+        for i in range(max(0, deficit)):
+            delay = 0.0 if i == 0 else random.uniform(*_WARMUP_JITTER_RANGE)
+            asyncio.create_task(self._build_and_enqueue(delay=delay))
 
-    async def _build_and_enqueue(self) -> bool:
+    async def _build_and_enqueue(self, delay: float = 0.0) -> bool:
         """
         原子检查 + 占位：在第一个 await 之前先递增 _building，
         保证不会有多余的连接被建立。
+
+        delay > 0 时先 sleep（refill / staggered warmup 用），sleep 期间池可能
+        已经被别的 task 填满 —— 原子检查仍能正确拒绝多余建设。
         """
+        if delay > 0:
+            await asyncio.sleep(delay)
         # 检查与占位之间没有 await，asyncio 单线程保证原子性
         if self._queue.qsize() + self._building >= self._pool_size:
             return False

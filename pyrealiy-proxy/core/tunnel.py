@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 
+import random
+
 import struct
 
 import hashlib
@@ -35,6 +37,10 @@ _MAX_RECORD = 16384  # TLS 单条记录最大明文长度（RFC 5246 §6.2.1）
 
 # 写缓冲超过此阈值才 drain，避免每包都切换协程
 _DRAIN_THRESHOLD = 64 * 1024
+
+# 反指纹 record 分片：真实 HTTPS 应用层数据大小分布是混合的，不会清一色 16KB 顶满
+# 三档：50% 大块（追求吞吐）、35% 中块、15% 小块（HTTP/1.1 chunked / HTTP/2 frame）
+_RECORD_SIZE_BUCKETS = ((16384, 0.50), (8192, 0.35), (4096, 0.15))
 
 
 def _derive_master(password: str, salt: bytes) -> bytes:
@@ -82,29 +88,64 @@ class EncryptedTunnel:
 
     # --- 数据读写 ---
 
+    @staticmethod
+    def _next_record_size() -> int:
+        """按 _RECORD_SIZE_BUCKETS 分布随机选一档 record 上限，模拟真实 HTTPS 流量"""
+        r = random.random()
+        cum = 0.0
+        for size, weight in _RECORD_SIZE_BUCKETS:
+            cum += weight
+            if r <= cum:
+                return size
+        return _MAX_RECORD
+
     async def send(self, plaintext: bytes) -> None:
-        # 超过单条 TLS 记录限制时自动分片
+        # record 大小用分桶随机化，避免清一色 16KB 顶满成为指纹特征
         off = 0
         while off < len(plaintext):
-            chunk = plaintext[off:off + _MAX_RECORD]
+            limit = self._next_record_size()
+            chunk = plaintext[off:off + limit]
             off  += len(chunk)
             nonce = self._send_nonce.to_bytes(NONCE_SIZE, "big")
             self._send_nonce += 1
             ciphertext = self._send_cipher.encrypt(nonce, chunk, None)
             # TLS application data record: type=0x17, version=TLS1.2, length=len(ciphertext)
-            self._writer.write(b"\x17\x03\x03" + struct.pack("!H", len(ciphertext)))
-            self._writer.write(ciphertext)
+            # 合并 header + ciphertext 一次 write（少一次 syscall）
+            self._writer.write(b"\x17\x03\x03" + struct.pack("!H", len(ciphertext)) + ciphertext)
         if self._writer.transport.get_write_buffer_size() > _DRAIN_THRESHOLD:
             await self._writer.drain()
+
+    async def send_close_notify(self) -> None:
+        """
+        发一帧加密的 TLS Alert(close_notify)，让对端看到"规范的 TLS 关闭"。
+        Alert content_type = 0x15，明文 body = [level=1 warning, desc=0 close_notify]。
+        失败静默（对端已关 / writer 已断）。
+        """
+        try:
+            if self._send_cipher is None or self._writer.is_closing():
+                return
+            nonce = self._send_nonce.to_bytes(NONCE_SIZE, "big")
+            self._send_nonce += 1
+            ciphertext = self._send_cipher.encrypt(nonce, b"\x01\x00", None)
+            # Alert record: content_type=0x15
+            self._writer.write(b"\x15\x03\x03" + struct.pack("!H", len(ciphertext)) + ciphertext)
+            await self._writer.drain()
+        except Exception:
+            pass
 
     async def recv(self) -> bytes:
         # TLS record header: content_type(1) + version(2) + length(2)
         header = await self._reader.readexactly(5)
+        content_type = header[0]
         length = int.from_bytes(header[3:5], "big")
         ciphertext = await self._reader.readexactly(length)
         nonce = self._recv_nonce.to_bytes(NONCE_SIZE, "big")
         self._recv_nonce += 1
-        return self._recv_cipher.decrypt(nonce, ciphertext, None)
+        plaintext = self._recv_cipher.decrypt(nonce, ciphertext, None)
+        if content_type == 0x15:
+            # TLS Alert（close_notify 等）：当 EOF 处理。relay/feed 路径都把这当结束信号
+            raise EOFError("peer sent TLS alert (close_notify)")
+        return plaintext
 
     async def relay_with(self, other: "EncryptedTunnel") -> None:
         """与另一个加密隧道双向中继"""

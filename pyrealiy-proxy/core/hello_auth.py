@@ -98,6 +98,22 @@ def _ts_mask(password: str, random_prefix: bytes) -> bytes:
     return hmac.new(pw_key, random_prefix, hashlib.sha256).digest()[:8]
 
 
+def _poly1305_tag(password_bytes: bytes, ts_bytes: bytes, random_prefix: bytes) -> bytes:
+    """
+    One-time key 派生：SHA256(password || ts || random_prefix)。
+
+    把 random_prefix 混进 key（**不是 message**）：
+      - 每个 token 的 one-time key 都不同 → 即使同秒签同一条 ts_bytes，tag 也不同
+        （消除"同秒 ClientHello 末 16 字节完全一致"这种可被 GFW 聚类的指纹）
+      - 仍然满足 Poly1305 的"one-time key per message"安全要求
+        （注意：random_prefix 混进 message 会导致同 key 签不同 message → 密钥恢复）
+    """
+    one_time_key = hashlib.sha256(password_bytes + ts_bytes + random_prefix).digest()
+    p = Poly1305(one_time_key)
+    p.update(ts_bytes)
+    return p.finalize()
+
+
 def make_session_token(password: str) -> bytes:
     """生成 32 字节 session token，嵌入 ClientHello 的 legacy_session_id"""
     random_prefix = os.urandom(8)
@@ -106,22 +122,23 @@ def make_session_token(password: str) -> bytes:
     # 掩码时间戳：XOR 后字节分布均匀，统计分析无法从中提取时间信息
     mask = _ts_mask(password, random_prefix)
     hidden_ts = bytes(a ^ b for a, b in zip(ts_bytes, mask))
-    one_time_key = hashlib.sha256(password.encode() + ts_bytes).digest()
-    p = Poly1305(one_time_key)
-    p.update(ts_bytes)
-    tag = p.finalize()  # 16 字节
+    tag = _poly1305_tag(password.encode(), ts_bytes, random_prefix)
     return random_prefix + hidden_ts + tag
 
 
 def verify_session_token(password: str, token: bytes) -> bool:
-    """验证 32 字节 session token"""
+    """
+    验证 32 字节 session token。
+
+    Token 结构：[8B random_prefix][8B 掩码时间戳][16B Poly1305 tag]
+    防重放由 TokenReplayCache 兜住（按 random_prefix 去重）。
+    """
     if len(token) < 32:
         return False
     random_prefix = token[0:8]
     hidden_ts    = token[8:16]
     received_tag = token[16:32]
 
-    # 还原时间戳
     mask    = _ts_mask(password, random_prefix)
     ts_bytes = bytes(a ^ b for a, b in zip(hidden_ts, mask))
     ts = struct.unpack("!Q", ts_bytes)[0]
@@ -129,10 +146,7 @@ def verify_session_token(password: str, token: bytes) -> bool:
     if abs(int(time.time()) - ts) > TIMESTAMP_TOLERANCE:
         return False
 
-    one_time_key = hashlib.sha256(password.encode() + ts_bytes).digest()
-    p = Poly1305(one_time_key)
-    p.update(ts_bytes)
-    expected_tag = p.finalize()
+    expected_tag = _poly1305_tag(password.encode(), ts_bytes, random_prefix)
     return hmac.compare_digest(expected_tag, received_tag)
 
 
