@@ -420,10 +420,185 @@ def configure_server(brutal_available: bool) -> None:
         "brutal_rate_bps": rate_bps,
         **admin_cfg,
     }
+
+    # ── WireGuard egress（典型用例：Cloudflare WARP）────────────────────────────
+    configure_warp_egress(cfg)
+
     path = "config_server.json"
     with open(path, "w") as f:
         json.dump(cfg, f, indent=4)
     OK(f"服务端配置已写入 {path}")
+
+
+# ── WireGuard / Cloudflare WARP 集成 ──────────────────────────────────────────
+
+_WARP_DEFAULT_TAGS = [
+    ("Netflix",             "netflix"),
+    ("Disney+",             "disney"),
+    ("OpenAI / ChatGPT",    "openai"),
+    ("Spotify",             "spotify"),
+    ("YouTube",             "youtube"),
+    ("Google 全球",         "google"),
+]
+
+
+def configure_warp_egress(cfg: dict) -> None:
+    """询问是否启用 WARP egress；启用则写 egress 配置 + 生成 setup-warp.sh"""
+    print()
+    if not ask_yn(
+        "是否启用 Cloudflare WARP 出口（让 Netflix/OpenAI 等被 VPS IP 封的服务走 CF 出口）？",
+        default=False,
+    ):
+        return
+
+    if not check_linux():
+        WARN("非 Linux 系统暂不支持，跳过 WARP 配置")
+        return
+
+    mark_hex = ask("WARP 流量 fwmark（十六进制，默认 0x100）", "0x100").strip()
+    try:
+        mark = int(mark_hex, 16) if mark_hex.startswith(("0x", "0X")) else int(mark_hex)
+        if not 1 <= mark <= 0xFFFFFFFF:
+            raise ValueError
+    except ValueError:
+        ERR(f"fwmark {mark_hex!r} 不合法，使用默认 0x100")
+        mark = 0x100
+
+    table = ask("WARP 路由表号（默认 200）", "200").strip()
+    try:
+        table = int(table)
+    except ValueError:
+        table = 200
+
+    # ── 选择走 WARP 的应用 ─────────────────────────────────────────────────────
+    print()
+    INFO("选择哪些服务走 WARP（其余走 VPS 默认出口）：")
+    defaults: list[int] = []
+    for i, (name, tag) in enumerate(_WARP_DEFAULT_TAGS, start=1):
+        print(f"    [{i:>2}] {name:<22} GEOSITE,loyalsoldier:{tag}")
+        defaults.append(i)
+    raw = ask("启用的编号（逗号分隔，回车 = 全部）", ",".join(map(str, defaults)))
+    sel = _parse_selection(raw, len(_WARP_DEFAULT_TAGS))
+    if not sel:
+        WARN("一个都没选，但仍写入 egress 定义（你可以手工编辑 egress_rules）")
+
+    egress_rules: list[str] = []
+    for idx in sel:
+        _, tag = _WARP_DEFAULT_TAGS[idx - 1]
+        egress_rules.append(f"GEOSITE,loyalsoldier:{tag},WARP")
+    egress_rules.append("FINAL,DIRECT")
+
+    # ── 写入 cfg ───────────────────────────────────────────────────────────────
+    cfg["egresses"] = [{"name": "WARP", "mark": mark}]
+    cfg["egress_rules"] = egress_rules
+    needs_site = any("GEOSITE" in r for r in egress_rules)
+    needs_ip   = any("GEOIP"   in r for r in egress_rules)
+    cfg["geosite_dir"]         = ".geosite"
+    cfg["geosite_update_days"] = 7
+    cfg["geosite_sources"]     = [{"name": "loyalsoldier", "url": _LOYALSOLDIER_SITE_URLS}] if needs_site else []
+    cfg["geoip_sources"]       = [{"name": "loyalsoldier", "url": _LOYALSOLDIER_IP_URLS}] if needs_ip else []
+
+    # ── 生成一键脚本 ───────────────────────────────────────────────────────────
+    sh = _gen_warp_setup_script(mark, table)
+    with open("setup-warp.sh", "w") as f:
+        f.write(sh)
+    os.chmod("setup-warp.sh", 0o755)
+
+    OK("WARP egress 已写入 config_server.json")
+    OK("已生成 setup-warp.sh（用 wgcf 自动注册免费 WARP 账号 + 配置 wg-quick + 策略路由）")
+    INFO("下一步：")
+    print(f"    {_c('36', 'sudo bash setup-warp.sh')}")
+    INFO("脚本会做：1) 装 wireguard + wgcf  2) 注册 WARP  3) 写 /etc/wireguard/warp.conf")
+    print(f"    {_c('36', '    4) 启动 wg-quick@warp 并加入开机自启  5) 配 ip rule / ip route')}")
+
+
+def _gen_warp_setup_script(mark: int, table: int) -> str:
+    """生成 setup-warp.sh —— Debian/Ubuntu 上一键拉起 WARP egress"""
+    return f"""#!/bin/bash
+# PyReality WARP egress 一键脚本（由 setup.py 生成）
+# 作用：在 VPS 上拉起一条 Cloudflare WARP WireGuard 隧道，
+#       让 PyReality server 通过 SO_MARK={mark:#x} 把命中规则的流量送进去。
+#
+# 适用：Debian/Ubuntu。其它发行版需要手工调整包名。
+# 需要 root。
+
+set -e
+
+FWMARK={mark}
+TABLE={table}
+WG_IFACE=warp
+WG_CONF=/etc/wireguard/$WG_IFACE.conf
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "请用 root / sudo 运行"
+    exit 1
+fi
+
+echo "[1/5] 安装 wireguard-tools + iproute2 + curl ..."
+apt-get update -q
+apt-get install -y -q wireguard-tools iproute2 curl
+
+echo "[2/5] 装 wgcf（注册 WARP 拿 WG 配置的工具）..."
+WGCF_VERSION=$(curl -s https://api.github.com/repos/ViRb3/wgcf/releases/latest \\
+    | grep -oP '"tag_name":\\s*"\\K[^"]+' || echo "v2.2.22")
+if [ -z "$WGCF_VERSION" ]; then WGCF_VERSION=v2.2.22; fi
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64)  WGCF_ARCH=amd64 ;;
+    aarch64) WGCF_ARCH=arm64 ;;
+    armv7l)  WGCF_ARCH=arm   ;;
+    *) echo "未识别架构 $ARCH"; exit 1 ;;
+esac
+curl -L -o /usr/local/bin/wgcf \\
+    "https://github.com/ViRb3/wgcf/releases/download/$WGCF_VERSION/wgcf_${{WGCF_VERSION#v}}_linux_$WGCF_ARCH"
+chmod +x /usr/local/bin/wgcf
+
+echo "[3/5] 注册 WARP 免费账户（生成 wgcf-account.toml + wgcf-profile.conf）..."
+WGCF_WORKDIR=/root/.warp
+mkdir -p "$WGCF_WORKDIR"
+cd "$WGCF_WORKDIR"
+if [ ! -f wgcf-account.toml ]; then
+    wgcf register --accept-tos
+fi
+wgcf generate
+
+echo "[4/5] 写 $WG_CONF 并启 wg-quick@$WG_IFACE ..."
+# 在生成的 wgcf-profile.conf 基础上加 Table=off（禁掉它默认抢全局路由），
+# 我们用自己的策略路由表 $TABLE 来定向流量
+awk '
+    /^\\[Interface\\]/ {{ print; print "Table = off"; next }}
+    {{ print }}
+' wgcf-profile.conf > "$WG_CONF"
+chmod 600 "$WG_CONF"
+
+systemctl enable --now wg-quick@$WG_IFACE
+sleep 1
+
+echo "[5/5] 配 ip rule / ip route（让 fwmark $FWMARK 的包走 WARP）..."
+# 持久化：写到 /etc/networkd-dispatcher 或在 PostUp 里都行；这里走 wg-quick 的 PostUp
+if ! grep -q "PostUp = ip rule add" "$WG_CONF"; then
+    sed -i "/^\\[Interface\\]/a\\
+PostUp = ip rule add fwmark $FWMARK lookup $TABLE; ip route add default dev $WG_IFACE table $TABLE\\
+PostDown = ip rule del fwmark $FWMARK lookup $TABLE; ip route flush table $TABLE" "$WG_CONF"
+    systemctl restart wg-quick@$WG_IFACE
+fi
+
+# 立即生效（如果还没有）
+ip rule add fwmark $FWMARK lookup $TABLE 2>/dev/null || true
+ip route add default dev $WG_IFACE table $TABLE 2>/dev/null || true
+
+echo
+echo "[✓] WARP egress 已就绪"
+echo "    接口  : $WG_IFACE"
+echo "    fwmark: $FWMARK ($(printf '%#x' $FWMARK))"
+echo "    table : $TABLE"
+echo
+echo "测试（应看到 Cloudflare WARP 出口 IP）:"
+echo "    curl --interface $WG_IFACE -s https://cloudflare.com/cdn-cgi/trace | grep -E 'ip|warp'"
+echo "    或：sudo -E ip vrf exec $WG_IFACE curl -s https://ifconfig.me  （v4 only）"
+echo
+echo "PyReality server 启动后，命中 egress_rules 的目标自动走这条隧道。"
+"""
 
 
 # ── 分流规则配置 ──────────────────────────────────────────────────────────────

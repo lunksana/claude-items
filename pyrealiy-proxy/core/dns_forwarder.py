@@ -169,13 +169,28 @@ class _DnsTunnel:
             self._ready       = ready
             self._reader_task = asyncio.create_task(self._reader_loop())
 
+    def _allocate_tx(self) -> int:
+        """
+        分配一个不与 _pending 冲突的 tx_id（轮转 16-bit 空间，跳过 0）。
+
+        MAX_INFLIGHT 信号量保证 _pending 远不会塞满 65535 id 空间，
+        所以这个循环正常情况下第一次就返回。bounded loop 防御性：
+        若将来 MAX_INFLIGHT 提升、或某次 finally 异常未清理，至少不会无声覆盖
+        旧的 future 导致响应错配 —— 实在塞满就 raise 而不是死循环。
+        """
+        for _ in range(0x10000):
+            tx_id = self._next_tx
+            self._next_tx = (self._next_tx + 1) & 0xFFFF
+            if self._next_tx == 0:
+                self._next_tx = 1                   # 跳过 0
+            if tx_id not in self._pending:
+                return tx_id
+        raise OSError("DNS pipeline tx_id space exhausted (pending overflow)")
+
     async def _send_recv(self, data: bytes) -> bytes:
         # 用内部 tx_id 替换客户端 ID，保证唯一（客户端 ID 可能重复或可预测）
         original_id = data[:2]
-        tx_id       = self._next_tx
-        self._next_tx = (self._next_tx + 1) & 0xFFFF
-        if self._next_tx == 0:
-            self._next_tx = 1                       # 跳过 0
+        tx_id       = self._allocate_tx()
 
         rewritten = tx_id.to_bytes(2, "big") + data[2:]
         loop = asyncio.get_event_loop()

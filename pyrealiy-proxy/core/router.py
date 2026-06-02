@@ -445,7 +445,14 @@ def build_router(
     cfg: dict,
     available_site: dict[str, str],   # {source_name: geosite_dat_path}
     available_ip:   dict[str, str],   # {source_name: geoip_dat_path}
+    valid_actions: set[str] | None = None,    # None → {PROXY,DIRECT,REJECT}；server 端 egress 用自定义
+    rules_field:   str = "rules",             # server 端用 "egress_rules"
 ) -> Router:
+    """
+    valid_actions 允许 server 端把规则的 action 字段当成"egress 名"使用。
+    例如 server 配 {WARP, DIRECT, REJECT}，规则可以写 GEOSITE,...,WARP。
+    """
+    actions = valid_actions if valid_actions is not None else _ACTIONS
     router = Router()
 
     # 懒加载缓存：同一文件只解析一次
@@ -483,7 +490,7 @@ def build_router(
     default_site = next(iter(available_site), None)
     default_ip   = next(iter(available_ip),   None)
 
-    for raw in cfg.get("rules", []):
+    for raw in cfg.get(rules_field, []):
         line = str(raw).strip()
         if not line or line.startswith("#"):
             continue
@@ -502,7 +509,7 @@ def build_router(
         value  = parts[1]
         action = parts[2].upper()
 
-        if action not in _ACTIONS:
+        if action not in actions:
             logger.warning("Unknown action '%s', skipping: %s", action, line)
             continue
 

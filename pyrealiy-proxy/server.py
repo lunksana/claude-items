@@ -32,6 +32,12 @@ from core.hello_auth import TokenReplayCache
 
 from core.tunnel import EncryptedTunnel
 
+from core.egress import DefaultEgress, MarkedEgress, Egress
+
+from core.router import build_router
+
+from core.geosite_cache import ensure_all as geo_ensure_all
+
 from core.utils import (get_logger, unpack_address, safe_close,
                         install_stale_gaierror_handler, set_drain_threshold,
                         get_drain_threshold)
@@ -103,6 +109,8 @@ async def handle_client(
     cache: HandshakeCache,
     replay_cache: TokenReplayCache,
     store: StatsStore,
+    egresses: dict,                         # {name: Egress}
+    egress_router=None,                     # None = 全部走 default
 ) -> None:
     peer      = client_writer.get_extra_info("peername")
     client_ip = peer[0] if peer else "unknown"
@@ -161,13 +169,23 @@ async def handle_client(
 
         target_host, target_port, _conn_unused = unpack_address(addr_packet)
         conn = store.register(client_ip, target_host, target_port, client_writer)
-        _alog("info", "Proxy %s -> %s:%d [id=%d]", peer, target_host, target_port, conn.id)
+
+        # ── egress 选择 ──
+        egress: Egress = egresses["DIRECT"]
+        egress_src = "default"
+        if egress_router is not None:
+            egress_name, egress_src = egress_router.match(target_host)
+            egress = egresses.get(egress_name) or egresses["DIRECT"]
+
+        _alog("info", "Proxy %s -> %s:%d [id=%d, egress=%s, %s]",
+              peer, target_host, target_port, conn.id, egress.name, egress_src)
 
         # 阶段4：连接目标，双向中继
         try:
-            target_reader, target_writer = await asyncio.open_connection(target_host, target_port, limit=262144)
+            target_reader, target_writer = await egress.open_connection(target_host, target_port)
         except Exception as e:
-            logger.error("Cannot connect to %s:%d: %s", target_host, target_port, e)
+            logger.error("Cannot connect to %s:%d via egress %s: %s",
+                         target_host, target_port, egress.name, e)
             await safe_close(client_writer)
             store.unregister(conn)
             return
@@ -267,8 +285,40 @@ async def main(config_path: str) -> None:
     if not await cache.warmup():
         logger.warning("Handshake cache warmup failed — probe connections will be dropped silently")
 
+    # ── egress 配置 + server 端路由（按 target 选 egress）──
+    egresses = {"DIRECT": DefaultEgress()}
+    for eg in cfg.get("egresses", []):
+        name = eg.get("name", "").strip()
+        mark = int(eg.get("mark", 0))
+        if not name or not mark:
+            logger.warning("egress 跳过非法条目: %s", eg)
+            continue
+        if name == "DIRECT":
+            logger.warning("egress 名 'DIRECT' 是保留字，跳过")
+            continue
+        # 启动期一次性探测 SO_MARK 是否可用，失败 fail loud
+        ok, msg = MarkedEgress.probe(mark)
+        if not ok:
+            logger.error("Egress %s 不可用：%s", name, msg)
+            logger.error("提示：用 root 跑，或给二进制 setcap 'cap_net_admin=ep' $(which python3)")
+            sys.exit(1)
+        egresses[name] = MarkedEgress(name, mark)
+        logger.info("Egress configured: %s (%s)", name, msg)
+
+    egress_router = None
+    if cfg.get("egress_rules"):
+        if len(egresses) <= 1:
+            logger.warning("配 egress_rules 但没配 egresses，规则将无效果")
+        site_paths, ip_paths = await geo_ensure_all(cfg)
+        egress_router = build_router(
+            cfg, site_paths, ip_paths,
+            valid_actions=set(egresses.keys()),
+            rules_field="egress_rules",
+        )
+
     server = await asyncio.start_server(
-        lambda r, w: handle_client(r, w, cfg, cache, replay_cache, store),
+        lambda r, w: handle_client(r, w, cfg, cache, replay_cache, store,
+                                   egresses, egress_router),
         cfg["listen_host"],
         cfg["listen_port"],
         limit=262144,

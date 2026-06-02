@@ -29,8 +29,7 @@ from .utils import get_logger
 
 logger = get_logger("handshake_cache")
 
-_TLS_HANDSHAKE     = 0x16
-_TLS_CHANGE_CIPHER = 0x14
+_TLS_CHANGE_CIPHER = 0x14   # 唯一被代码逻辑用到的常量（ServerHello 0x16 等仅出现于注释）
 
 POOL_SIZE            = 32    # 同时持有的握手份数（扩大以降低重放碰撞概率）
 REFRESH_INTERVAL_SEC = 3600  # 每小时刷新一次（缩短历史 random 暴露窗口）

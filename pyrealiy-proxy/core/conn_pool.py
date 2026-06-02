@@ -42,8 +42,20 @@ _BUILD_TIMEOUT = 20.0   # 单条连接建立（TCP+认证+握手模拟）的总�
 _MAX_IDLE_SEC  = 120    # 池中空闲连接最长存活时间（超过后丢弃重建，避免长期无流量被识别）
 
 # 反指纹 jitter：避免"启动时 N 条 TLS 1.3 在 1s 内同 IP 出"这种代理特征
-_WARMUP_JITTER_RANGE = (0.10, 0.50)   # 每条 warmup build 之间间隔（秒）
-_IDLE_JITTER         = 30.0           # _MAX_IDLE_SEC ± 该值随机化每条 tunnel 的实际寿命
+#
+# 阶梯延迟：第 i 条建连接的延迟 = i × _STAGGER_STEP ± _STAGGER_JITTER
+#   第 0 条立即；后续条按"步长 ± 小抖动"排出去，**真阶梯**而不是 0~0.5 内随机
+#   10 条池总耗时 ≈ 9 × 0.30 = 2.7s ±0.5s（加 build 本身耗时 ~1-2s 的尾部并发）
+_STAGGER_STEP   = 0.30      # 相邻条建连接的"目标间隔"
+_STAGGER_JITTER = 0.08      # 每条相对其目标位置的 ± 抖动（防整齐节奏）
+_IDLE_JITTER    = 30.0      # _MAX_IDLE_SEC ± 该值随机化每条 tunnel 的实际寿命
+
+
+def _staggered_delay(i: int) -> float:
+    """第 i 条 build 的延迟（从 warmup/refill 触发时刻算起）"""
+    if i == 0:
+        return 0.0
+    return i * _STAGGER_STEP + random.uniform(-_STAGGER_JITTER, _STAGGER_JITTER)
 
 
 async def _read_server_handshake(reader: asyncio.StreamReader) -> None:
@@ -108,14 +120,14 @@ class BrutalPool:
 
     async def warmup(self) -> int:
         """
-        启动时阶梯预建所有连接，每条之间插一段 jitter（100~500ms），
-        避免"同 IP 1 秒内 N 条 TLS 1.3 ClientHello"这种特征过于明显。
-        总耗时上界 ≈ pool_size × 0.5s + 单条 build 时间，10 条池约 5~7s。
+        启动时阶梯预建所有连接。**真阶梯**：第 i 条的 sleep 时间是
+        i × 0.30s ± 0.08s（详见 _staggered_delay），不是各自独立的 0~0.5s 随机。
+
+        10 条池：第 0 条立即、第 9 条 ~2.7s 后才开始 build，相邻之间稳定 ~300ms。
+        总耗时上界 ≈ pool_size × 0.30s + 单条 build 时间。
         """
         tasks = [
-            self._build_and_enqueue(
-                delay=0.0 if i == 0 else random.uniform(*_WARMUP_JITTER_RANGE)
-            )
+            self._build_and_enqueue(delay=_staggered_delay(i))
             for i in range(self._pool_size)
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -150,16 +162,15 @@ class BrutalPool:
 
     def _schedule_refills(self) -> None:
         """
-        计算缺口并创建对应数量的补充任务。
+        计算缺口并创建对应数量的补充任务，**真阶梯** 间隔同 warmup
+        （首条立即；之后 i × 0.30s ± 0.08s）。
 
-        首条立即建（保证 acquire 等待时延最低）；后续条加 jitter 间隔
-        （同 warmup 范围），避免"池空时一次性 N 条新 ClientHello 同 IP 同秒"
-        这种指纹特征只在启动时有所改善但运行期照样可见的问题。
+        避免"池空时一次性 N 条新 ClientHello 同 IP 同秒"这种指纹特征：
+        之前每条独立随机 0~0.5s 实际仍在 0.5s 窗口内集中爆发，没真正阶梯化。
         """
         deficit = self._pool_size - self._queue.qsize() - self._building
         for i in range(max(0, deficit)):
-            delay = 0.0 if i == 0 else random.uniform(*_WARMUP_JITTER_RANGE)
-            asyncio.create_task(self._build_and_enqueue(delay=delay))
+            asyncio.create_task(self._build_and_enqueue(delay=_staggered_delay(i)))
 
     async def _build_and_enqueue(self, delay: float = 0.0) -> bool:
         """
