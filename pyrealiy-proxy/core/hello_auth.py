@@ -51,14 +51,36 @@ class TokenReplayCache:
       服务端维护已见 nonce（token[0:8]，8 字节真随机）的短生命周期缓存。
       重复出现的 nonce 无论 Poly1305 验证是否通过，均视为重放并走伪装路径。
 
+    ──── 关于桶数为什么必须是 3，不能是 2 ────
+      同一 token 被合法接受的服务端时间窗口是 [ts-T, ts+T]，所以
+        首次接受 → 重放 的最大时间跨度 = 2T = 120s
+
+      老实现只留 {current, current-1} 两桶。临界场景：
+        客户端 ts=60，首次在服务端 t=59 被接受 → 存入 bucket 0
+        服务端 t=120 时攻击者重放，bucket=2，|120-60|=60 通过容差校验
+        清理逻辑删除 bucket < 1 → bucket 0 被删 → 查 (2,1) 找不到 → 重放放行
+
+      根本原因：bucket 宽度 W = T，但需要留存的最长年龄 = 2T。最坏情况
+      （当前桶刚刚开始 elapsed=0）下两桶覆盖的最老年龄 = W = T < 2T，存在
+      120s 整点处的盲区。
+
+      正确做法：留存 ⌈2T/W⌉ + 1 = 3 桶 {current, current-1, current-2}。
+      在 elapsed=0 的最坏点，bucket-2 内的项年龄区间是 [W, 2W) = [T, 2T)，
+      恰好覆盖到 2T 整点，临界重放被命中。
+
     实现：
       使用时间桶（宽度 = TIMESTAMP_TOLERANCE）分组存储 nonce。
-      保留当前桶和上一桶，覆盖跨桶边界生成的 token。
+      保留当前桶、上一桶、上上桶共 3 个，覆盖最差 2T 重放窗口。
       asyncio 单线程模型下无需加锁。
 
     内存开销：
-      每个 token 仅存 8 字节 nonce；即使每秒 1000 次连接，60s 内也仅需 ~480 KB。
+      每个 token 仅存 8 字节 nonce；即使每秒 1000 次连接，3 × 60s 滚动窗口
+      内也仅需 ~1.4 MB。
     """
+
+    # 必须 ≥ ⌈2 × TIMESTAMP_TOLERANCE / 桶宽⌉ + 1；
+    # 桶宽 == TIMESTAMP_TOLERANCE，所以最小是 3。详见类 docstring 的临界分析。
+    _BUCKETS_KEPT = 3
 
     def __init__(self) -> None:
         self._buckets: dict[int, set[bytes]] = {}
@@ -75,13 +97,14 @@ class TokenReplayCache:
         """
         nonce  = token[:8]
         bucket = self._bucket()
+        keep_from = bucket - (self._BUCKETS_KEPT - 1)
 
-        # 清理过期桶（仅保留当前和上一桶）
-        for stale in [b for b in self._buckets if b < bucket - 1]:
+        # 清理过期桶（保留最近 _BUCKETS_KEPT 个）
+        for stale in [b for b in self._buckets if b < keep_from]:
             del self._buckets[stale]
 
-        # 在当前桶和上一桶中查找重复
-        for b in (bucket, bucket - 1):
+        # 在保留窗口内的所有桶查找重复
+        for b in range(bucket, keep_from - 1, -1):
             if nonce in self._buckets.get(b, ()):
                 return False
 

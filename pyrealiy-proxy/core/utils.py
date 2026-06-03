@@ -64,6 +64,9 @@ _RELAY_BUF       = 32768      # 单次读取大小，平衡延迟与吞吐
 _DRAIN_THRESHOLD = 64 * 1024  # 写缓冲积压超过此值才 drain，避免每帧切换协程
 _CLOSE_TIMEOUT   = 2.0        # wait_closed 上限：避免对端不发 FIN 时永久挂起
 
+# 中继协程的可选 debug 日志（默认静默；用户开启 logger("utils") 的 DEBUG 即可看到）
+_RELAY_LOGGER = get_logger("utils")
+
 
 def set_drain_threshold(n: int) -> None:
     """
@@ -86,6 +89,54 @@ def get_drain_threshold() -> int:
     return _DRAIN_THRESHOLD
 
 
+def apply_log_levels(cfg: dict) -> None:
+    """
+    根据 cfg["log_levels"] 调整指定 logger 的级别，供配置文件控制调试范围。
+
+    cfg 中无 "log_levels" 字段时 no-op，保留 basicConfig 的 INFO 默认。
+
+    格式示例（写在 config_client.json / config_server.json 顶层）：
+
+        "log_levels": {
+            "default":  "INFO",      // 可选：root logger 级别
+            "outbound": "DEBUG",     // 启用 outbound 模块的中继 leg 异常 + group 切换日志
+            "server":   "DEBUG",     // 启用 server 模块的中继 leg 异常
+            "utils":    "DEBUG",     // 启用 DirectOutbound 直连 leg 异常
+            "router":   "DEBUG",     // 每条规则命中详情
+            "dns":      "DEBUG"      // DNS 转发逐条决策
+        }
+
+    可用 logger 名（与 get_logger() 一一对应）：
+      client / server / outbound / group / healthcheck / conn_pool / router /
+      dns / camouflage / handshake_cache / geo_cache / utils / socks5 /
+      tproxy / brutal / egress / asyncio
+
+    级别字符串大小写不敏感；"WARN" 视作 "WARNING"。无效级别 warning 但不退出。
+    "default" 是特殊键，作用在 root logger 上。
+    """
+    levels = cfg.get("log_levels")
+    if not isinstance(levels, dict):
+        return
+
+    valid = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+    applied = []
+    for name, level in levels.items():
+        if not isinstance(name, str) or not isinstance(level, str):
+            continue
+        lvl = level.strip().upper()
+        if lvl == "WARN":
+            lvl = "WARNING"
+        if lvl not in valid:
+            _RELAY_LOGGER.warning("log_levels[%r] = %r is not a valid level, ignored", name, level)
+            continue
+        target = logging.getLogger() if name == "default" else logging.getLogger(name)
+        target.setLevel(getattr(logging, lvl))
+        applied.append(f"{name}={lvl}")
+
+    if applied:
+        _RELAY_LOGGER.info("Applied log_levels: %s", ", ".join(applied))
+
+
 async def safe_close(writer: asyncio.StreamWriter | None) -> None:
     """
     异步静默关闭：close() + wait_closed()，带超时与异常吞咽。
@@ -106,9 +157,17 @@ async def safe_close(writer: asyncio.StreamWriter | None) -> None:
 
 
 async def relay(reader_a: asyncio.StreamReader, writer_b: asyncio.StreamWriter,
-                reader_b: asyncio.StreamReader, writer_a: asyncio.StreamWriter) -> None:
-    """双向透明中继（无加密，用于直连路径）"""
-    async def pipe(reader, writer):
+                reader_b: asyncio.StreamReader, writer_a: asyncio.StreamWriter,
+                label: str = "") -> None:
+    """
+    双向透明中继（无加密，用于直连路径）。
+
+    异常处理：对端 RST / FIN / Timeout 在网络代理里是常规事件，**默认静默**，
+    避免在正常断开时刷屏。但调用方可以打开 logger("utils") 的 DEBUG 级别
+    把每条 leg 终止时的异常类型 + 消息打出来 —— 排查"代理莫名其妙就断了"
+    类问题时再开，平时不必。label 用来在日志里区分是哪条连接的哪个方向。
+    """
+    async def pipe(reader, writer, direction):
         try:
             while True:
                 data = await reader.read(_RELAY_BUF)
@@ -117,13 +176,14 @@ async def relay(reader_a: asyncio.StreamReader, writer_b: asyncio.StreamWriter,
                 writer.write(data)
                 if writer.transport.get_write_buffer_size() > _DRAIN_THRESHOLD:
                     await writer.drain()
-        except Exception:
-            pass
+        except Exception as e:
+            _RELAY_LOGGER.debug("relay %s %s ended: %s: %s",
+                                label or "?", direction, type(e).__name__, e)
         finally:
             await safe_close(writer)
 
-    task_a = asyncio.create_task(pipe(reader_a, writer_b))
-    task_b = asyncio.create_task(pipe(reader_b, writer_a))
+    task_a = asyncio.create_task(pipe(reader_a, writer_b, "local→remote"))
+    task_b = asyncio.create_task(pipe(reader_b, writer_a, "remote→local"))
     try:
         await asyncio.wait([task_a, task_b], return_when=asyncio.FIRST_COMPLETED)
     finally:

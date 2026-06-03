@@ -13,9 +13,16 @@ Brutal 连接预建池
   预建池：   提前建好 N 条已认证隧道 → SOCKS5 请求来了直接取用（无延迟）
              取走一条 → 后台异步补充一条，始终保持池满
 
-配置参数：
-  brutal_rate_bps      每条连接的 Brutal 速率（建议 5~10 Mbps）
-  brutal_pool_size     预建连接数（建议 10~20，影响最大并发吞吐）
+配置参数（node_cfg 字段，由 outbound 层填入）：
+  server_host / server_port  服务端地址
+  password / camouflage_host 鉴权 + SNI
+  brutal_rate_bps            每条连接的 Brutal 速率（建议 5~10 Mbps，0=关）
+  brutal_pool_size           预建连接数（建议 10~20，影响最大并发吞吐）
+
+回调：
+  on_latency(ms): 每次 build_one 成功后通知调用方实际握手耗时
+                  （outbound 层用作 urltest 排序数据）
+  on_failure():   build_one 失败一次（连续失败 N 次后 outbound 标 unhealthy）
 """
 
 
@@ -24,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from typing import Callable, Optional
 
 
 from .hello_auth import make_session_token
@@ -60,26 +68,75 @@ def _staggered_delay(i: int) -> float:
 
 async def _read_server_handshake(reader: asyncio.StreamReader) -> None:
     """
-    读取服务端 TLS 1.3 握手 flight 直至结束。
+    读取服务端 TLS 1.3 握手 flight 直至结束，并做基本合法性检查。
 
-    序列：ServerHello(0x16) → CCS(0x14) → N×ApplicationData(0x17, 加密记录群)
-    CCS 之后切换为短超时（1.5s）；超时意味着服务端 flight 已发完，无需继续等待。
+    ── 成功路径 ──────────────────────────────────────────────────────────────
+      ServerHello(0x16) → CCS(0x14) → N×ApplicationData(0x17, 加密记录群)
+      CCS 之后切换为短超时（1.5s）；超时即代表 flight 发完。
+
+    ── 失败显式抛 IOError（不再被外层 `pass` 吃掉）──────────────────────────
+      - 0x15 Alert：服务端 / 中间设备明文告警（密码错、SNI 拒绝、重放命中等）
+      - EOF（IncompleteReadError）：握手中途被对端关连接
+      - 12s 内连 CCS 都没收到：服务端响应停滞
+      - 未见 SH / CCS / 任一 0x17：flight 不完整
+
+      在握手期就报错的好处：调用方 `_build_one` 直接判 build 失败，错误信息
+      精准（如 "server sent TLS alert level=2 desc=51"），不会再走到派生密钥
+      和返回 ready_tunnel 那一步、让首次 send/recv 才以"EOF"形式爆出深栈。
+
+    ── 这个检查覆盖不到的事（限制声明）──────────────────────────────────────
+      服务端 token 验证失败时会走 camouflage 模式回放真实 apple.com 的握手 ——
+      与"接受"模式回放的字节流**完全相同**。客户端无法从握手 flight 判定
+      服务端到底是哪种模式。这是协议设计上的隐蔽性目标，本函数不破坏它。
     """
+    saw_sh = False
     saw_ccs = False
-    try:
-        while True:
-            timeout = 1.5 if saw_ccs else 12.0
-            try:
-                header = await asyncio.wait_for(reader.readexactly(5), timeout=timeout)
-            except asyncio.TimeoutError:
-                break  # server flight done
-            ct     = header[0]
-            length = int.from_bytes(header[3:5], "big")
-            await asyncio.wait_for(reader.readexactly(length), timeout=timeout)
-            if ct == 0x14:
-                saw_ccs = True
-    except Exception:
-        pass
+    saw_enc = False
+
+    while True:
+        timeout = 1.5 if saw_ccs else 12.0
+        try:
+            header = await asyncio.wait_for(reader.readexactly(5), timeout=timeout)
+        except asyncio.TimeoutError:
+            if not saw_ccs:
+                # 12s 内服务端连 ServerHello+CCS 都没发完
+                raise IOError("server TLS handshake stalled (no CCS within 12s)")
+            break  # CCS 之后的短超时 = 服务端 flight 发完，正常结束
+        except asyncio.IncompleteReadError as e:
+            raise IOError(
+                f"server closed during TLS handshake "
+                f"(read {len(e.partial)} of {e.expected} bytes header)"
+            )
+
+        ct     = header[0]
+        length = int.from_bytes(header[3:5], "big")
+        try:
+            body = await asyncio.wait_for(reader.readexactly(length), timeout=timeout)
+        except asyncio.IncompleteReadError as e:
+            raise IOError(
+                f"server closed during TLS record body "
+                f"(ct=0x{ct:02x}, got {len(e.partial)}/{e.expected})"
+            )
+
+        if ct == 0x15:
+            # Alert 在 TLS 1.2 / 1.3 握手前阶段都是明文：[level, description]
+            # 见 RFC 5246 §7.2 / RFC 8446 §6
+            lvl  = body[0] if body else 0
+            desc = body[1] if len(body) >= 2 else 0
+            raise IOError(f"server sent TLS alert (level={lvl}, desc={desc})")
+        if ct == 0x16:
+            saw_sh = True
+        elif ct == 0x14:
+            saw_ccs = True
+        elif ct == 0x17:
+            saw_enc = True
+        # 其它 ct 不打断（保留 forward-compat），但也不计入"flight 完成"判定
+
+    if not (saw_sh and saw_ccs and saw_enc):
+        raise IOError(
+            f"incomplete TLS handshake flight "
+            f"(ServerHello={saw_sh}, CCS={saw_ccs}, EncryptedRecords={saw_enc})"
+        )
 
 
 class _ReadyTunnel:
@@ -107,9 +164,17 @@ class BrutalPool:
     """
     维护 pool_size 条到服务端的预认证加密隧道。
     每条隧道独立启用 TCP Brutal（per-connection rate）。
+
+    cfg 是 node_cfg（per-outbound 的连接参数子集），不再读全局 cfg：
+    多 outbound 场景下每个 PyrealiyOutbound 独占一个 BrutalPool。
     """
 
-    def __init__(self, cfg: dict):
+    def __init__(
+        self,
+        cfg: dict,
+        on_latency: Optional[Callable[[float], None]] = None,
+        on_failure: Optional[Callable[[], None]] = None,
+    ):
         self._cfg       = cfg
         self._pool_size = cfg.get("brutal_pool_size", 10)
         self._rate_bps  = cfg.get("brutal_rate_bps", 0)
@@ -117,6 +182,8 @@ class BrutalPool:
         # 正在建立中的连接数。asyncio 单线程，在任意两个 await 之间修改是原子的，
         # 因此可以用普通 int 代替 Lock 来防止并发超建。
         self._building  = 0
+        self._on_latency = on_latency
+        self._on_failure = on_failure
 
     async def warmup(self) -> int:
         """
@@ -158,7 +225,36 @@ class BrutalPool:
                 self._schedule_refills()
         except asyncio.TimeoutError:
             logger.info("Pool exhausted, building direct connection")
-            return await self._build_one()
+            ready, latency_ms = await self._build_one()
+            if ready is not None and latency_ms is not None and self._on_latency:
+                self._on_latency(latency_ms)
+            elif ready is None and self._on_failure:
+                self._on_failure()
+            return ready
+
+    async def probe_once(self) -> bool:
+        """
+        主动触发一次握手并把结果塞入池。若池已满则丢弃最老的一条腾位。
+
+        用途：长时间无流量时给 outbound 层补一个新鲜的延迟样本，使 urltest
+        决策不至于依赖陈旧数据（被动样本只在有流量时才更新）。
+        """
+        ready, latency_ms = await self._build_one()
+        if ready is None:
+            if self._on_failure:
+                self._on_failure()
+            return False
+        if self._on_latency and latency_ms is not None:
+            self._on_latency(latency_ms)
+        # 池满时挤掉一条最旧的（自然轮换，无锁）
+        if self._queue.qsize() >= self._pool_size:
+            try:
+                old = self._queue.get_nowait()
+                old.close()
+            except asyncio.QueueEmpty:
+                pass
+        await self._queue.put(ready)
+        return True
 
     def _schedule_refills(self) -> None:
         """
@@ -187,26 +283,36 @@ class BrutalPool:
             return False
         self._building += 1
         try:
-            ready = await self._build_one()
+            ready, latency_ms = await self._build_one()
             if ready:
+                if self._on_latency and latency_ms is not None:
+                    self._on_latency(latency_ms)
                 await self._queue.put(ready)
                 return True
+            if self._on_failure:
+                self._on_failure()
             return False
         finally:
             self._building -= 1
 
-    async def _build_one(self) -> _ReadyTunnel | None:
+    async def _build_one(self) -> tuple[_ReadyTunnel | None, float | None]:
         """
         建立一条完整的预认证隧道（TCP 连接 + 认证 + 加密握手）。
+        返回 (ready, latency_ms)；失败为 (None, None)。
 
         整体用 _BUILD_TIMEOUT 包裹：任何一步（连接/drain/握手读取）卡住都会
         在硬上限内被取消，避免坏连接长期占用 _building 计数导致池容量空缺。
+
+        latency_ms 是从开始建 TCP 到握手完成的总耗时，作为 outbound 健康
+        指标用 —— 比单纯 TCP RTT 更接近实际"取一条隧道用一次"的真实体验。
         """
+        t0 = time.monotonic()
         try:
-            return await asyncio.wait_for(self._build_one_inner(), timeout=_BUILD_TIMEOUT)
+            ready = await asyncio.wait_for(self._build_one_inner(), timeout=_BUILD_TIMEOUT)
+            return ready, (time.monotonic() - t0) * 1000.0
         except Exception as e:
             logger.debug("Failed to build pool connection: %s", e)
-            return None
+            return None, None
 
     async def _build_one_inner(self) -> _ReadyTunnel:
         cfg = self._cfg

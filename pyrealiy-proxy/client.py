@@ -1,15 +1,23 @@
 """
 PyReality 客户端
 
-本地监听 SOCKS5 → 路由判断 → PROXY 走预建隧道池 / DIRECT 直连目标
+本地监听 SOCKS5 → 路由判断 → 按命中的 outbound 走（每个 outbound 自管连接池）
 
-可选 TProxy 透明代理（需要 root + iptables TPROXY 规则，由 setup.py 生成）：
-  配置 tproxy_port 后同时启动 TProxy 监听器，无需应用层配合即可透明代理所有 TCP 流量
+多节点 / 自适应选路（sing-box 风格）：
+  config_client.json 顶层 "outbounds" 数组定义节点 + 组：
+    type=pyrealiy  → 加密隧道叶子节点，独占一个 BrutalPool
+    type=direct    → 系统直连
+    type=block     → 拒绝
+    type=urltest   → 组：选 median latency 最低的 child（带 tolerance 防抖）
+    type=fallback  → 组：按顺序选第一个 healthy 的 child
 
-Brutal 多连接策略：
-  brutal_rate_bps  = 每条连接的速率（建议 5~10 Mbps）
-  brutal_pool_size = 预建连接数（建议 10~20）
-  总吞吐上限       ≈ brutal_pool_size × brutal_rate_bps
+  延迟数据：复用 BrutalPool 每次 build 的握手耗时（无额外探测）；长时间
+  无流量时由 HealthCheck 主动 probe 兜底。
+
+可选 TProxy 透明代理（需要 root + iptables TPROXY 规则，由 setup.py 生成）
+
+老配置（顶层 server_host）：build_outbounds 自动合成单 pyrealiy outbound 'proxy'。
+老 rules（CSV 字符串）：PROXY/DIRECT/REJECT 关键字自动映射到 proxy/direct/block 三个 tag。
 
 用法：
   python client.py [config_client.json]
@@ -19,75 +27,22 @@ Brutal 多连接策略：
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import json
 import resource
-import socket
 import sys
 
 from core.socks5 import parse_socks5_request
-from core.conn_pool import BrutalPool
+from core.outbound import build_outbounds, PyrealiyOutbound, Outbound
 from core.dns_forwarder import DNSForwarder
 from core.sniffer import sniff_domain, PrefixedReader
 from core.geosite_cache import ensure_all as geo_ensure_all
-from core.router import build_router, DIRECT, REJECT
-from core.utils import (get_logger, pack_address, relay, safe_close,
-                        install_stale_gaierror_handler, set_drain_threshold,
-                        get_drain_threshold)
+from core.router import build_router, PROXY, DIRECT, REJECT
+from core.healthcheck import HealthCheck
+from core.utils import (get_logger, safe_close, apply_log_levels,
+                        install_stale_gaierror_handler, set_drain_threshold)
 from core import brutal
 
 logger = get_logger("client")
-
-
-# ── 启动期辅助 ────────────────────────────────────────────────────────────────
-
-def _resolve_server_host(cfg: dict) -> None:
-    """
-    把 cfg['server_host'] 中的域名一次性解析为 IP 并替换。
-
-    每条 pool 隧道都对 server_host 做一次 open_connection；如果它是域名，
-    asyncio 在线程池执行器里发 getaddrinfo —— 这个 future 不可取消，
-    pool 的 wait_for 超时后没人接住它的结果，gaierror 就成了 stale future
-    的未消费异常，asyncio 抱怨"Future exception was never retrieved"。
-
-    启动一次性解析既消除噪音根源，又能在启动期快速暴露"客户端连不上服务端"。
-    """
-    # strip 防止手编 JSON 时混入空格 / BOM：否则 ipaddress 解析失败 → 当域名 →
-    # getaddrinfo 也失败 → 错误信息会指向 "DNS 不通"，把用户引到错的方向
-    raw  = cfg["server_host"]
-    host = raw.strip()
-    if host != raw:
-        logger.warning("server_host %r had surrounding whitespace, stripped to %r", raw, host)
-    cfg["server_host"] = host
-
-    try:
-        ipaddress.ip_address(host)
-        return                                  # 已经是 IP
-    except ValueError:
-        pass
-
-    # AF_UNSPEC 同时拿 A 和 AAAA，IPv6-only 服务也能用；
-    # IPv4 优先（兼容性好），实在没 v4 再用 v6
-    try:
-        infos = socket.getaddrinfo(host, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM)
-        v4 = sorted({info[4][0] for info in infos if info[0] == socket.AF_INET})
-        v6 = sorted({info[4][0] for info in infos if info[0] == socket.AF_INET6})
-    except socket.gaierror as e:
-        logger.error("Cannot resolve server_host %s: %s — 请检查 DNS / hosts / VPN", host, e)
-        raise SystemExit(1)
-
-    ips = v4 + v6                               # v4 优先
-    if not ips:
-        logger.error("No A/AAAA record for server_host %s", host)
-        raise SystemExit(1)
-
-    cfg["_server_host_original"] = host         # 保留原始域名留作日志
-    cfg["server_host"] = ips[0]
-    if len(ips) > 1:
-        logger.info("server_host %s -> %d IPs, using %s (others: %s)",
-                    host, len(ips), ips[0], ", ".join(ips[1:]))
-    else:
-        logger.info("server_host %s -> %s", host, ips[0])
 
 
 _ACCESS_LOG = False     # 由 main() 从 cfg 读出后设置
@@ -105,128 +60,61 @@ async def _dispatch(
     local_writer: asyncio.StreamWriter,
     target_host: str,
     target_port: int,
-    pool: BrutalPool,
+    outbounds: dict[str, Outbound],
     router,
     routing_host: str | None = None,
 ) -> None:
     """
-    路由判断 + 转发，由 SOCKS5 和 TProxy 两个入口共用。
+    路由判断 + 委派给命中的 outbound。SOCKS5 / TProxy 两个入口共用。
 
     routing_host: 用于路由匹配的域名（TProxy sniff 结果）；
-                  None 时退化为 target_host（IP 或 SOCKS5 提供的域名）。
-    target_host:  实际连接目标（TProxy 模式下始终是原始 IP）。
+                  None 时退化为 target_host。
+    target_host:  实际连接目标。
     """
     route_key      = routing_host or target_host
     action, source = router.match(route_key)
 
+    outbound = outbounds.get(action)
+    if outbound is None:
+        logger.error("Router returned unknown outbound tag '%s', closing", action)
+        await safe_close(local_writer)
+        return
+
+    leaf = outbound.resolve_leaf()
     label = f"{routing_host} ({target_host}:{target_port})" if routing_host else f"{target_host}:{target_port}"
+    # 组节点把实际用的叶子也打出来，方便排查 urltest 选了谁
+    if leaf is not outbound:
+        _alog("info", "%s -> %s (via %s)  %s  [%s]",
+              outbound.tag, leaf.tag, outbound.type, label, source)
+    else:
+        _alog("info", "%-8s %s  [%s]", outbound.tag, label, source)
 
-    if action == REJECT:
-        _alog("info", "REJECT  %s  [%s]", label, source)
-        await safe_close(local_writer)
-        return
-
-    if action == DIRECT:
-        _alog("info", "DIRECT  %s  [%s]", label, source)
-        try:
-            target_reader, target_writer = await asyncio.open_connection(
-                target_host, target_port
-            )
-        except Exception as e:
-            logger.error("Direct connect %s:%d failed: %s", target_host, target_port, e)
-            await safe_close(local_writer)
-            return
-        await relay(local_reader, target_writer, target_reader, local_writer)
-        return
-
-    # ── 代理分支 ─────────────────────────────────────────────────────────────
-    _alog("info", "PROXY   %s  [%s]", label, source)
-
-    ready = await pool.acquire()
-    if ready is None:
-        logger.error("No available tunnel for %s:%d", target_host, target_port)
-        await safe_close(local_writer)
-        return
-
-    tunnel = ready.tunnel
-    server_writer = ready.writer
-
-    try:
-        await tunnel.send(pack_address(target_host, target_port))
-    except Exception as e:
-        logger.error("Failed to send target address: %s", e)
-        await safe_close(server_writer)
-        await safe_close(local_writer)
-        return
-
-    async def local_to_tunnel():
-        try:
-            while True:
-                data = await local_reader.read(65536)
-                if not data:
-                    break
-                await tunnel.send(data)
-        except Exception:
-            pass
-        finally:
-            # 主动关方：先发 TLS close_notify alert 再 FIN，外观更像真实 HTTPS 关闭
-            await tunnel.send_close_notify()
-            await safe_close(server_writer)
-
-    async def tunnel_to_local():
-        try:
-            while True:
-                data = await tunnel.recv()
-                local_writer.write(data)
-                if local_writer.transport.get_write_buffer_size() > get_drain_threshold():
-                    await local_writer.drain()
-        except Exception:
-            pass
-        finally:
-            await safe_close(local_writer)
-
-    task_a = asyncio.create_task(local_to_tunnel())
-    task_b = asyncio.create_task(tunnel_to_local())
-    try:
-        await asyncio.wait([task_a, task_b], return_when=asyncio.FIRST_COMPLETED)
-    finally:
-        for t in (task_a, task_b):
-            if not t.done():
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
+    await outbound.handle(local_reader, local_writer, target_host, target_port)
 
 
 async def handle_local_connection(
     local_reader: asyncio.StreamReader,
     local_writer: asyncio.StreamWriter,
-    pool: BrutalPool,
+    outbounds: dict[str, Outbound],
     router,
 ) -> None:
     target = await parse_socks5_request(local_reader, local_writer)
     if target is None:
         await safe_close(local_writer)
         return
-    await _dispatch(local_reader, local_writer, target[0], target[1], pool, router)
+    await _dispatch(local_reader, local_writer, target[0], target[1], outbounds, router)
 
 
 async def handle_tproxy_connection(
     local_reader: asyncio.StreamReader,
     local_writer: asyncio.StreamWriter,
-    pool: BrutalPool,
+    outbounds: dict[str, Outbound],
     router,
 ) -> None:
-    # TProxy 模式：内核将原始目标地址写入 sockname，无需协议握手
     target_host, target_port = local_writer.get_extra_info("sockname")
-
-    # Sniff 初始字节，尝试提取域名以启用 GEOSITE/DOMAIN 规则；
-    # buffered 必须放回 reader 前缀，确保数据完整到达目标
     domain, buffered = await sniff_domain(local_reader)
     reader = PrefixedReader(local_reader, buffered) if buffered else local_reader
-
-    await _dispatch(reader, local_writer, target_host, target_port, pool, router,
+    await _dispatch(reader, local_writer, target_host, target_port, outbounds, router,
                     routing_host=domain)
 
 
@@ -240,76 +128,116 @@ def _raise_fd_limit() -> None:
         logger.warning("Could not raise fd limit: %s", e)
 
 
+def _legacy_action_map(outbounds: dict[str, Outbound]) -> dict[str, str]:
+    """
+    老 CSV rules 的 PROXY/DIRECT/REJECT 关键字 → outbound tag。
+
+    在合成单节点模式下：
+      PROXY  → "proxy"  （build_outbounds 合成的 pyrealiy outbound tag）
+      DIRECT → "direct" （自动补全的 direct outbound tag）
+      REJECT → "block"  （自动补全的 block outbound tag）
+
+    新配置 + 老 CSV rules 的混合：仍提供同名映射，但用户的 outbound tag
+    可能不叫 "proxy"——这种情况下需要用结构化 rules 或者显式 tag。
+    """
+    return {PROXY: "proxy", DIRECT: "direct", REJECT: "block"}
+
+
+def _check_brutal_kernel(cfg: dict) -> None:
+    """
+    任意 outbound 设置了 brutal_rate_bps 但内核模块未加载 → 全部置 0 静默回落。
+    在 build_outbounds 之前调用（这样合成的 BrutalPool 不会尝试 setsockopt）。
+    """
+    raw_obs = cfg.get("outbounds") or []
+    uses_brutal_top = bool(cfg.get("brutal_rate_bps", 0))
+    uses_brutal_any = uses_brutal_top or any(
+        isinstance(o, dict) and int(o.get("brutal_rate_bps", 0)) > 0
+        for o in raw_obs
+    )
+    if not uses_brutal_any:
+        return
+    if brutal.is_available():
+        logger.info("TCP Brutal kernel module: available")
+        return
+    logger.warning("brutal_rate_bps set but kernel module not loaded — falling back to normal TCP")
+    cfg["brutal_rate_bps"] = 0
+    for o in raw_obs:
+        if isinstance(o, dict) and o.get("brutal_rate_bps", 0):
+            o["brutal_rate_bps"] = 0
+
+
 async def main(config_path: str) -> None:
     _raise_fd_limit()
-
-    # 把可能漏接的 gaierror 降到 DEBUG（详见 install_stale_gaierror_handler 注释）
     install_stale_gaierror_handler(asyncio.get_running_loop())
 
     with open(config_path) as f:
         cfg = json.load(f)
 
-    # access_log 开关：默认关，开后才打 dispatch INFO 日志
+    # 在任何业务日志之前应用 log_levels，否则启动日志仍按旧级别走
+    apply_log_levels(cfg)
+
     global _ACCESS_LOG
     _ACCESS_LOG = bool(cfg.get("access_log", False))
     if _ACCESS_LOG:
         logger.info("access_log enabled (per-connection dispatch logging on)")
 
-    # drain 阈值：默认 64KB，跨境高 BDP 可调到 256KB~1MB
     drain_thr = int(cfg.get("drain_threshold", 64 * 1024))
     if drain_thr != 64 * 1024:
         set_drain_threshold(drain_thr)
         logger.info("drain_threshold set to %d bytes", drain_thr)
 
-    # 启动期把 server_host 域名解析为 IP，省下每次 build 的 getaddrinfo + 噪音
-    _resolve_server_host(cfg)
+    # ── 构建 outbound 字典 ────────────────────────────────────────────────
+    _check_brutal_kernel(cfg)
+    outbounds = build_outbounds(cfg)
+    # legacy_action_map 总是提供：即便用户在新 outbounds + CSV rules 混用，
+    # 用 PROXY/DIRECT/REJECT 关键字也能继续工作（前提是定义了同名 outbound）。
+    # 用户用了自定义 tag（如 "tokyo-1"）的 CSV 行会原样作为 outbound 名查找，
+    # valid_actions 校验不通过则规则被警告 + 跳过。
+    legacy_map = _legacy_action_map(outbounds)
+    logger.info("Outbounds loaded: %s",
+                ", ".join(f"{t}({o.type})" for t, o in outbounds.items()))
 
-    rate_bps  = cfg.get("brutal_rate_bps", 0)
-    pool_size = cfg.get("brutal_pool_size", 10)
+    # ── 全部 pyrealiy outbound 并行 warmup ────────────────────────────────
+    pyrealiy_obs = [o for o in outbounds.values() if isinstance(o, PyrealiyOutbound)]
+    if pyrealiy_obs:
+        await asyncio.gather(*[o.warmup() for o in pyrealiy_obs], return_exceptions=True)
 
-    if rate_bps:
-        if brutal.is_available():
-            logger.info(
-                "TCP Brutal: ON | per-conn %.0f Mbps × %d conns = %.0f Mbps max",
-                rate_bps / 1e6, pool_size, rate_bps * pool_size / 1e6,
-            )
-        else:
-            logger.warning(
-                "brutal_rate_bps is set but kernel module not found — "
-                "falling back to normal TCP. Run setup.py to install."
-            )
-            cfg["brutal_rate_bps"] = 0
+    # ── geo 数据下载：复用第一个可用 pyrealiy outbound 的 tunnel ─────────
+    # 弱网下走自家隧道比直连 GitHub 稳；该 outbound 池空时 geo 模块会自动 fallback 直连
+    geo_pool = None
+    for o in pyrealiy_obs:
+        if o.pool.ready_count > 0:
+            geo_pool = o.pool
+            logger.info("geo download will tunnel through outbound '%s'", o.tag)
+            break
+    if geo_pool is None and pyrealiy_obs:
+        logger.warning("All pyrealiy outbound pools empty after warmup; geo download will go direct")
 
-    # 先建池：geo 数据下载也要复用同一份隧道（弱网下避免直连 GitHub 慢/失败）
-    pool = BrutalPool(cfg)
-    ready_count = await pool.warmup()
+    available_site, available_ip = await geo_ensure_all(cfg, pool=geo_pool)
 
-    # warmup 0 说明服务端不通；继续把 pool 传给 geo 只会反复尝试 + acquire 超时，
-    # 单文件最多浪费 ~75s。直接禁用 tunnel 路径走 direct，省启动时间。
-    pool_for_geo = pool if ready_count > 0 else None
-    if pool_for_geo is None:
-        logger.warning("Pool empty after warmup; geo download will go direct only")
+    # ── 构建 router ───────────────────────────────────────────────────────
+    router = build_router(
+        cfg, available_site, available_ip,
+        valid_actions=set(outbounds.keys()),
+        legacy_action_map=legacy_map,
+    )
 
-    available_site, available_ip = await geo_ensure_all(cfg, pool=pool_for_geo)
-    router = build_router(cfg, available_site, available_ip)
+    # ── HealthCheck：长闲时主动 probe 兜底 ────────────────────────────────
+    health = HealthCheck(outbounds.values())
+    health.start()
 
     socks5_server = await asyncio.start_server(
-        lambda r, w: handle_local_connection(r, w, pool, router),
+        lambda r, w: handle_local_connection(r, w, outbounds, router),
         cfg["socks5_host"],
         cfg["socks5_port"],
         limit=262144,
     )
-    logger.info(
-        "SOCKS5 listening on %s:%d  (pool: %d conns ready)",
-        cfg["socks5_host"],
-        cfg["socks5_port"],
-        pool_size,
-    )
+    logger.info("SOCKS5 listening on %s:%d", cfg["socks5_host"], cfg["socks5_port"])
 
     dns_forwarder = None
     if cfg.get("dns_listen_port", 0):
         try:
-            dns_forwarder = DNSForwarder(cfg, router, pool)
+            dns_forwarder = DNSForwarder(cfg, router, outbounds)
             await dns_forwarder.start()
         except OSError as e:
             logger.error("DNS forwarder failed to start: %s", e)
@@ -323,7 +251,7 @@ async def main(config_path: str) -> None:
             tproxy_server = await _tproxy_mod.start_server(
                 "0.0.0.0",
                 tproxy_port,
-                lambda r, w: handle_tproxy_connection(r, w, pool, router),
+                lambda r, w: handle_tproxy_connection(r, w, outbounds, router),
             )
         except OSError as e:
             logger.error("TProxy failed to start: %s", e)
@@ -339,8 +267,11 @@ async def main(config_path: str) -> None:
             async with socks5_server:
                 await socks5_server.serve_forever()
     finally:
+        await health.stop()
         if dns_forwarder:
             dns_forwarder.stop()
+        for o in outbounds.values():
+            await o.stop()
 
 
 if __name__ == "__main__":

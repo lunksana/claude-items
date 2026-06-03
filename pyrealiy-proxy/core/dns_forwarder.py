@@ -1,20 +1,24 @@
 """
 DNS 转发器
 
-本地监听 UDP 53/5353，按路由规则分流：
-  DIRECT → UDP 直接查询国内 DNS（如 223.5.5.5）
-  PROXY  → DNS-over-TCP 通过隧道查询境外 DNS（如 8.8.8.8）
-  REJECT → 返回 NXDOMAIN
+本地监听 UDP 53/5353，按 router 决定的 outbound tag 分流：
+  block leaf    → 返回 NXDOMAIN
+  direct leaf   → UDP 直查国内 DNS（如 223.5.5.5）—— UDP 比 TCP 显著省一次握手
+  pyrealiy leaf → 经该 outbound 的隧道做 DNS-over-TCP（pipeline，一个 DoT 隧道服多查）
 
-使用方法：将系统 DNS 改为 127.0.0.1:<port>，或用 iptables 将 53 端口重定向到该端口。
+组节点（urltest/fallback）按 resolve_leaf() 选定的叶子分流。每个 pyrealiy 叶子
+独占一个 _DnsTunnel pipeline（懒建），不同 outbound 之间不共享。
+
+使用方法：将系统 DNS 改为 127.0.0.1:<port>，或用 iptables 把 53 端口重定向过来。
 """
 
 from __future__ import annotations
 
 import asyncio
 import struct
+from typing import Optional
 
-from .router import DIRECT, REJECT
+from .outbound import Outbound, PyrealiyOutbound
 from .utils import get_logger, pack_address
 
 logger = get_logger("dns")
@@ -119,19 +123,21 @@ class _DnsTunnel:
     长寿命 DNS-over-TCP 隧道 + 并发 query pipeline。
 
     设计要点：
-      - **单条**池连接持有；所有 DNS 查询经它发出
+      - **单条** outbound 池连接持有；该 outbound 的所有 DNS 查询经它发出
       - 查询用我们自己的内部 tx_id（递增计数器）替换客户端原始 ID，保证唯一性，
         响应回来时再还原成客户端期望的 ID
       - 后台 reader 任务从隧道连续读 DNS-over-TCP 帧，按 tx_id 派发到 pending future
       - 并发上限 = MAX_INFLIGHT，超出时排队等待 slot（防止单 client 滥用拖垮 server）
       - 隧道掉线：reader 异常退出 → 所有 pending future 收到 OSError → 下次 query
         重试时惰性重建隧道；in-flight 查询都失败（端到端 resolver 会按其 timeout 重发）
+
+    多 outbound 场景：每个 PyrealiyOutbound 单独持有一个 _DnsTunnel 实例。
     """
 
     MAX_INFLIGHT = 64
 
-    def __init__(self, pool, remote_dns: str):
-        self._pool        = pool
+    def __init__(self, outbound: PyrealiyOutbound, remote_dns: str):
+        self._outbound    = outbound
         self._remote_dns  = remote_dns
         self._ready       = None
         self._reader_task = None
@@ -162,9 +168,9 @@ class _DnsTunnel:
             # 双重检查（其它 coroutine 可能在我们等锁期间已经建好）
             if self._ready is not None and self._reader_task and not self._reader_task.done():
                 return
-            ready = await self._pool.acquire()
+            ready = await self._outbound.acquire_tunnel()
             if ready is None:
-                raise OSError("no tunnel available for DNS")
+                raise OSError(f"no tunnel available for DNS via '{self._outbound.tag}'")
             await ready.tunnel.send(pack_address(self._remote_dns, 53))
             self._ready       = ready
             self._reader_task = asyncio.create_task(self._reader_loop())
@@ -274,15 +280,16 @@ class _DNSProtocol(asyncio.DatagramProtocol):
 # ── 公共接口 ───────────────────────────────────────────────────────────────────
 
 class DNSForwarder:
-    def __init__(self, cfg: dict, router, pool):
+    def __init__(self, cfg: dict, router, outbounds: dict[str, Outbound]):
         self._host       = cfg.get("dns_listen_host", "127.0.0.1")
         self._port       = int(cfg.get("dns_listen_port", 5353))
         self._cn_dns     = cfg.get("cn_dns", _CN_DNS_DEFAULT)
         self._remote_dns = cfg.get("remote_dns", _REMOTE_DNS_DEFAULT)
         self._router     = router
-        self._pool       = pool
+        self._outbounds  = outbounds
         self._transport  = None
-        self._dns_tunnel = _DnsTunnel(pool, self._remote_dns)
+        # 每个 pyrealiy 叶子独占一条 DoT pipeline，懒建
+        self._tunnels: dict[str, _DnsTunnel] = {}
 
     async def start(self) -> None:
         loop = asyncio.get_event_loop()
@@ -291,30 +298,54 @@ class DNSForwarder:
             local_addr=(self._host, self._port),
         )
         logger.info(
-            "DNS forwarder on %s:%d  (CN->%s  foreign->%s via tunnel)",
+            "DNS forwarder on %s:%d  (direct->%s  proxy->%s via outbound's tunnel)",
             self._host, self._port, self._cn_dns, self._remote_dns,
         )
 
     def stop(self) -> None:
         if self._transport:
             self._transport.close()
-        self._dns_tunnel.close()
+        for t in self._tunnels.values():
+            t.close()
+        self._tunnels.clear()
 
-    async def _handle(self, data: bytes) -> bytes | None:
+    def _tunnel_for(self, leaf: PyrealiyOutbound) -> _DnsTunnel:
+        t = self._tunnels.get(leaf.tag)
+        if t is None:
+            t = _DnsTunnel(leaf, self._remote_dns)
+            self._tunnels[leaf.tag] = t
+        return t
+
+    async def _handle(self, data: bytes) -> Optional[bytes]:
         domain = _extract_domain(data)
         if domain is None:
             return None
 
         action, source = self._router.match(domain)
+        outbound = self._outbounds.get(action)
+        if outbound is None:
+            logger.warning("DNS router returned unknown outbound '%s' for %s [%s]",
+                           action, domain, source)
+            return _nxdomain(data)
+
+        leaf = outbound.resolve_leaf()
+
         try:
-            if action == REJECT:
-                logger.debug("DNS REJECT  %s  [%s]", domain, source)
+            if leaf.type == "block":
+                logger.debug("DNS block   %s  [%s]", domain, source)
                 return _nxdomain(data)
-            if action == DIRECT:
-                logger.debug("DNS DIRECT  %s -> %s  [%s]", domain, self._cn_dns, source)
+            if leaf.type == "direct":
+                logger.debug("DNS direct  %s -> %s  [%s]", domain, self._cn_dns, source)
                 return await _udp_query(data, self._cn_dns)
-            logger.debug("DNS PROXY   %s -> %s (tunnel)  [%s]", domain, self._remote_dns, source)
-            return await self._dns_tunnel.query(data)
+            if isinstance(leaf, PyrealiyOutbound):
+                logger.debug("DNS via %-12s %s -> %s  [%s]",
+                             leaf.tag, domain, self._remote_dns, source)
+                return await self._tunnel_for(leaf).query(data)
+            # leaf 是组本身（所有 child 均 unhealthy 时 resolve_leaf 返回 self）
+            # 或者未来扩展的未知 leaf 类型 —— 都视作"无可路由出口"，NXDOMAIN
+            logger.warning("DNS '%s' [%s]: outbound '%s' has no healthy leaf, NXDOMAIN",
+                           domain, source, outbound.tag)
+            return _nxdomain(data)
         except Exception as e:
-            logger.warning("DNS query failed for %s: %s", domain, e)
+            logger.warning("DNS query failed for %s via %s: %s", domain, leaf.tag, e)
             return _nxdomain(data)

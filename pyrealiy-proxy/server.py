@@ -38,7 +38,7 @@ from core.router import build_router
 
 from core.geosite_cache import ensure_all as geo_ensure_all
 
-from core.utils import (get_logger, unpack_address, safe_close,
+from core.utils import (get_logger, unpack_address, safe_close, apply_log_levels,
                         install_stale_gaierror_handler, set_drain_threshold,
                         get_drain_threshold)
 
@@ -190,6 +190,9 @@ async def handle_client(
             store.unregister(conn)
             return
 
+        # 中继 leg 终止时的异常默认静默（对端 RST / FIN / Timeout 是常规事件），
+        # 但开启 logger("server") 的 DEBUG 级别就能看到类型 + 消息，便于排查
+        # "连接莫名其妙就断了" 这类问题。conn.id + target 写在日志里做对账。
         async def tunnel_to_target():
             try:
                 while True:
@@ -198,8 +201,9 @@ async def handle_client(
                     target_writer.write(data)
                     if target_writer.transport.get_write_buffer_size() > get_drain_threshold():
                         await target_writer.drain()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("relay id=%d %s:%d tunnel→target ended: %s: %s",
+                             conn.id, target_host, target_port, type(e).__name__, e)
             finally:
                 await safe_close(target_writer)
 
@@ -211,8 +215,9 @@ async def handle_client(
                         break
                     conn.bytes_down += len(data)
                     await tunnel.send(data)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("relay id=%d %s:%d target→tunnel ended: %s: %s",
+                             conn.id, target_host, target_port, type(e).__name__, e)
             finally:
                 # 主动关方：先发 TLS close_notify alert 再 FIN，外观更像真实 HTTPS 关闭
                 await tunnel.send_close_notify()
@@ -258,6 +263,9 @@ async def main(config_path: str) -> None:
 
     with open(config_path) as f:
         cfg = json.load(f)
+
+    # 在任何业务日志之前应用 log_levels，否则启动日志仍按旧级别走
+    apply_log_levels(cfg)
 
     # access_log 开关：默认关，开后才打 dispatch INFO 日志
     global _ACCESS_LOG, _IDLE_TIMEOUT_SEC, _MAX_CONNS_PER_IP, _TCP_KEEPALIVE
