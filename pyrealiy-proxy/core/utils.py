@@ -60,12 +60,16 @@ def unpack_address(data: bytes) -> tuple[str, int, int]:
     return host, port, consumed
 
 
-_RELAY_BUF       = 32768      # 单次读取大小，平衡延迟与吞吐
-_DRAIN_THRESHOLD = 64 * 1024  # 写缓冲积压超过此值才 drain，避免每帧切换协程
-_CLOSE_TIMEOUT   = 2.0        # wait_closed 上限：避免对端不发 FIN 时永久挂起
+_RELAY_BUF        = 32768      # 单次读取大小，平衡延迟与吞吐
+_DRAIN_THRESHOLD  = 64 * 1024  # 写缓冲积压超过此值才 drain，避免每帧切换协程
+_CLOSE_TIMEOUT    = 2.0        # wait_closed 上限：避免对端不发 FIN 时永久挂起
+_DRAIN_AFTER_HALF = 2.0        # 单向结束后，给另一方向最多多少秒优雅退出（避免 FIN 后 RST 指纹）
 
-# 中继协程的可选 debug 日志（默认静默；用户开启 logger("utils") 的 DEBUG 即可看到）
-_RELAY_LOGGER = get_logger("utils")
+# utils 模块自身用的 logger：
+#   - 中继协程异常的可选 debug 输出（用户开启 DEBUG 后可见）
+#   - apply_log_levels() 自身的反馈与告警
+# 模块级单例，名字直接对应 cfg["log_levels"] 里的 "utils" 键
+_logger = get_logger("utils")
 
 
 def set_drain_threshold(n: int) -> None:
@@ -115,45 +119,118 @@ def apply_log_levels(cfg: dict) -> None:
     "default" 是特殊键，作用在 root logger 上。
     """
     levels = cfg.get("log_levels")
+    if levels is None:
+        return
     if not isinstance(levels, dict):
+        _logger.warning("log_levels must be an object (got %s), ignored", type(levels).__name__)
         return
 
     valid = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
     applied = []
     for name, level in levels.items():
-        if not isinstance(name, str) or not isinstance(level, str):
+        # 类型守门：JSON null / 数字 / 列表都警告 + 跳过，避免静默吞配置错
+        if not isinstance(name, str):
+            _logger.warning("log_levels key %r is not a string, ignored", name)
             continue
+        if not isinstance(level, str):
+            _logger.warning("log_levels[%r] = %r is not a string, ignored "
+                            "(use \"DEBUG\" / \"INFO\" / ...)", name, level)
+            continue
+
+        name_clean = name.strip()
         lvl = level.strip().upper()
         if lvl == "WARN":
             lvl = "WARNING"
         if lvl not in valid:
-            _RELAY_LOGGER.warning("log_levels[%r] = %r is not a valid level, ignored", name, level)
+            _logger.warning("log_levels[%r] = %r is not a valid level, ignored", name, level)
             continue
-        target = logging.getLogger() if name == "default" else logging.getLogger(name)
+        if not name_clean:
+            _logger.warning("log_levels has empty key (level=%r), ignored", level)
+            continue
+
+        target = logging.getLogger() if name_clean == "default" else logging.getLogger(name_clean)
         target.setLevel(getattr(logging, lvl))
-        applied.append(f"{name}={lvl}")
+        applied.append(f"{name_clean}={lvl}")
 
     if applied:
-        _RELAY_LOGGER.info("Applied log_levels: %s", ", ".join(applied))
+        _logger.info("Applied log_levels: %s", ", ".join(applied))
 
 
 async def safe_close(writer: asyncio.StreamWriter | None) -> None:
     """
-    异步静默关闭：close() + wait_closed()，带超时与异常吞咽。
+    优雅静默关闭，**避免触发 RST**。
 
-    用 wait_closed 是为了在高并发短连接下让 OS 立即释放 fd，
-    避免 asyncio 内部 ResourceWarning 与 fd 累积。
+    ── 为什么不能直接 close() ────────────────────────────────────────────────
+    Linux TCP 规约：close() 时若 OS 接收缓冲区仍有未消费数据，会发 RST 而非
+    FIN。旧版直接 writer.close() 在双向中继场景里是常态—— 一方向 EOF 时，
+    另一方向往往刚收到几条 record 还没读，buffer 里有数据 → close → RST。
+
+    抓包对比（0604.pcap）显示真实 HTTPS 0 个 RST、我们的协议 87% 客户端在
+    FIN 后~78ms 发 RST，是显眼的 GFW 指纹。
+
+    ── 四步优雅关 ──────────────────────────────────────────────────────────
+      1. write_eof() —— 半关写端发 FIN，不动接收侧；OS 不会因未读数据 RST
+      2. drain       —— 把我们自己的发送缓冲冲完
+      3. close       —— 释放 socket（此时接收侧通常已被外层 relay 排空）
+      4. wait_closed —— 等 FIN-ACK / 立即释放 fd
+    每步独立 try/except 防异常打断后续清理。
     """
     if writer is None:
         return
     try:
+        if writer.is_closing():
+            return
+    except Exception:
+        pass
+    # 1) 发 FIN
+    try:
+        if writer.can_write_eof():
+            writer.write_eof()
+    except Exception:
+        pass
+    # 2) 冲完发送缓冲
+    try:
+        await asyncio.wait_for(writer.drain(), timeout=_CLOSE_TIMEOUT)
+    except Exception:
+        pass
+    # 3) 关 socket
+    try:
         writer.close()
     except Exception:
         return
+    # 4) 等内核回收
     try:
         await asyncio.wait_for(writer.wait_closed(), timeout=_CLOSE_TIMEOUT)
     except Exception:
         pass
+
+
+async def wait_both_with_grace(task_a: asyncio.Task, task_b: asyncio.Task,
+                               grace: float = _DRAIN_AFTER_HALF) -> None:
+    """
+    等任一中继协程结束后，给另一个最多 `grace` 秒优雅退出，否则 cancel。
+
+    用于双向中继：先 await FIRST_COMPLETED，然后让对端方向有机会读完 server
+    剩余数据 / 发送 close_notify、自然返回。这样最后 safe_close 时接收缓冲
+    已空，不再触发 RST。
+    """
+    await asyncio.wait([task_a, task_b], return_when=asyncio.FIRST_COMPLETED)
+    pending = {t for t in (task_a, task_b) if not t.done()}
+    if not pending:
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*pending, return_exceptions=True),
+            timeout=grace,
+        )
+    except asyncio.TimeoutError:
+        for t in pending:
+            if not t.done():
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
 
 
 async def relay(reader_a: asyncio.StreamReader, writer_b: asyncio.StreamWriter,
@@ -166,6 +243,11 @@ async def relay(reader_a: asyncio.StreamReader, writer_b: asyncio.StreamWriter,
     避免在正常断开时刷屏。但调用方可以打开 logger("utils") 的 DEBUG 级别
     把每条 leg 终止时的异常类型 + 消息打出来 —— 排查"代理莫名其妙就断了"
     类问题时再开，平时不必。label 用来在日志里区分是哪条连接的哪个方向。
+
+    关闭顺序（避免 RST 指纹）：
+      1. 任一 pipe 协程结束时**只发 FIN**（write_eof），不直接 close
+      2. 由外层 wait_both_with_grace 等另一 pipe 也自然退出（最多 2s）
+      3. 然后两边一并 safe_close —— 此时接收缓冲已被对方 pipe 排空
     """
     async def pipe(reader, writer, direction):
         try:
@@ -177,20 +259,19 @@ async def relay(reader_a: asyncio.StreamReader, writer_b: asyncio.StreamWriter,
                 if writer.transport.get_write_buffer_size() > _DRAIN_THRESHOLD:
                     await writer.drain()
         except Exception as e:
-            _RELAY_LOGGER.debug("relay %s %s ended: %s: %s",
-                                label or "?", direction, type(e).__name__, e)
-        finally:
-            await safe_close(writer)
+            _logger.debug("relay %s %s ended: %s: %s",
+                          label or "?", direction, type(e).__name__, e)
+        # 发我方 FIN 让对端的 reader 尽快 EOF；不 close（外层统一）
+        try:
+            if writer.can_write_eof():
+                writer.write_eof()
+        except Exception:
+            pass
 
     task_a = asyncio.create_task(pipe(reader_a, writer_b, "local→remote"))
     task_b = asyncio.create_task(pipe(reader_b, writer_a, "remote→local"))
     try:
-        await asyncio.wait([task_a, task_b], return_when=asyncio.FIRST_COMPLETED)
+        await wait_both_with_grace(task_a, task_b)
     finally:
-        for t in (task_a, task_b):
-            if not t.done():
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
+        await safe_close(writer_a)
+        await safe_close(writer_b)

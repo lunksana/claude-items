@@ -40,7 +40,8 @@ from core.geosite_cache import ensure_all as geo_ensure_all
 
 from core.utils import (get_logger, unpack_address, safe_close, apply_log_levels,
                         install_stale_gaierror_handler, set_drain_threshold,
-                        get_drain_threshold)
+                        get_drain_threshold, wait_both_with_grace)
+from core.version import __version__
 
 
 _ACCESS_LOG = False                       # 由 main() 从 cfg 读出后设置
@@ -193,6 +194,9 @@ async def handle_client(
         # 中继 leg 终止时的异常默认静默（对端 RST / FIN / Timeout 是常规事件），
         # 但开启 logger("server") 的 DEBUG 级别就能看到类型 + 消息，便于排查
         # "连接莫名其妙就断了" 这类问题。conn.id + target 写在日志里做对账。
+        #
+        # 关闭顺序：内层只发 FIN/close_notify，由外层 wait_both_with_grace +
+        # safe_close 兜底，避免 FIN→RST 指纹（详见 utils.safe_close）。
         async def tunnel_to_target():
             try:
                 while True:
@@ -204,8 +208,12 @@ async def handle_client(
             except Exception as e:
                 logger.debug("relay id=%d %s:%d tunnel→target ended: %s: %s",
                              conn.id, target_host, target_port, type(e).__name__, e)
-            finally:
-                await safe_close(target_writer)
+            # 对 target 发 FIN，让目标尽快也 EOF；不 close（外层统一）
+            try:
+                if target_writer.can_write_eof():
+                    target_writer.write_eof()
+            except Exception:
+                pass
 
         async def target_to_tunnel():
             try:
@@ -218,23 +226,18 @@ async def handle_client(
             except Exception as e:
                 logger.debug("relay id=%d %s:%d target→tunnel ended: %s: %s",
                              conn.id, target_host, target_port, type(e).__name__, e)
-            finally:
-                # 主动关方：先发 TLS close_notify alert 再 FIN，外观更像真实 HTTPS 关闭
-                await tunnel.send_close_notify()
-                await safe_close(client_writer)
+            # TLS 层的"FIN"：发 close_notify 让客户端的 tunnel.recv 自然 EOF
+            await tunnel.send_close_notify()
 
         task_a = asyncio.create_task(tunnel_to_target())
         task_b = asyncio.create_task(target_to_tunnel())
         try:
-            await asyncio.wait([task_a, task_b], return_when=asyncio.FIRST_COMPLETED)
+            # 优雅关：等一方向结束后给另一方向最多 2s 自然退出（避免立刻 cancel
+            # 留下未读字节，导致后续 close 触发 RST 指纹）
+            await wait_both_with_grace(task_a, task_b)
         finally:
-            for t in (task_a, task_b):
-                if not t.done():
-                    t.cancel()
-                    try:
-                        await t
-                    except asyncio.CancelledError:
-                        pass
+            await safe_close(target_writer)
+            await safe_close(client_writer)
             store.unregister(conn)
 
         _alog("info", "Connection from %s closed [id=%d]", peer, conn.id)
@@ -266,6 +269,8 @@ async def main(config_path: str) -> None:
 
     # 在任何业务日志之前应用 log_levels，否则启动日志仍按旧级别走
     apply_log_levels(cfg)
+
+    logger.info("PyReality server v%s", __version__)
 
     # access_log 开关：默认关，开后才打 dispatch INFO 日志
     global _ACCESS_LOG, _IDLE_TIMEOUT_SEC, _MAX_CONNS_PER_IP, _TCP_KEEPALIVE

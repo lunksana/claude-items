@@ -31,6 +31,7 @@ import json
 import resource
 import sys
 
+from core.version import __version__
 from core.socks5 import parse_socks5_request
 from core.outbound import build_outbounds, PyrealiyOutbound, Outbound
 from core.dns_forwarder import DNSForwarder
@@ -175,6 +176,8 @@ async def main(config_path: str) -> None:
 
     # 在任何业务日志之前应用 log_levels，否则启动日志仍按旧级别走
     apply_log_levels(cfg)
+
+    logger.info("PyReality client v%s", __version__)
 
     global _ACCESS_LOG
     _ACCESS_LOG = bool(cfg.get("access_log", False))

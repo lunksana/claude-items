@@ -35,7 +35,8 @@ from collections import deque
 from typing import Optional
 
 from .conn_pool import BrutalPool, _ReadyTunnel
-from .utils import get_logger, pack_address, relay, safe_close, get_drain_threshold
+from .utils import (get_logger, pack_address, relay, safe_close,
+                    get_drain_threshold, wait_both_with_grace)
 
 logger = get_logger("outbound")
 
@@ -206,6 +207,11 @@ async def _bidi_tunnel_relay(local_reader, local_writer, tunnel, server_writer, 
     异常静默由 logger("outbound") DEBUG 级别可见：对端 RST / Timeout / EOF
     这些都是正常断开信号，默认不打日志；开 DEBUG 后能看到 leg 终止时的
     异常类型 + 消息，方便排查"代理莫名其妙就断了"这类问题。
+
+    关闭顺序（避免 FIN→RST 指纹，详见 utils.safe_close）：
+      1. 任一方向 EOF 时只发 TLS close_notify / write_eof（"FIN"），不 close
+      2. 由 wait_both_with_grace 给对端方向最多 2s 自然退出
+      3. 然后两边一并 safe_close —— 接收缓冲已空，OS 发 FIN 不发 RST
     """
     async def local_to_tunnel():
         try:
@@ -217,35 +223,33 @@ async def _bidi_tunnel_relay(local_reader, local_writer, tunnel, server_writer, 
         except Exception as e:
             logger.debug("relay %s local→tunnel ended: %s: %s",
                          label or "?", type(e).__name__, e)
-        finally:
-            await tunnel.send_close_notify()
-            await safe_close(server_writer)
+        # TLS 层的"FIN"：发 close_notify 让 server 也尽快 EOF；不 close server_writer
+        await tunnel.send_close_notify()
 
     async def tunnel_to_local():
         try:
             while True:
-                data = await tunnel.recv()
+                data = await tunnel.recv()  # server 发 close_notify 时抛 EOFError
                 local_writer.write(data)
                 if local_writer.transport.get_write_buffer_size() > get_drain_threshold():
                     await local_writer.drain()
         except Exception as e:
             logger.debug("relay %s tunnel→local ended: %s: %s",
                          label or "?", type(e).__name__, e)
-        finally:
-            await safe_close(local_writer)
+        # 本地侧发 FIN 让 SOCKS5 客户端尽快 EOF；不 close（外层统一）
+        try:
+            if local_writer.can_write_eof():
+                local_writer.write_eof()
+        except Exception:
+            pass
 
     task_a = asyncio.create_task(local_to_tunnel())
     task_b = asyncio.create_task(tunnel_to_local())
     try:
-        await asyncio.wait([task_a, task_b], return_when=asyncio.FIRST_COMPLETED)
+        await wait_both_with_grace(task_a, task_b)
     finally:
-        for t in (task_a, task_b):
-            if not t.done():
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
+        await safe_close(server_writer)
+        await safe_close(local_writer)
 
 
 # ── 工厂 ──────────────────────────────────────────────────────────────────────

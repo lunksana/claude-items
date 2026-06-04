@@ -51,19 +51,21 @@ _MAX_IDLE_SEC  = 120    # 池中空闲连接最长存活时间（超过后丢弃
 
 # 反指纹 jitter：避免"启动时 N 条 TLS 1.3 在 1s 内同 IP 出"这种代理特征
 #
-# 阶梯延迟：第 i 条建连接的延迟 = i × _STAGGER_STEP ± _STAGGER_JITTER
-#   第 0 条立即；后续条按"步长 ± 小抖动"排出去，**真阶梯**而不是 0~0.5 内随机
-#   10 条池总耗时 ≈ 9 × 0.30 = 2.7s ±0.5s（加 build 本身耗时 ~1-2s 的尾部并发）
-_STAGGER_STEP   = 0.30      # 相邻条建连接的"目标间隔"
-_STAGGER_JITTER = 0.08      # 每条相对其目标位置的 ± 抖动（防整齐节奏）
+# 阶梯延迟：相邻两条 build 的真实启动时间间隔 ≥ _STAGGER_STEP ± _STAGGER_JITTER。
+#   该约束由 **池级游标 `_next_build_at`** 维护、**跨 _schedule_refills 调用累计**。
+#
+# ── 老实现的 bug（0.4.5 之前）─────────────────────────────────────────────
+# 老 `_staggered_delay(i)` 每次 _schedule_refills 都从 i=0 重新算阶梯。如果 N
+# 个 SOCKS5 请求几乎同时打过来、各自调一次 _schedule_refills 且都看到 deficit=1，
+# 每个调用都把唯一那条 build 排到 delay=0 立刻发 —— N 条 SYN 同秒一齐出去。
+# 抓包（0604.pcap）显示 19% 的 SYN 相邻间隔 <50ms，属代理批量建连指纹。
+#
+# 新实现把游标做成池属性 `_next_build_at`（monotonic time），每次新排一条
+# build 把它推进 `step ± jitter`，跨调用累计 → 全局任意两条 build 的发起
+# 时间间隔 >= 0.22-0.38s。
+_STAGGER_STEP   = 0.30
+_STAGGER_JITTER = 0.08
 _IDLE_JITTER    = 30.0      # _MAX_IDLE_SEC ± 该值随机化每条 tunnel 的实际寿命
-
-
-def _staggered_delay(i: int) -> float:
-    """第 i 条 build 的延迟（从 warmup/refill 触发时刻算起）"""
-    if i == 0:
-        return 0.0
-    return i * _STAGGER_STEP + random.uniform(-_STAGGER_JITTER, _STAGGER_JITTER)
 
 
 async def _read_server_handshake(reader: asyncio.StreamReader) -> None:
@@ -184,18 +186,40 @@ class BrutalPool:
         self._building  = 0
         self._on_latency = on_latency
         self._on_failure = on_failure
+        # 池级累计阶梯起点（monotonic time），跨 _schedule_refills 调用累计。
+        # 见模块顶部注释；用法：_reserve_build_slot() 取一个 delay 并把游标推进
+        self._next_build_at = 0.0
+
+    def _reserve_build_slot(self) -> float:
+        """
+        从池级游标 _next_build_at 预定一个 build 时间槽，返回此槽相对 now 的 delay。
+
+        - 若游标在过去：从 now 开始新一段阶梯（避免长时间空闲后第一条等过去时间）
+        - 否则：延续之前的累计阶梯
+        - 每次预定后把游标推进 _STAGGER_STEP ± _STAGGER_JITTER
+
+        跨 _schedule_refills 调用累计 → 全局相邻 build 真实间隔 ≥ ~0.22s。
+        """
+        now = time.monotonic()
+        if self._next_build_at < now:
+            self._next_build_at = now
+        delay = self._next_build_at - now
+        self._next_build_at += _STAGGER_STEP + random.uniform(-_STAGGER_JITTER, _STAGGER_JITTER)
+        return delay
 
     async def warmup(self) -> int:
         """
-        启动时阶梯预建所有连接。**真阶梯**：第 i 条的 sleep 时间是
-        i × 0.30s ± 0.08s（详见 _staggered_delay），不是各自独立的 0~0.5s 随机。
+        启动时阶梯预建所有连接。**真阶梯**：相邻 build 真实启动时间间隔
+        ≥ ~0.22s（_STAGGER_STEP - _STAGGER_JITTER），由池级游标维护。
 
-        10 条池：第 0 条立即、第 9 条 ~2.7s 后才开始 build，相邻之间稳定 ~300ms。
-        总耗时上界 ≈ pool_size × 0.30s + 单条 build 时间。
+        10 条池：第 0 条立即、第 9 条 ~2.7s 后才开始 build。
+        总耗时上界 ≈ pool_size × _STAGGER_STEP + 单条 build 时间。
         """
+        # warmup 是池生命期起点，游标从 now 重新计起（避免上次会话残留状态）
+        self._next_build_at = time.monotonic()
         tasks = [
-            self._build_and_enqueue(delay=_staggered_delay(i))
-            for i in range(self._pool_size)
+            self._build_and_enqueue(delay=self._reserve_build_slot())
+            for _ in range(self._pool_size)
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         ok = sum(1 for r in results if r is True)
@@ -258,15 +282,16 @@ class BrutalPool:
 
     def _schedule_refills(self) -> None:
         """
-        计算缺口并创建对应数量的补充任务，**真阶梯** 间隔同 warmup
-        （首条立即；之后 i × 0.30s ± 0.08s）。
+        计算缺口并按池级游标排队补充 build。
 
-        避免"池空时一次性 N 条新 ClientHello 同 IP 同秒"这种指纹特征：
-        之前每条独立随机 0~0.5s 实际仍在 0.5s 窗口内集中爆发，没真正阶梯化。
+        关键差异（vs 0.4.5 之前）：delay 来自 **池级游标 `_next_build_at`**，
+        跨 _schedule_refills 调用累计，所以 N 个并发 acquire 各自调一次本方法
+        各排一条 build 时，N 条 build 仍然彼此间隔 _STAGGER_STEP，**而不是**
+        每条都从 delay=0 立刻发 → N 条 SYN 同秒一齐出去。
         """
         deficit = self._pool_size - self._queue.qsize() - self._building
-        for i in range(max(0, deficit)):
-            asyncio.create_task(self._build_and_enqueue(delay=_staggered_delay(i)))
+        for _ in range(max(0, deficit)):
+            asyncio.create_task(self._build_and_enqueue(delay=self._reserve_build_slot()))
 
     async def _build_and_enqueue(self, delay: float = 0.0) -> bool:
         """
