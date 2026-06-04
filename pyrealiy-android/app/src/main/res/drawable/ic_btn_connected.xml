@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 已连接状态：蓝色电源按钮 + 实心盾形背景 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 发光底圆 -->
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="#1A0969DA"/>
+            <size android:width="72dp" android:height="72dp"/>
+        </shape>
+    </item>
+
+    <!-- 电源图标 (Material power_settings_new, 蓝色) -->
+    <item
+        android:left="12dp"
+        android:top="12dp"
+        android:right="12dp"
+        android:bottom="12dp">
+        <vector
+            android:width="48dp"
+            android:height="48dp"
+            android:viewportWidth="24"
+            android:viewportHeight="24">
+            <!-- 竖线 -->
+            <path
+                android:fillColor="#0969DA"
+                android:pathData="M13,3H11V13H13V3Z"/>
+            <!-- 圆弧 -->
+            <path
+                android:fillColor="#0969DA"
+                android:pathData="M17.83,5.17L16.41,6.59C17.99,7.86 19,9.81 19,12C19,15.87 15.87,19 12,19
+                                  C8.13,19 5,15.87 5,12C5,9.81 6.01,7.86 7.58,6.58L6.17,5.17
+                                  C4.23,6.82 3,9.26 3,12C3,16.97 7.03,21 12,21C16.97,21 21,16.97 21,12
+                                  C21,9.26 19.77,6.82 17.83,5.17Z"/>
+        </vector>
+    </item>
+</layer-list>

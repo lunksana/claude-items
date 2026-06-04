@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- VpnService 权限（系统自动授予，用户首次需确认） -->
+
+    <application
+        android:name=".PyRealityApp"
+        android:label="PyReality"
+        android:icon="@drawable/ic_launcher"
+        android:roundIcon="@drawable/ic_launcher_round"
+        android:theme="@style/Theme.PyReality"
+        android:allowBackup="true">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ui.ProfileActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <activity
+            android:name=".ui.LogActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <!--
+            VpnService 声明：
+            - android.permission.BIND_VPN_SERVICE 是系统保护权限，
+              使本 Service 只能被系统 VPN 框架绑定。
+            - foregroundServiceType="specialUse" (API 34+) 需要在 Play 审核时
+              说明用途；独立分发无此限制。
+        -->
+        <service
+            android:name=".service.ProxyVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="VPN proxy" />
+        </service>
+
+    </application>
+</manifest>

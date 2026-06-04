@@ -1,0 +1,25 @@
+[package]
+name = "pyrealiy-ffi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# 必须指定为 cdylib (C dynamic library)，这样 Cargo 才会为 Android 编译出 .so 文件
+crate-type = ["cdylib"]
+
+[dependencies]
+# JNI 绑定，让我们能在 Rust 里直接跟 Kotlin 通信
+jni = "0.21"
+
+# smoltcp: 就是我们要从 meow 偷师的核心！一个纯粹的、无 OS 依赖的用户态 TCP 栈
+smoltcp = { version = "0.11", default-features = false, features = ["std", "log", "medium-ip", "proto-ipv4", "socket-tcp"] }
+
+# 封装了 smoltcp 的高层 tokio 接口，大幅简化我们写轮询循环的负担
+netstack-smoltcp = "0.2"
+
+# Android 日志支持，让 Rust 的 print 能够显示在 Android Studio 的 Logcat 里
+log = "0.4"
+android_logger = "0.13"
+
+# 异步运行时，用来处理网络非阻塞读取
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "fs"] }

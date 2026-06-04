@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    自适应图标前景层（108×108dp，安全区 72×72dp 居中于 18~90）
+    设计：白色盾形 + 内部网络节点
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 外盾（白色填充） -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,18
+                          L26,30
+                          L26,53
+                          C26,69.5 38.5,82 54,87
+                          C69.5,82 82,69.5 82,53
+                          L82,30
+                          Z"/>
+
+    <!-- 内盾镂空（主色蓝） -->
+    <path
+        android:fillColor="#0969DA"
+        android:pathData="M54,27
+                          L33,37
+                          L33,53
+                          C33,65.5 42,75.5 54,80
+                          C66,75.5 75,65.5 75,53
+                          L75,37
+                          Z"/>
+
+    <!-- 网络节点：中心点 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,47 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0"/>
+
+    <!-- 网络节点：左下点 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M42,61 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0"/>
+
+    <!-- 网络节点：右下点 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M66,61 m-3,0 a3,3 0 1,0 6,0 a3,3 0 1,0 -6,0"/>
+
+    <!-- 连线：中心 → 左下 -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2"
+        android:fillColor="#00000000"
+        android:pathData="M54,51 L42,58"/>
+
+    <!-- 连线：中心 → 右下 -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2"
+        android:fillColor="#00000000"
+        android:pathData="M54,51 L66,58"/>
+
+</vector>

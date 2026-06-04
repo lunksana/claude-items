@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PyReality</string>
+
+    <!-- MainActivity -->
+    <string name="status_connected">已连接</string>
+    <string name="status_disconnected">未连接</string>
+    <string name="status_no_profile">未配置</string>
+    <string name="action_add">添加</string>
+    <string name="action_edit">编辑</string>
+    <string name="toast_no_profile">请先添加服务器配置</string>
+
+    <!-- ProfileActivity -->
+    <string name="title_new_profile">新建服务器</string>
+    <string name="title_edit_profile">编辑服务器</string>
+    <string name="hint_name">备注名称</string>
+    <string name="hint_host">服务器地址 *</string>
+    <string name="hint_port">端口（默认 443）</string>
+    <string name="hint_password">密码 *</string>
+    <string name="hint_sni">SNI 域名</string>
+    <string name="hint_remote_dns">境外 DNS（经隧道）</string>
+    <string name="hint_local_dns">国内 DNS（直连）</string>
+    <string name="label_section_server">服务器</string>
+    <string name="label_section_tls">TLS 伪装</string>
+    <string name="label_section_dns">DNS</string>
+    <string name="label_section_routing">路由</string>
+    <string name="label_bypass_cn">国内流量直连（分流模式）</string>
+    <string name="action_save">保存</string>
+    <string name="action_delete">删除</string>
+    <string name="toast_saved">已保存</string>
+    <string name="toast_fields_required">服务器地址和密码不能为空</string>
+    <string name="dialog_delete_title">删除配置</string>
+    <string name="dialog_delete_message">确定删除此服务器配置？</string>
+    <string name="dialog_confirm">删除</string>
+    <string name="dialog_cancel">取消</string>
+
+    <!-- Notification -->
+    <string name="notif_channel_name">PyReality VPN</string>
+    <string name="notif_title">PyReality</string>
+    <string name="notif_action_disconnect">断开</string>
+</resources>

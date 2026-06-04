@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 主开关按钮背景：白色圆形 + 水波纹 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="#330969DA">
+
+    <!-- 水波纹裁剪遮罩（oval 保持圆形水波） -->
+    <item android:id="@android:id/mask">
+        <shape android:shape="oval">
+            <solid android:color="#FFFFFFFF"/>
+        </shape>
+    </item>
+
+    <!-- 白色圆形底面 + 细边框 -->
+    <item>
+        <shape android:shape="oval">
+            <solid android:color="#FFFFFF"/>
+            <stroke
+                android:width="1.5dp"
+                android:color="#D0D7DE"/>
+        </shape>
+    </item>
+
+</ripple>

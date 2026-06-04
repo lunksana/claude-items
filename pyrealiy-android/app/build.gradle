@@ -1,0 +1,54 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.pyrealiy.proxy'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.pyrealiy.proxy"
+        minSdk 28           // Android 9.0+：JCA ChaCha20-Poly1305 在 API 28 引入
+        targetSdk 35
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    // ── 核心 ── 无第三方网络/加密库，只用系统 API
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+
+    // ── UI ──
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.7'
+}
+
+// ── 自动编译 Rust 原生代码 ──
+// 这段脚本会在 Gradle 编译 Android APK 之前，先自动执行 Cargo ndk 进行 Rust 交叉编译
+task buildRust(type: Exec) {
+    workingDir 'src/main/rust'
+    // 请确保构建环境中已经执行过：cargo install cargo-ndk
+    // 并且配置了目标：rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+    commandLine 'cargo', 'ndk', '-t', 'arm64-v8a', '-t', 'x86_64', '-o', '../jniLibs', 'build', '--release'
+}
+
+// 确保在打包前运行 Rust 编译
+preBuild.dependsOn(buildRust)
