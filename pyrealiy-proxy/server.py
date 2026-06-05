@@ -232,11 +232,14 @@ async def handle_client(
         task_a = asyncio.create_task(tunnel_to_target())
         task_b = asyncio.create_task(target_to_tunnel())
         try:
-            # 优雅关：等一方向结束后给另一方向最多 2s 自然退出（避免立刻 cancel
-            # 留下未读字节，导致后续 close 触发 RST 指纹）
+            # 优雅关：等一方向结束后给另一方向最多 2s 自然退出
             await wait_both_with_grace(task_a, task_b)
         finally:
-            await safe_close(target_writer)
+            # close 前 drain 各接收缓冲（防 close → RST，详见 utils.safe_close）：
+            #   tunnel 底层 = 客户端→服务端的加密 record（含 close_notify 后可能跟着的字节）
+            #   target_reader = target 在 grace 期间继续推过来的下行字节
+            await tunnel.drain_recv(0.5)
+            await safe_close(target_writer, target_reader)
             await safe_close(client_writer)
             store.unregister(conn)
 

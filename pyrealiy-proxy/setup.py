@@ -411,6 +411,8 @@ def configure_server(brutal_available: bool) -> None:
             INFO("面板仅本机可访问，可通过 SSH 隧道在本地浏览器查看：")
             print(f"    {_c('36', f'ssh -L {admin_port}:127.0.0.1:{admin_port} user@your-vps')}")
 
+    log_cfg = configure_log_levels("server")
+
     cfg = {
         "listen_host":    "0.0.0.0",
         "listen_port":    listen_port,
@@ -419,6 +421,7 @@ def configure_server(brutal_available: bool) -> None:
         "camouflage_port": 443,
         "brutal_rate_bps": rate_bps,
         **admin_cfg,
+        **log_cfg,
     }
 
     # ── WireGuard egress（典型用例：Cloudflare WARP）────────────────────────────
@@ -1091,6 +1094,82 @@ def configure_tproxy(server_ip: str, cfg: dict) -> None:
             ERR("应用失败，请手动执行脚本")
 
 
+# ── 调试日志（log_levels）─────────────────────────────────────────────────────
+
+# 客户端 / 服务端共用模块（按用途分组）
+_LOG_MODULES_CLIENT = [
+    ("outbound",  "客户端中继 leg 异常 + group 选路切换日志"),
+    ("conn_pool", "连接池 build 失败原因（TLS Alert / EOF / 超时具体描述）"),
+    ("router",    "每条规则展开 + 命中详情（GEOSITE/GEOIP 内部子条目）"),
+    ("dns",       "每条 DNS 查询的路由决策与出口选择"),
+    ("group",     "urltest 候选评分、节点切换、unhealthy 标记"),
+    ("healthcheck", "节点延迟主动 probe 触发时刻"),
+    ("utils",     "DirectOutbound 直连路径 leg 异常"),
+    ("client",    "客户端 dispatch 日志（要配合 access_log=true）"),
+    ("asyncio",   "asyncio 内部（极吵，仅深度排查时开）"),
+]
+
+_LOG_MODULES_SERVER = [
+    ("server",       "服务端中继 leg 异常（含 conn.id + 目标 host:port）"),
+    ("camouflage",   "服务端伪装路径决策（认证通过 / 探测重放）"),
+    ("handshake_cache", "TLS 1.3 握手缓存刷新 / 失败"),
+    ("conn_pool",    "（若启用 outbound 池）"),
+    ("router",       "egress 规则匹配（若配 egress_rules）"),
+    ("egress",       "WARP 等 SO_MARK 出口选择"),
+    ("admin",        "Web 管理面板请求（admin 模块当前不用 logger）"),
+    ("asyncio",      "asyncio 内部（极吵，仅深度排查时开）"),
+]
+
+
+def configure_log_levels(side: str) -> dict:
+    """
+    交互式生成 cfg["log_levels"] 子字典。
+
+    side ∈ {"client", "server"} —— 控制建议哪些模块。
+
+    返回值结构：{"log_levels": {...}} 或 {}（用户跳过则不写）。
+    """
+    print()
+    if not ask_yn("是否启用按模块调试日志（默认全部 INFO）？", default=False):
+        return {}
+
+    modules = _LOG_MODULES_CLIENT if side == "client" else _LOG_MODULES_SERVER
+
+    INFO("可开 DEBUG 的模块：")
+    for i, (name, desc) in enumerate(modules, 1):
+        print(f"    {_c('33', f'{i:>2}.')} {_c('36', f'{name:<14}')} {desc}")
+
+    raw = ask(
+        "选择要开 DEBUG 的模块编号（空格或逗号分隔；留空跳过）",
+        ""
+    ).strip()
+    if not raw:
+        INFO("跳过 log_levels 配置")
+        return {}
+
+    log_levels: dict = {}
+    for tok in raw.replace(",", " ").split():
+        try:
+            idx = int(tok)
+            if 1 <= idx <= len(modules):
+                log_levels[modules[idx - 1][0]] = "DEBUG"
+            else:
+                WARN(f"编号 {idx} 超出范围，已跳过")
+        except ValueError:
+            WARN(f"忽略无效输入 {tok!r}")
+
+    if not log_levels:
+        return {}
+
+    # 高级：是否也调整 default（root logger 级别）
+    if ask_yn("是否同时把 root logger 提到 WARNING（屏蔽其他模块 INFO 噪音）？",
+              default=False):
+        log_levels["default"] = "WARNING"
+
+    OK(f"log_levels 已设：{', '.join(f'{k}={v}' for k, v in log_levels.items())}")
+    return {"log_levels": log_levels}
+
+
 def configure_client() -> None:
     TITLE("客户端配置")
 
@@ -1118,6 +1197,7 @@ def configure_client() -> None:
         dns_cfg = {"dns_listen_port": 0}
 
     rules_cfg = configure_rules()
+    log_cfg   = configure_log_levels("client")
 
     cfg = {
         "socks5_host":    "0.0.0.0",
@@ -1127,9 +1207,10 @@ def configure_client() -> None:
         "password":       password,
         "camouflage_host": camouflage,
         "brutal_rate_bps": 0,
-        "brutal_pool_size": 10,
+        "brutal_pool_size": 20,
         **dns_cfg,
         **rules_cfg,
+        **log_cfg,
     }
 
     configure_tproxy(server_host, cfg)

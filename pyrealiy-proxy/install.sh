@@ -30,11 +30,14 @@ ask_yn() {        # ask_yn "提示" [y|n]  → 0=yes 1=no
     [[ "$val" =~ ^[Yy] ]]
 }
 
-# ── 工作目录 ───────────────────────────────────────────────────────────────────
+# ── 工作目录 + 版本号 ──────────────────────────────────────────────────────────
 WORK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "${WORK_DIR}/server.py" && -f "${WORK_DIR}/client.py" ]] \
     || err "请在 PyReality 项目目录中运行此脚本"
 cd "$WORK_DIR"
+
+# 从 core/version.py 读取版本号（单一来源；和 client/server.py 启动 banner 一致）
+PYREALIY_VERSION="$(grep -oP '__version__\s*=\s*"\K[^"]+' core/version.py 2>/dev/null || echo "unknown")"
 
 # ── 系统检测 ───────────────────────────────────────────────────────────────────
 PKG_MGR=""
@@ -228,43 +231,59 @@ configure_client() {
            _DNSPORT="$dns_port"  _CNDNS="$cn_dns" _RDNS="$remote_dns" \
            _TPROXY="$tproxy_port"
     "$PYTHON" - << 'PYEOF'
+# 生成 sing-box 风格的客户端配置（0.4.0 起的新 schema）。
+# 单节点配置等价于老顶层 server_host 写法，但用 outbounds + route 结构便于以后
+# 扩展为多节点（urltest / fallback 组）。详见 README 与 config_client.json 示例。
 import json, os
 cfg = {
     "socks5_host":      "0.0.0.0",
     "socks5_port":      int(os.environ["_S5PORT"]),
-    "server_host":      os.environ["_SHOST"],
-    "server_port":      int(os.environ["_SPORT"]),
-    "password":         os.environ["_PWD"],
-    "camouflage_host":  os.environ["_CAM"],
-    "brutal_rate_bps":  0,
-    "brutal_pool_size": 10,
     "tproxy_port":      int(os.environ["_TPROXY"]),
+
     "dns_listen_host":  "127.0.0.1",
     "dns_listen_port":  int(os.environ["_DNSPORT"]),
     "cn_dns":           os.environ["_CNDNS"],
     "remote_dns":       os.environ["_RDNS"],
+
     "geosite_dir":         ".geosite",
     "geosite_update_days": 7,
     "geosite_sources": [{"name": "loyalsoldier", "url": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"}],
     "geoip_sources":   [{"name": "loyalsoldier", "url": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"}],
-    "rules": [
-        "GEOSITE,loyalsoldier:category-ads-all,REJECT",
-        "GEOSITE,loyalsoldier:private,DIRECT",
-        "GEOIP,loyalsoldier:private,DIRECT",
-        "GEOSITE,loyalsoldier:cn,DIRECT",
-        "GEOSITE,loyalsoldier:apple-cn,DIRECT",
-        "GEOSITE,loyalsoldier:google-cn,DIRECT",
-        "GEOIP,loyalsoldier:cn,DIRECT",
-        "IP-CIDR,127.0.0.0/8,DIRECT",
-        "IP-CIDR,10.0.0.0/8,DIRECT",
-        "IP-CIDR,172.16.0.0/12,DIRECT",
-        "IP-CIDR,192.168.0.0/16,DIRECT",
-        "FINAL,PROXY",
+
+    "outbounds": [
+        {
+            "type":             "pyrealiy",
+            "tag":              "proxy",
+            "server":           os.environ["_SHOST"],
+            "server_port":      int(os.environ["_SPORT"]),
+            "password":         os.environ["_PWD"],
+            "sni":              os.environ["_CAM"],
+            "brutal_rate_bps":  0,
+            "brutal_pool_size": 20,   # 0.4.6 起从 10 调高，更耐突发（详见 README 池突发分析）
+        }
     ],
+
+    "route": {
+        "rules": [
+            {"rule_set": ["loyalsoldier:category-ads-all"], "outbound": "block"},
+
+            {"rule_set": ["loyalsoldier:private"],          "outbound": "direct"},
+            {"geoip":    ["loyalsoldier:private"],          "outbound": "direct"},
+
+            {"rule_set": ["loyalsoldier:cn"],               "outbound": "direct"},
+            {"rule_set": ["loyalsoldier:apple-cn"],         "outbound": "direct"},
+            {"rule_set": ["loyalsoldier:google-cn"],        "outbound": "direct"},
+            {"geoip":    ["loyalsoldier:cn"],               "outbound": "direct"},
+
+            {"ip_cidr": ["127.0.0.0/8", "10.0.0.0/8",
+                         "172.16.0.0/12", "192.168.0.0/16"], "outbound": "direct"},
+        ],
+        "final": "proxy"
+    }
 }
 with open("config_client.json", "w") as f:
     json.dump(cfg, f, indent=4)
-print("    config_client.json 已生成")
+print("    config_client.json 已生成（sing-box 风格新格式）")
 PYEOF
     ok "客户端配置完成"
 }
@@ -322,7 +341,7 @@ try_install_service() {
 
 # ── 主流程 ─────────────────────────────────────────────────────────────────────
 main() {
-    title "PyReality 一键部署"
+    title "PyReality 一键部署  v${PYREALIY_VERSION}"
     detect_os
     check_python
     install_pip_deps

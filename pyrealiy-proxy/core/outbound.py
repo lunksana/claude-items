@@ -248,8 +248,11 @@ async def _bidi_tunnel_relay(local_reader, local_writer, tunnel, server_writer, 
     try:
         await wait_both_with_grace(task_a, task_b)
     finally:
+        # close 前 drain：tunnel 侧读光底层加密字节（绕过 TLS 解码），本地侧
+        # drain 应用层字节。两边接收缓冲为空时 close 不会触发 RST。
+        await tunnel.drain_recv(0.5)
         await safe_close(server_writer)
-        await safe_close(local_writer)
+        await safe_close(local_writer, local_reader)
 
 
 # ── 工厂 ──────────────────────────────────────────────────────────────────────

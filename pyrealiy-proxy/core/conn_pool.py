@@ -249,6 +249,12 @@ class BrutalPool:
                 self._schedule_refills()
         except asyncio.TimeoutError:
             logger.info("Pool exhausted, building direct connection")
+            # 即便是 exhausted fallback 也走池级游标：避免多个并发 fallback
+            # 同时发 SYN（0605.pcap 残余 8.5% 的同秒爆发就来自这里）。
+            # 池空时游标多在过去 → 第 1 个 delay=0 立即发，第 2 个 ~300ms 后。
+            delay = self._reserve_build_slot()
+            if delay > 0:
+                await asyncio.sleep(delay)
             ready, latency_ms = await self._build_one()
             if ready is not None and latency_ms is not None and self._on_latency:
                 self._on_latency(latency_ms)

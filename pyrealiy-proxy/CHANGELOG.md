@@ -17,6 +17,93 @@
 
 ---
 
+## [0.4.7] - 2026-06-06
+
+### 新增
+
+- **`setup.py` 加入 `log_levels` 交互式询问**：客户端 / 服务端配置流程
+  最后会问"是否启用按模块调试日志"。选 yes 则展示带说明的模块清单，按
+  编号多选，自动生成 `cfg["log_levels"]` 写入配置：
+  - 客户端可选 9 个模块（outbound / conn_pool / router / dns / group /
+    healthcheck / utils / client / asyncio）
+  - 服务端可选 8 个模块（server / camouflage / handshake_cache /
+    conn_pool / router / egress / admin / asyncio）
+  - 进阶可同时把 root logger 提到 WARNING 屏蔽其他模块 INFO 噪音
+  - 抽出 `configure_log_levels(side)` helper，两边共享
+- **`install.sh` banner 显示版本号**：从 `core/version.py` 读 `__version__`，
+  与 client/server 启动 banner 一致（单一来源）
+
+### 修改
+
+- **`install.sh` 客户端配置切换到 sing-box 风格新 schema**：从老的顶层
+  `server_host` / CSV `rules` 改为 `outbounds` 数组 + `route.rules` 对象数
+  组。单节点配置等价于老格式，但**便于以后扩展为多节点 + urltest 组**
+  （详见 README"多节点与自适应选路"章节）。老配置文件仍由 `build_outbounds`
+  的兼容路径支持，无需迁移
+- **客户端默认 `brutal_pool_size` 从 10 调高到 20**（`install.sh` + `setup.py`）：
+  0605.pcap 池突发分析显示 10 的池在 8-9 并发突发时会瞬间打空、触发 5s
+  超时 fallback 风暴。20 能扛住典型家用场景的瞬时高并发，从源头降低
+  "Pool exhausted" 频率与 SYN 同秒爆发的几率
+
+### 内部
+
+- `setup.py` 模块清单在两个常量里维护（`_LOG_MODULES_CLIENT` /
+  `_LOG_MODULES_SERVER`），新增 / 删除模块时只需改这两个 list
+
+---
+
+## [0.4.6] - 2026-06-05
+
+### 安全 / 反指纹
+
+0.4.5 的修复消除了 87% 的客户端 RST 与一半的 SYN 同秒爆发，但 0605.pcap
+对照分析揭示了**两个残余特征**，本版闭合。
+
+- **修：服务端在 FIN 后 ~2s 发 RST（占服务端连接 23%）**
+  - 根因：0.4.5 的 `safe_close` 加了 `write_eof()` 半关写端发 FIN，但
+    **Linux close() 看到接收缓冲有未读数据仍 RST**——`write_eof` 解决不了
+    接收侧。`wait_both_with_grace` 2s 超时 cancel `target_to_tunnel` 后，
+    `client_reader` 的 OS 接收缓冲里**还有客户端继续推过来的加密字节**
+    （前条 record 没被 tunnel.recv 拿走 / 客户端后续小帧），close → RST
+  - 抓包证据：0605.pcap 52 个服务端 RST，距最后一条 payload **中位 1.98s**，
+    精确命中 `_DRAIN_AFTER_HALF = 2.0` 的超时点
+  - 修法（三处协同）：
+    1. **`safe_close(writer, reader=None)`** 新增可选 `reader` 参数：
+       在 `close` 之前 best-effort 读光接收缓冲（最多 0.5s 硬上限）。close
+       看到接收缓冲为空 → 发 FIN 不发 RST
+    2. **`EncryptedTunnel.drain_recv(max_seconds)`** 新增方法：绕过 TLS
+       解码，直接从底层 `_reader` 读光 OS TCP 接收缓冲（grace 超时后对端
+       可能还在推加密 record，我们不需要解密、只需消费）
+    3. 三个中继的 finally：close 前先 `await tunnel.drain_recv(0.5)`
+       （加密侧）+ `safe_close(writer, reader)` 传入 reader 让其 drain
+       应用层接收缓冲
+  - 影响文件：`core/utils.py:safe_close` 签名扩展 / `core/tunnel.py` 新增
+    方法 / `core/outbound.py:_bidi_tunnel_relay` finally / `core/utils.py:relay`
+    finally / `server.py:handle_client` finally
+
+- **修：连接池 acquire() 5s 超时 fallback 绕过 staircase**
+  - 根因：`BrutalPool.acquire()` 等不到队列 5s 后会落到"直接 build 一条"
+    fallback。这条路径**不调 `_reserve_build_slot`**，多个并发 acquire 同时
+    走到 fallback 时各自立刻发 SYN
+  - 抓包证据：0605.pcap 残余 18 个 <50ms 同秒 SYN（8.5%），端口号连号
+    集中在两片，命中 fallback 风暴模式
+  - 修法：fallback 分支也走 `_reserve_build_slot`——延续池级游标累计。池
+    空时游标多在过去 → 第 1 个 delay=0 立即发、第 2 个 ~300ms 后。**对单
+    并发 acquire 无延迟代价**，多并发场景下错开
+  - 影响文件：`core/conn_pool.py:BrutalPool.acquire` 的 `except TimeoutError`
+    分支
+
+### 迁移
+
+- 协议线上字节流变化：服务端关连接时不再出现"FIN 后 ~2s 发 RST"模式，SYN
+  时间序列彻底落到 staircase（含 acquire 超时分支也阶梯化）
+- API 变化：`safe_close(writer)` → `safe_close(writer, reader=None)`，
+  reader 可选；老调用方式仍兼容
+- 新增 `EncryptedTunnel.drain_recv(max_seconds=0.5)` 公开方法，供调用方在
+  关 tunnel 之前 drain 接收缓冲
+
+---
+
 ## [0.4.5] - 2026-06-04
 
 ### 安全 / 反指纹
@@ -289,7 +376,9 @@
 
 更早的历史在 git log 里；从 `0.3.0` 起按本规范打 tag。
 
-[未发布]: https://github.com/<你的仓库>/compare/v0.4.5...HEAD
+[未发布]: https://github.com/<你的仓库>/compare/v0.4.7...HEAD
+[0.4.7]: https://github.com/<你的仓库>/releases/tag/v0.4.7
+[0.4.6]: https://github.com/<你的仓库>/releases/tag/v0.4.6
 [0.4.5]: https://github.com/<你的仓库>/releases/tag/v0.4.5
 [0.4.4]: https://github.com/<你的仓库>/releases/tag/v0.4.4
 [0.4.3]: https://github.com/<你的仓库>/releases/tag/v0.4.3

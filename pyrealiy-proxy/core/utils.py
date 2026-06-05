@@ -9,6 +9,8 @@ import socket
 
 import struct
 
+import time
+
 import asyncio
 
 logging.basicConfig(
@@ -156,24 +158,30 @@ def apply_log_levels(cfg: dict) -> None:
         _logger.info("Applied log_levels: %s", ", ".join(applied))
 
 
-async def safe_close(writer: asyncio.StreamWriter | None) -> None:
+async def safe_close(writer: asyncio.StreamWriter | None,
+                     reader: asyncio.StreamReader | None = None) -> None:
     """
     优雅静默关闭，**避免触发 RST**。
 
-    ── 为什么不能直接 close() ────────────────────────────────────────────────
-    Linux TCP 规约：close() 时若 OS 接收缓冲区仍有未消费数据，会发 RST 而非
-    FIN。旧版直接 writer.close() 在双向中继场景里是常态—— 一方向 EOF 时，
-    另一方向往往刚收到几条 record 还没读，buffer 里有数据 → close → RST。
+    ── 为什么 0.4.5 的修复还不够 ───────────────────────────────────────────
+    Linux TCP 规约：**close() 时若 OS 接收缓冲区仍有未消费数据，会发 RST
+    而非 FIN**。`write_eof()` 只半关写端、不解决接收侧。
 
-    抓包对比（0604.pcap）显示真实 HTTPS 0 个 RST、我们的协议 87% 客户端在
-    FIN 后~78ms 发 RST，是显眼的 GFW 指纹。
+    0.4.5 客户端 RST 224→9 是因为客户端方向的 cancel 路径下，对端协程被
+    cancel 时往往已读完了所有 record。但**服务端**方向：target 在不停下行、
+    `target_to_tunnel` 被 grace 超时 cancel 时，`client_reader` 的 OS 接收
+    缓冲里**还有 client 没被消费的字节**（前个 record 没被 tunnel.recv 拿走、
+    或 client 后续发的 close_notify / 数据帧），close → RST 给 client。
 
-    ── 四步优雅关 ──────────────────────────────────────────────────────────
-      1. write_eof() —— 半关写端发 FIN，不动接收侧；OS 不会因未读数据 RST
-      2. drain       —— 把我们自己的发送缓冲冲完
-      3. close       —— 释放 socket（此时接收侧通常已被外层 relay 排空）
-      4. wait_closed —— 等 FIN-ACK / 立即释放 fd
-    每步独立 try/except 防异常打断后续清理。
+    抓包（0605.pcap）证实：52 个服务端 RST 距最后一条 payload 中位 1.98s，
+    精确命中 _DRAIN_AFTER_HALF = 2.0 的超时点。
+
+    ── 五步优雅关 ──────────────────────────────────────────────────────────
+      1. write_eof   —— 半关写端发 FIN
+      2. drain       —— 冲完我们自己的发送缓冲
+      3. drain reader（可选，关键）—— **真正读光接收缓冲**，避免 close → RST
+      4. close       —— 释放 socket
+      5. wait_closed —— 等内核回收
     """
     if writer is None:
         return
@@ -193,12 +201,26 @@ async def safe_close(writer: asyncio.StreamWriter | None) -> None:
         await asyncio.wait_for(writer.drain(), timeout=_CLOSE_TIMEOUT)
     except Exception:
         pass
-    # 3) 关 socket
+    # 3) drain 接收缓冲（若提供 reader）—— 最多 0.5s，best-effort
+    #    把对端在 grace 期间继续推过来的字节读光，让 close 不带未读数据
+    if reader is not None:
+        try:
+            deadline = time.monotonic() + 0.5
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                chunk = await asyncio.wait_for(reader.read(65536), timeout=remaining)
+                if not chunk:
+                    break  # EOF 自然到达
+        except Exception:
+            pass
+    # 4) 关 socket
     try:
         writer.close()
     except Exception:
         return
-    # 4) 等内核回收
+    # 5) 等内核回收
     try:
         await asyncio.wait_for(writer.wait_closed(), timeout=_CLOSE_TIMEOUT)
     except Exception:
@@ -273,5 +295,6 @@ async def relay(reader_a: asyncio.StreamReader, writer_b: asyncio.StreamWriter,
     try:
         await wait_both_with_grace(task_a, task_b)
     finally:
-        await safe_close(writer_a)
-        await safe_close(writer_b)
+        # safe_close 带 reader：在 close 之前 drain 接收缓冲，避免 close → RST
+        await safe_close(writer_a, reader_a)
+        await safe_close(writer_b, reader_b)

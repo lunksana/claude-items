@@ -175,6 +175,30 @@ class EncryptedTunnel:
             raise EOFError("peer sent TLS alert (close_notify)")
         raise ValueError(f"unknown TLS inner content type {inner_type:#x}")
 
+    async def drain_recv(self, max_seconds: float = 0.5) -> None:
+        """
+        在 close 之前 best-effort 读光底层 reader 的接收缓冲，避免 close → RST。
+
+        不走 recv()/AEAD 解密路径：对端在 grace 超时被 cancel 的场景下，可能
+        还在推送加密 record，我们不需要解密、只需要从 OS TCP 接收缓冲拿走，
+        让后续 close() 看到的接收缓冲为空。
+
+        硬上限 `max_seconds`：对端无限推时不能无限读。读到 EOF 或超时即返。
+        失败静默：任何异常都不打断后续 close 流程。
+        """
+        try:
+            import time as _time
+            deadline = _time.monotonic() + max_seconds
+            while True:
+                remaining = deadline - _time.monotonic()
+                if remaining <= 0:
+                    return
+                chunk = await asyncio.wait_for(self._reader.read(65536), timeout=remaining)
+                if not chunk:
+                    return  # EOF
+        except Exception:
+            pass
+
     async def relay_with(self, other: "EncryptedTunnel") -> None:
         """与另一个加密隧道双向中继"""
         async def forward(src: "EncryptedTunnel", dst: "EncryptedTunnel"):
