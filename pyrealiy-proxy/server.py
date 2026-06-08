@@ -41,7 +41,10 @@ from core.geosite_cache import ensure_all as geo_ensure_all
 from core.utils import (get_logger, unpack_address, safe_close, apply_log_levels,
                         install_stale_gaierror_handler, set_drain_threshold,
                         get_drain_threshold, wait_both_with_grace)
+from core.udp_relay import handle_udp_tunnel
 from core.version import __version__
+from core.time_sync import TimeSync
+from core.hello_auth import set_time_provider
 
 
 _ACCESS_LOG = False                       # 由 main() 从 cfg 读出后设置
@@ -168,6 +171,25 @@ async def handle_client(
             await safe_close(client_writer)
             return
 
+        # ── UDP 模式检测 ──
+        # 0.4.10 起：客户端发首包 b"\x00"（host_len=0）表示"这条 tunnel 走 UDP"。
+        # 老客户端发的 pack_address(host, port) 首字节是 host_len，最小 IP 字符串
+        # "0.0.0.0" host_len=7，永不为 0 → 完全向后兼容。
+        if addr_packet and addr_packet[0] == 0:
+            conn = store.register(client_ip, "udp", 0, client_writer)
+            _alog("info", "Proxy %s -> UDP mode [id=%d]", peer, conn.id)
+            # 闭包计数器：比 setattr lambda 干净，少一次属性 setattr 调用
+            def _add_up(n):   conn.bytes_up   += n
+            def _add_down(n): conn.bytes_down += n
+            try:
+                await handle_udp_tunnel(tunnel,
+                                        on_byte_in=_add_up,
+                                        on_byte_out=_add_down)
+            finally:
+                store.unregister(conn)
+                await safe_close(client_writer)
+            return
+
         target_host, target_port, _conn_unused = unpack_address(addr_packet)
         conn = store.register(client_ip, target_host, target_port, client_writer)
 
@@ -275,6 +297,15 @@ async def main(config_path: str) -> None:
 
     logger.info("PyReality server v%s", __version__)
 
+    # 时钟同步：阻塞 ≤5s 拉一次 NTP/HTTPS 时间，避免 VPS 时钟漂移 > 60s
+    # 让客户端的合法 token 被误判为超时。失败不挂掉业务、后台周期重试。
+    # 服务端多数有 chrony，但我们自己同步能避免对外部依赖的硬要求。
+    set_time_provider(TimeSync.corrected_time)
+    time_sync = TimeSync(cfg)
+    if time_sync.enabled:
+        await time_sync.initial_sync()
+        time_sync.start()
+
     # access_log 开关：默认关，开后才打 dispatch INFO 日志
     global _ACCESS_LOG, _IDLE_TIMEOUT_SEC, _MAX_CONNS_PER_IP, _TCP_KEEPALIVE
     _ACCESS_LOG = bool(cfg.get("access_log", False))
@@ -365,13 +396,16 @@ async def main(config_path: str) -> None:
         token_hint = f"?token={admin_token}" if admin_token else ""
         logger.info("Admin panel: http://%s:%d/%s", admin_host, admin_port, token_hint)
 
-    if admin_server:
-        async with server, admin_server:
-            await asyncio.gather(server.serve_forever(),
-                                 admin_server.serve_forever())
-    else:
-        async with server:
-            await server.serve_forever()
+    try:
+        if admin_server:
+            async with server, admin_server:
+                await asyncio.gather(server.serve_forever(),
+                                     admin_server.serve_forever())
+        else:
+            async with server:
+                await server.serve_forever()
+    finally:
+        await time_sync.stop()
 
 
 if __name__ == "__main__":

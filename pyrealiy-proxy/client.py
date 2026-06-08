@@ -32,8 +32,11 @@ import resource
 import sys
 
 from core.version import __version__
-from core.socks5 import parse_socks5_request
-from core.outbound import build_outbounds, PyrealiyOutbound, Outbound
+from core.time_sync import TimeSync
+from core.hello_auth import set_time_provider
+from core.socks5 import parse_socks5_request, reply_udp_associate
+from core.outbound import build_outbounds, PyrealiyOutbound, DirectOutbound, Outbound
+from core.udp_relay import UDPRelay
 from core.dns_forwarder import DNSForwarder
 from core.sniffer import sniff_domain, PrefixedReader
 from core.geosite_cache import ensure_all as geo_ensure_all
@@ -98,12 +101,88 @@ async def handle_local_connection(
     local_writer: asyncio.StreamWriter,
     outbounds: dict[str, Outbound],
     router,
+    udp_cfg: dict,
 ) -> None:
-    target = await parse_socks5_request(local_reader, local_writer)
-    if target is None:
+    parsed = await parse_socks5_request(local_reader, local_writer)
+    if parsed is None:
         await safe_close(local_writer)
         return
-    await _dispatch(local_reader, local_writer, target[0], target[1], outbounds, router)
+    cmd, host, port = parsed
+    if cmd == "tcp":
+        await _dispatch(local_reader, local_writer, host, port, outbounds, router)
+    elif cmd == "udp":
+        await _dispatch_udp(local_reader, local_writer, outbounds, router, udp_cfg)
+    else:
+        await safe_close(local_writer)
+
+
+async def _dispatch_udp(
+    local_reader: asyncio.StreamReader,
+    local_writer: asyncio.StreamWriter,
+    outbounds: dict[str, Outbound],
+    router,
+    udp_cfg: dict,
+) -> None:
+    """
+    SOCKS5 UDP ASSOCIATE 分派。
+
+    路由：UDP 走 router 的 final 动作（拿到的不是具体目标域名，所以 router.match
+    没法按目标分流；目标在每个 UDP 包的 frame 里）。final 一般是 'auto' / 'proxy'
+    / 'direct'，解析到的 leaf 类型决定 UDP 走加密隧道还是本地直发：
+      pyrealiy leaf → acquire tunnel，发 UDP 模式哨兵 b"\\x00"，启动 UDPRelay 带 tunnel
+      direct leaf   → 启动 UDPRelay 不带 tunnel，本地 socket 直发
+      其他          → 回 SOCKS5 错误并关
+    """
+    # 解析 FINAL action 拿 leaf
+    default_action = router.default
+    outbound = outbounds.get(default_action)
+    leaf = outbound.resolve_leaf() if outbound is not None else None
+
+    bind_host = udp_cfg.get("udp_relay_host", "127.0.0.1")
+    idle_timeout = float(udp_cfg.get("udp_idle_timeout", 60))
+
+    server_writer = None
+    tunnel = None
+
+    if isinstance(leaf, PyrealiyOutbound):
+        ready = await leaf.acquire_tunnel()
+        if ready is None:
+            logger.error("UDP relay: no tunnel from outbound '%s'", leaf.tag)
+            await safe_close(local_writer)
+            return
+        tunnel = ready.tunnel
+        server_writer = ready.writer
+        # UDP-mode 哨兵：单字节 0x00（server.py 看到首字节 == 0 进 UDP 路径）
+        try:
+            await tunnel.send(b"\x00")
+        except Exception as e:
+            logger.error("UDP relay: bootstrap failed: %s", e)
+            await safe_close(server_writer)
+            await safe_close(local_writer)
+            return
+    elif isinstance(leaf, DirectOutbound):
+        pass   # tunnel 留 None；UDPRelay 走 direct 路径
+    else:
+        # block / 其他类型：拒绝
+        logger.info("UDP ASSOCIATE rejected: outbound '%s' leaf=%s not supported",
+                    default_action, type(leaf).__name__ if leaf else None)
+        await safe_close(local_writer)
+        return
+
+    relay = UDPRelay(local_reader, local_writer, tunnel, server_writer,
+                     bind_host=bind_host, idle_timeout=idle_timeout)
+    try:
+        bnd_host, bnd_port = await relay.start()
+        await reply_udp_associate(local_writer, bnd_host, bnd_port)
+        _alog("info", "UDP-ASSOC bnd=%s:%d leaf=%s", bnd_host, bnd_port,
+              leaf.tag if leaf else "?")
+        await relay.run()
+    except Exception as e:
+        logger.debug("UDP relay error: %s", e)
+    finally:
+        if server_writer is not None:
+            await safe_close(server_writer)
+        await safe_close(local_writer)
 
 
 async def handle_tproxy_connection(
@@ -179,6 +258,15 @@ async def main(config_path: str) -> None:
 
     logger.info("PyReality client v%s", __version__)
 
+    # 时钟同步：阻塞 ≤5s 拉一次 NTP/HTTPS 时间，避免 VPS 时钟漂移 > 60s
+    # 让所有 token 被服务端误判超时。失败不挂掉业务、后台周期重试。
+    # set_time_provider 永远注入：TimeSync 未启用时 offset=0、等价于系统时钟。
+    set_time_provider(TimeSync.corrected_time)
+    time_sync = TimeSync(cfg)
+    if time_sync.enabled:
+        await time_sync.initial_sync()
+        time_sync.start()
+
     global _ACCESS_LOG
     _ACCESS_LOG = bool(cfg.get("access_log", False))
     if _ACCESS_LOG:
@@ -229,8 +317,14 @@ async def main(config_path: str) -> None:
     health = HealthCheck(outbounds.values())
     health.start()
 
+    # UDP relay 配置：默认走 SOCKS5 控制连接绑的地址，端口由 OS 分配
+    udp_cfg = {
+        "udp_relay_host":   cfg.get("udp_relay_host", cfg.get("socks5_host", "127.0.0.1")),
+        "udp_idle_timeout": cfg.get("udp_idle_timeout", 60),
+    }
+
     socks5_server = await asyncio.start_server(
-        lambda r, w: handle_local_connection(r, w, outbounds, router),
+        lambda r, w: handle_local_connection(r, w, outbounds, router, udp_cfg),
         cfg["socks5_host"],
         cfg["socks5_port"],
         limit=262144,
@@ -270,6 +364,7 @@ async def main(config_path: str) -> None:
             async with socks5_server:
                 await socks5_server.serve_forever()
     finally:
+        await time_sync.stop()
         await health.stop()
         if dns_forwarder:
             dns_forwarder.stop()

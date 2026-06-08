@@ -17,6 +17,313 @@
 
 ---
 
+## [0.4.13] - 2026-06-07
+
+全模块自审，找到 1 个真 leak + 2 处微优化。
+
+### 修复
+
+- **🚨 D1 修：DNS pipeline `_ensure_ready` 失败时 tunnel leak**
+  - 现象：`core/dns_forwarder.py:_DnsTunnel._ensure_ready` 从 outbound acquire 一条
+    tunnel 后立即 `tunnel.send(pack_address(remote_dns, 53))` 标记 DoT 起手。
+    **如果 send 失败**（对端 RST / 写入异常）：`ready` 已被取走但 `self._ready`
+    没赋值、`ready.close()` 没调，**池里少一条 tunnel 长期不补，底层 server_writer
+    长期泄漏**
+  - 修法：用 try/except 包 send，失败时 `ready.close()` 再 raise，let `query()`
+    的重试逻辑去补
+  - 真实场景：用户在 DNS 转发场景下偶发遇到"池越来越空、新 DNS 查询越来越慢"
+    可能就是这条路径在悄悄积累
+
+### 微优化
+
+- **D2 修：`tunnel.py:drain_recv` 函数内 `import time as _time` 改为模块级**
+- **D3 优：`time_sync._ntp_query_https` 用 `buf.find(b"\\r\\n\\r\\n")` 替代
+  `b"\\r\\n\\r\\n" not in bytes(buf)`** —— bytearray 原生支持 substring 搜索，
+  不需要每次迭代 `bytes()` 复制整个 buffer
+
+### 审计覆盖
+
+逐文件审计了所有模块（含 0.4.10/11/12 新代码 + 之前没复审过的 admin / stats /
+sniffer / router 等）。除上面 3 处，**未发现其它真问题**：
+
+| 模块 | 备注 |
+|---|---|
+| `admin.py` | CSRF + hmac.compare_digest 安全 ✓ |
+| `stats.py` | LRU OrderedDict 无 OOM 风险 ✓ |
+| `sniffer.py` | TLS SNI / HTTP Host 解析全 bounds 检查 ✓ |
+| `router.py` | structured + CSV 双路径、规则前缀提取等无问题 ✓ |
+| `hello_auth.py` | TimeSync `_now()` 整数转换无溢出风险 ✓ |
+| `outbound.py` | `_bidi_tunnel_relay` 关闭顺序 safe_close + drain_recv 正确 ✓ |
+| `conn_pool.py` | acquire 流程 stale + alive 双过滤、fallback 走游标 ✓ |
+| `handshake_cache.py` | ServerHello 字段补丁 定长替换 不破坏 record_length ✓ |
+| `udp_relay.py` | C1-C4 + B1-B4 已在 0.4.11/12 修完 ✓ |
+
+### 经验
+
+- DNS pipeline 这种"取出资源 → 立即用 → 失败不归还"的代码片段，**很容易在
+  压力测试 / 长跑场景才暴露问题**，单元测试根本测不出来。审计这种代码要专门
+  问"if 这一行抛了，前面 acquire 的东西谁负责关？"
+
+---
+
+## [0.4.12] - 2026-06-07
+
+### 修复（0.4.11 之后再审计发现的）
+
+- **🚨 C1 修：UDP 目标是域名时阻塞事件循环**
+  - 0.4.11 我把"域名 target 走 getaddrinfo"列为"文档化限制"，但**没在代码里 guard**
+    —— Python `socket.sendto` 对 UDP socket 传域名时会调内核 `getaddrinfo` 解析，
+    **同步阻塞 asyncio 事件循环**几秒，整个 client / server 卡死
+  - 修法：新增 `_is_ip_literal(host)` 预检 + 在 `_handle_uplink`（客户端 direct）
+    和 `_tunnel_to_target`（服务端）两处加 guard，**域名目标直接 drop**
+    （+ debug 日志说明），事件循环不再被卡
+  - 实测：域名 target 包处理耗时 < 1ms（vs 旧版可能数秒）
+
+- **🚨 C2 修：服务端 `handle_udp_tunnel` 缺 idle timeout**
+  - 客户端 tunnel TCP 半死时，`tunnel.recv` 挂死等 TCP keepalive（~90s），期间
+    UDP socket + tunnel 资源都不回收
+  - 修法：加 `idle_timeout` 参数（默认 600s）+ `_idle_watcher` 协程 + `_touch()`
+    helper 在每次双向 IO 触达时刷新最后活动时间，超时 stop.set 触发清理
+
+- **C3 修：`router._default` 私有访问**
+  - `client.py:_dispatch_udp` 走 `router._default` 私有属性。新增 `Router.default`
+    property，调用方用公开 API
+
+- **C4 修：v4-mapped 还原大小写敏感**
+  - `if host.startswith("::ffff:")` 只认小写。Python 多数情况返回小写但脆弱。
+    新增 `_unmap_v4(host)` helper 走 `ipaddress.IPv6Address.ipv4_mapped`，
+    标准库级别正确处理大小写 / 边界（如 `::ffff:0.0.0.0` 是合法但奇怪的值）
+
+---
+
+## [0.4.11] - 2026-06-07
+
+### 性能 / 修复
+
+代码审计 + UDP 热路径优化，闭合 0.4.10 新功能的几个真问题。
+
+- **修：UDP 出口 IPv6 支持**
+  - 0.4.10 服务端 `handle_udp_tunnel` 与客户端 direct 模式都用 `AF_INET / 0.0.0.0`
+    socket，**给 IPv6 target sendto 会 EAFNOSUPPORT 失败**——代理 HTTP/3 /
+    IPv6 服务端就崩
+  - 修法：新增 `_create_dualstack_udp_endpoint()` helper，建 `("::", 0)` 的
+    dual-stack v6 socket（Linux 默认 IPV6_V6ONLY=0），同时收发 v4/v6；
+    `_normalize_addr_for_dualstack()` 把 IPv4 字面量映射到 `::ffff:1.2.3.4` 让
+    v6 socket 也能发；回包时若 source 是 v4-mapped，还原为 v4 字面给 SOCKS5
+    UDP header
+  - 建 v6 socket 失败时自动回落到老的 v4 socket（Windows / 老 BSD 不支持
+    dual-stack 时的兜底）
+
+- **修：`_socks_client_addr` 只锁首包 → 改成跟最近一次**
+  - 现象：部分 DNS 解析器每查询用一个新源端口；旧实现把回包统一发给首端口
+    导致应用收不到回包
+  - 修法：每个上行包都刷新 `_socks_client_addr` —— 回包跟最近一次源 addr
+
+- **性能：UDP 改用队列消费替代每包一个 Task**
+  - 旧实现 `datagram_received` 里 `asyncio.create_task(...)` 每个包一个 Task。
+    高 pps 场景（游戏 / 视频）峰值上千 Task 创建/秒，GC + 调度开销不必要
+  - 改用 `asyncio.Queue(maxsize=1024)`：`datagram_received` 同步 `put_nowait`，
+    单消费协程 await get 串行处理。**满则丢**（UDP 本就 best-effort 背压策略）
+  - 客户端 UDPRelay 和服务端 handle_udp_tunnel 两侧都改
+
+- **修：parse 阶段异常被 asyncio 记成 unhandled task exception**
+  - 旧 `_on_local_udp` / `_on_udp_reply` 只 try 了 `tunnel.send`，
+    `parse_socks5_udp_header` / 算长度等地方抛非预期异常时，asyncio 会在
+    Task 析构时 logger.error
+  - 修法：消费协程内层加全包 try/except + debug 日志
+
+### 内部清洁
+
+- UDPRelay direct 模式从"raw socket + sock_recvfrom"统一为 `DatagramProtocol`，
+  与 tunnel 模式保持一致 API、易维护
+- `server.py` UDP 字节计数 `setattr` lambda 改成闭包函数，少一次属性 set 调用
+
+### 限制（明确文档化）
+
+- 当目标 host 是**域名**（SOCKS5 ATYP=domain）时，`transport.sendto` 会调
+  内核 getaddrinfo，**阻塞当前事件循环**。多数 UDP 应用直接用 IP 作 target，
+  不踩到这条路径。彻底异步 UDP DNS 解析留待 v2
+- block outbound 拒绝 UDP（final 应配 pyrealiy 或 direct）
+- SOCKS5 UDP FRAG≠0 包丢弃
+
+### 迁移
+
+- 协议线上字节流无变化（修的是实现细节）
+- 客户端字段 `udp_relay_host` / `udp_idle_timeout` 不变
+
+---
+
+## [0.4.10] - 2026-06-07
+
+### 新增
+
+**A1: UDP 转发（SOCKS5 UDP ASSOCIATE + UDP-over-TCP 隧道）**
+
+闭合"优秀代理诊断" A 类的最大缺口。完成后 pyrealiy 可代理任何 UDP 流量：
+游戏 / 视频通话 / WireGuard / QUIC / 普通 DNS 等。
+
+- **`core/udp_relay.py`** 新模块：
+  - SOCKS5 UDP header 解析 / 构造（RFC 1928 §7，支持 IPv4 / IPv6 / domain）
+  - 加密隧道内 UDP 帧封装：`[2B len][packed_addr][payload]`
+  - `FrameReader` 类：从 `tunnel.recv()` 不定长 chunks 中缓冲式切出完整帧
+    （帧可跨多条 TLS record）
+  - `UDPRelay` 类（客户端侧）：绑本地 UDP socket、对接 SOCKS5 UDP 报文
+    与加密隧道帧、看门狗（TCP 控制连接关 / idle 超时）
+  - `handle_udp_tunnel(tunnel, ...)` （服务端侧）：单 UDP socket 多路复用
+    NAT，桥接 tunnel ↔ raw UDP
+
+- **`core/socks5.py`** 扩展：
+  - 新增 `CMD_UDP_ASSOCIATE = 3` 支持
+  - `parse_socks5_request` 返回值从 `(host, port)` 改为 `(cmd, host, port)`
+    其中 `cmd ∈ {"tcp", "udp"}`
+  - 新增 `reply_udp_associate(writer, bnd_host, bnd_port)` —— UDP ASSOCIATE
+    的 SOCKS5 回复（必须在 bind 本地 UDP 后才能算出 BND 地址）
+
+- **服务端**：`server.py:handle_client` 读到首包首字节为 0x00（host_len=0）
+  时进 UDP 路径——调用 `handle_udp_tunnel`。**完全向后兼容**：合法 IP / 域名
+  的 `pack_address` 首字节 host_len 永不为 0（最短 "0.0.0.0" host_len=7），
+  TCP 路径不受任何影响
+
+- **客户端**：`client.py:_dispatch_udp` 新分派路径
+  - UDP 路由 = `route.final` 的 leaf
+  - 解析到 `PyrealiyOutbound` → acquire tunnel + 发哨兵 `b"\x00"` → 隧道路径
+  - 解析到 `DirectOutbound` → UDPRelay 走本地 socket 直发
+  - 其他（block 等）→ 拒绝 UDP ASSOCIATE
+  - 新配置字段 `udp_relay_host`（默认 socks5_host）、`udp_idle_timeout`（默认 60s）
+
+### 协议设计
+
+- **UDP 模式哨兵**：客户端首包 `b"\x00"`（host_len=0），向后兼容 0.x 老协议
+- **帧格式**：`[2B 总长度 BE][packed_addr][UDP payload]`
+- **多路复用**：一条 tunnel 内多个 UDP 目标共用，每包带 dest header
+- **服务端 NAT**：每条 UDP-mode tunnel 绑一个 ephemeral UDP socket，多 target
+  共用（Linux UDP NAT 表项按 target 自动追踪）
+
+### 限制（文档化，本版不做）
+
+- TProxy UDP：v2
+- 按 UDP 目标做 router 决策：当前所有 UDP 走 final outbound；按 target 分流
+  v2
+- block outbound 拒绝 UDP（用户应该让 final 落到 pyrealiy 或 direct）
+- SOCKS5 UDP FRAG≠0（分片）直接丢
+
+### 迁移
+
+- 协议向后兼容：老 TCP 客户端 / 老服务端继续工作（首字节非 0 走 TCP 路径）
+- API 变化：`parse_socks5_request` 返回 3-tuple `(cmd, host, port)`，仅 `client.py`
+  一处调用方，已同步更新
+
+---
+
+## [0.4.9] - 2026-06-07
+
+### 安全 / 反指纹
+
+闭合 "优秀代理特性诊断" 中 A 类的两个真实弱点（A1 UDP 待用户对齐设计后单独发版）。
+
+- **A2: ServerHello session_id_echo + server_random 现场补丁**
+  - 根因：旧实现直接回放 handshake_cache 里整条 ServerHello record，**两个
+    TLS 1.3 spec 强制约束被破坏**：
+    1. `session_id_echo` 是缓存抓取时那个伪 client 的随机值，**跟当前客户端
+       的 session_id（token）不一样**——任何会解 TLS 的探测端 1 RTT 内就发现
+       "server 没正确 echo session_id"
+    2. `server_random` 在多次连接里**相同**（同一份 cached record 反复回放）
+       → GFW 把 random 值聚类，统计上立刻发现"代理"
+  - 修法：`core/handshake_cache.py` 新增 `_patch_server_hello(record, sid, rnd)`，
+    回放前现场改写两个字段：
+    - `server_random` 用 `os.urandom(32)` 每次新鲜
+    - `session_id_echo` 用当前客户端 session_id（即我们的 token）
+    - **不动 record_length / handshake_length**（定长替换），对 wire 上的解析器
+      完全透明
+  - 透明性：TLS 1.3 transcript_hash 因为改了 random/sid_echo 会不一致，但
+    后续的 EncryptedExtensions/Certificate/CertVerify/Finished 都是不透明
+    AEAD，**GFW 没密钥无法验**；客户端我们根本不跑真 TLS、也不解密这些
+  - 调用方：`core/camouflage.py` 两处都改：
+    1. 认证通过的 proxy 路径：传客户端 session_id 给 send_server_hello_done
+    2. 探测路径：把探测端 ClientHello 里的 session_id 透传给 serve_probe
+       （真实 TLS server 必须 echo，伪装路径也得跟上）
+
+- **A3: 池僵尸 tunnel 探活（SO_KEEPALIVE + MSG_PEEK 双兜底）**
+  - 根因：旧 `_ReadyTunnel.is_stale` 只看时间不看 TCP 真实状态。对端因服务端
+    idle timeout / NAT 表项过期 / 网络抖动后 FIN 丢包等原因悄悄关了但我们
+    没感知，**用户第一次从池里取这条 tunnel 才发现 send 失败**、感受到一次
+    延迟翻倍
+  - 修法（双兜底）：
+    1. **建连时设 SO_KEEPALIVE + Linux TCP_KEEPIDLE=60s / INTVL=10s /
+       CNT=3**（90s 内 OS 自己 RST 死连接），让池更早 refill
+    2. **acquire 时实时 `is_alive` 检测**：从队列拿出 tunnel 后用
+       `MSG_PEEK + MSG_DONTWAIT` 看一字节——FIN/RST/异常推数据都判为 dead、
+       立即 discard + 触发 refill
+  - 抓底层 socket 走 `writer.transport.get_extra_info("socket")`，无 socket 时
+    保守认为活
+  - 影响文件：`core/conn_pool.py` 新增 `_enable_tcp_keepalive()` helper +
+    `_ReadyTunnel.is_alive` property；`acquire()` 加 is_alive 检查分支
+
+### 内部
+
+- `_ReadyTunnel.is_alive` 是 property（带状态副作用：read syscall）。命名按
+  Python 惯例本应改成方法，但本项目内部使用、对调用方简洁性更重要
+
+### 迁移
+
+- 协议线上字节流变化：ServerHello 的 random 现在每连接独立、session_id_echo
+  正确 echo 客户端 token —— 与真实 TLS 1.3 行为一致
+- 池僵尸 tunnel 自动 discard：用户感知是"突发突发用代理时第一条更稳"，无 API
+  变化
+- `handshake_cache.send_server_hello_done(writer)` → 必须传 `client_session_id`
+  参数；`serve_probe(reader, writer)` 加可选 `probe_session_id` 参数
+
+---
+
+## [0.4.8] - 2026-06-07
+
+### 新增
+
+- **客户端 / 服务端启动期自动时钟同步（`core/time_sync.py`）**：解决 VPS 时钟
+  漂移 > `TIMESTAMP_TOLERANCE = 60s` 导致 `TokenReplayCache` 把所有合法 token
+  误判为超时、连接全失败的硬伤
+  - **分层策略**：UDP NTP（port 123）优先 → HTTPS Date 头（port 443）兜底 →
+    系统时钟兜底。"TCP 路径"工程上等价于 HTTPS Date —— 几乎没有公开 NTP server
+    真的支持 RFC 5905 §7.5 的 TCP/123；HTTPS Date 秒级精度对 60s 容差绰绰有余
+  - **多源 median 抗劫持**：每次同步从 UDP 或 HTTPS 各取 ≤3 个源，median 决定
+    offset；`max_offset_sec` 净化：>1 天的偏移直接拒绝
+  - **不动系统时钟**：只在 hello_auth 中通过注入的 time provider 应用偏移；
+    其他程序（chrony 等）不受影响
+  - **HTTPS Date 直连不走代理隧道**：避免"隧道又依赖时钟"的鸡蛋问题
+  - **启动期阻塞首次同步**（默认上限 5s），失败不挂掉业务、后台周期重试
+- **`hello_auth` 新增 `set_time_provider(fn)` 注入点**：`make_session_token` /
+  `verify_session_token` / `TokenReplayCache._bucket` 三处从 `time.time()`
+  改走 `_time_provider()`；TimeSync 启动后注入 `TimeSync.corrected_time`
+- **新配置字段 `cfg["time_sync"]`**（可选；不写按默认走）：
+
+  ```json
+  "time_sync": {
+      "enabled": true,
+      "udp_servers": ["pool.ntp.org", "time.cloudflare.com", "time.google.com"],
+      "tcp_servers": ["www.apple.com", "www.cloudflare.com", "www.microsoft.com"],
+      "interval": "1h",
+      "startup_timeout": "5s",
+      "max_offset_sec": 86400
+  }
+  ```
+
+  - 时长字段支持 `30s` / `5m` / `1h` / `1d` 或裸数字（秒）
+  - 不写 `time_sync` 字段 = 全部使用默认值 + 启用
+  - `enabled: false` 关闭（用户已有 chrony 等场景）
+
+### 内部
+
+- `core/hello_auth.py` 调用 `time.time()` 的三处统一封装为 `_now()` helper
+
+### 迁移
+
+- 老配置完全无需改动：缺 `time_sync` 字段时按默认启用，使用公开 NTP/HTTPS 源
+- 老调用方式无回归：`time_provider` 默认就是 `time.time`，TimeSync 未启用 /
+  未同步成功时 offset=0、行为完全等价于老代码
+- API 新增：`hello_auth.set_time_provider(fn)`，`TimeSync.corrected_time` 类方法
+
+---
+
 ## [0.4.7] - 2026-06-06
 
 ### 新增
@@ -376,7 +683,13 @@
 
 更早的历史在 git log 里；从 `0.3.0` 起按本规范打 tag。
 
-[未发布]: https://github.com/<你的仓库>/compare/v0.4.7...HEAD
+[未发布]: https://github.com/<你的仓库>/compare/v0.4.13...HEAD
+[0.4.13]: https://github.com/<你的仓库>/releases/tag/v0.4.13
+[0.4.12]: https://github.com/<你的仓库>/releases/tag/v0.4.12
+[0.4.11]: https://github.com/<你的仓库>/releases/tag/v0.4.11
+[0.4.10]: https://github.com/<你的仓库>/releases/tag/v0.4.10
+[0.4.9]: https://github.com/<你的仓库>/releases/tag/v0.4.9
+[0.4.8]: https://github.com/<你的仓库>/releases/tag/v0.4.8
 [0.4.7]: https://github.com/<你的仓库>/releases/tag/v0.4.7
 [0.4.6]: https://github.com/<你的仓库>/releases/tag/v0.4.6
 [0.4.5]: https://github.com/<你的仓库>/releases/tag/v0.4.5

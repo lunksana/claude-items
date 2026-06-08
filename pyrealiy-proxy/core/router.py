@@ -489,6 +489,11 @@ class Router:
     def set_default(self, action: str) -> None:
         self._default = action
 
+    @property
+    def default(self) -> str:
+        """当前 FINAL action（外部只读访问；避免调用方碰 _default 私有名）"""
+        return self._default
+
     def add(self, rule: _Rule) -> None:
         # 给规则编号，方便日志归因到具体 config 行
         rule.desc = f"#{self._next_idx} {rule.desc}"

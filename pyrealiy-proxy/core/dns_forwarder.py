@@ -171,7 +171,16 @@ class _DnsTunnel:
             ready = await self._outbound.acquire_tunnel()
             if ready is None:
                 raise OSError(f"no tunnel available for DNS via '{self._outbound.tag}'")
-            await ready.tunnel.send(pack_address(self._remote_dns, 53))
+            # tunnel.send 失败时必须主动 close 这条 tunnel —— 否则 ready 被丢弃但
+            # 底层 server_writer 留着，池里少一条 tunnel 长期不补，外加资源泄漏
+            try:
+                await ready.tunnel.send(pack_address(self._remote_dns, 53))
+            except Exception:
+                try:
+                    ready.close()
+                except Exception:
+                    pass
+                raise
             self._ready       = ready
             self._reader_task = asyncio.create_task(self._reader_loop())
 

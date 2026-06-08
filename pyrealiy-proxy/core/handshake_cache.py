@@ -167,9 +167,16 @@ class HandshakeCache:
     async def send_server_hello_done(
         self,
         writer: asyncio.StreamWriter,
+        client_session_id: bytes,
     ) -> bool:
         """
         向合法客户端发送缓存的服务端 TLS 1.3 握手记录（ServerHello + CCS + 加密记录群）。
+
+        **0.4.9 起：现场补丁 ServerHello 的两个字段** —— 见 _patch_server_hello。
+        把 session_id_echo 改成当前客户端 session_id（合规 TLS 1.3 行为）；把
+        server_random 改成新鲜 32 字节（避免同一 cached record 多次回放 random
+        相同被 GFW 聚类成指纹）。
+
         不关闭连接，调用方继续读取客户端的 CCS+Finished 并完成握手模拟。
         返回 False 表示缓存为空。
         """
@@ -177,7 +184,14 @@ class HandshakeCache:
             return False
         session_records = random.choice(self._pool)
         try:
-            for raw in session_records:
+            # 第一条 = ServerHello（按 _fetch_one 的读取顺序），需要现场补丁
+            patched_first = _patch_server_hello(
+                session_records[0],
+                client_session_id,
+                os.urandom(32),
+            )
+            writer.write(patched_first)
+            for raw in session_records[1:]:
                 writer.write(raw)
             await writer.drain()
             return True
@@ -188,11 +202,15 @@ class HandshakeCache:
         self,
         client_reader: asyncio.StreamReader,
         client_writer: asyncio.StreamWriter,
+        probe_session_id: bytes | None = None,
     ) -> None:
         """
         从池中随机选一份握手记录回放给探测连接。
         GFW 探测器收到真实 apple.com 的 TLS 1.3 握手记录，
         无法在不掌握会话密钥的情况下验证或继续握手。
+
+        **0.4.9 起**：若知道 probe_session_id（探测端 ClientHello 里的），就 echo
+        回去 —— 真实 TLS 1.3 server 必须这样做。不传则用 32 字节 0 占位（旧行为）。
         """
         if not self._pool:
             client_writer.close()
@@ -200,7 +218,15 @@ class HandshakeCache:
 
         session_records = random.choice(self._pool)
         try:
-            for raw in session_records:
+            sid = probe_session_id if (probe_session_id and len(probe_session_id) == 32) \
+                                   else b"\x00" * 32
+            patched_first = _patch_server_hello(
+                session_records[0],
+                sid,
+                os.urandom(32),
+            )
+            client_writer.write(patched_first)
+            for raw in session_records[1:]:
                 client_writer.write(raw)
             await client_writer.drain()
 
@@ -213,3 +239,67 @@ class HandshakeCache:
                 client_writer.close()
             except Exception:
                 pass
+
+
+# ── ServerHello 字段补丁 ──────────────────────────────────────────────────────
+
+def _patch_server_hello(record: bytes,
+                        new_session_id: bytes,
+                        new_random: bytes) -> bytes:
+    """
+    在 cached ServerHello record 上现场改写两个字段：server_random + session_id_echo。
+
+    ── 为什么 ─────────────────────────────────────────────────────────────────
+    真实 TLS 1.3 服务端 ServerHello 必须满足两条线上可观测的约束：
+      1. session_id_echo **完全等于** ClientHello.session_id（spec MUST）
+      2. server_random 每个连接 **独立随机** 32 字节
+
+    我们之前直接回放缓存的整条 record：
+      - session_id_echo 是当年抓取时那个伪 client 的 sid，**跟现在客户端的
+        session_id（token）不一样** → 任何会解 TLS 的 GFW 探测器 1 RTT 内就能
+        识别"server 没正确 echo session_id"
+      - server_random 在多次连接里**相同**（同一份 cached record 被反复回放）
+        → GFW 把 random 值聚类，统计上立刻发现"代理"
+
+    0.4.9 改成回放前现场打补丁。两次写都是定长替换，不动 record_length，无需
+    重建任何长度字段。
+
+    ── 在 wire 上是否合法 ─────────────────────────────────────────────────────
+    TLS 1.3 transcript_hash 依赖 ServerHello 内容；改了 random/sid_echo 后透传
+    的"EncryptedExtensions/Certificate/CertVerify/Finished"用的是 cached transcript
+    密钥，跟新 hash 算不上。但这些都是不透明 AEAD，**GFW 没密钥无法验**，对外
+    观察看就是合法的 0x17 加密记录群。客户端这边我们根本不跑真 TLS、不解。
+
+    ── 字节布局 ───────────────────────────────────────────────────────────────
+      [0]       0x16  Handshake content_type
+      [1:3]     0x0303 legacy_record_version
+      [3:5]     record_length (uint16 BE)
+      [5]       0x02  ServerHello msg_type
+      [6:9]     handshake_length (uint24 BE)
+      [9:11]    legacy_version 0x0303
+      [11:43]   server_random (32 字节) ← 补丁
+      [43]      session_id_length
+      [44:44+sl] session_id_echo ← 补丁
+
+    不变量校验失败时返回原 record 不改（保守降级：失去补丁好处但不破坏回放）。
+    """
+    if len(record) < 44 or record[0] != 0x16 or record[5] != 0x02:
+        return record
+    sid_len = record[43]
+    if sid_len > 32 or 44 + sid_len > len(record):
+        return record
+
+    # session_id_echo 长度必须保留（破坏 record_length 会让 GFW 解析失败）
+    sid = new_session_id
+    if len(sid) != sid_len:
+        if len(sid) > sid_len:
+            sid = sid[:sid_len]
+        else:
+            sid = sid + b"\x00" * (sid_len - len(sid))
+
+    rnd = new_random if len(new_random) == 32 else (new_random + b"\x00" * 32)[:32]
+
+    buf = bytearray(record)
+    buf[11:43]          = rnd
+    buf[44: 44+sid_len] = sid
+    return bytes(buf)

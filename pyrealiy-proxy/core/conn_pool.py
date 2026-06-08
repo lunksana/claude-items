@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import socket
 import time
 from typing import Callable, Optional
 
@@ -66,6 +67,32 @@ _MAX_IDLE_SEC  = 120    # 池中空闲连接最长存活时间（超过后丢弃
 _STAGGER_STEP   = 0.30
 _STAGGER_JITTER = 0.08
 _IDLE_JITTER    = 30.0      # _MAX_IDLE_SEC ± 该值随机化每条 tunnel 的实际寿命
+
+
+def _enable_tcp_keepalive(writer: asyncio.StreamWriter) -> None:
+    """
+    在已建好的 TCP 连接上启用 SO_KEEPALIVE + Linux 调优后的探测周期。
+
+    Linux 默认 TCP_KEEPIDLE=7200s（2 小时静默才探测），对代理场景太宽。
+    调到 60s 静默 + 10s 间隔 × 3 次 = 90s 内能确认对端是否活着，让 OS 提前
+    把死连接 RST 掉，避免我们的 _ReadyTunnel.is_alive 漏检（虽然有 MSG_PEEK
+    兜底，但 OS 主动探测能让池更早 refill）。
+
+    其它平台只开 SO_KEEPALIVE（用 OS 默认探测周期）。
+    """
+    try:
+        sock = writer.transport.get_extra_info("socket")
+        if sock is None:
+            return
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+        if hasattr(socket, "TCP_KEEPCNT"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+    except Exception as e:
+        logger.debug("Cannot enable TCP keepalive: %s", e)
 
 
 async def _read_server_handshake(reader: asyncio.StreamReader) -> None:
@@ -155,6 +182,43 @@ class _ReadyTunnel:
     def is_stale(self) -> bool:
         return time.monotonic() - self._created_at > self._lifetime
 
+    @property
+    def is_alive(self) -> bool:
+        """
+        实时检查对端是否还在（防"池里有僵尸 tunnel"问题）。
+
+        ── 为什么需要 ─────────────────────────────────────────────────────────
+        is_stale 只看时间没看 TCP 真实状态。对端可能因为以下原因悄悄关了但
+        我们没感知：服务端 idle timeout / NAT 表项过期 / 网络抖动后 FIN 丢
+        包但 RST 也没回 / 服务端崩了 OS 直接回 RST 但我们没读到。第一次
+        用户从池里取这条 tunnel、send 才发现失败，用户感受到一次延迟翻倍。
+
+        ── 怎么做 ─────────────────────────────────────────────────────────────
+        从池里取出来后立刻 MSG_PEEK 看一字节：
+          - BlockingIOError    → 接收缓冲空，对端没事干，**alive**
+          - 返回 b''           → 对端已发 FIN，**dead**
+          - 返回非空            → 对端意外推了数据（异常状态），**dead** 谨慎丢弃
+          - ConnectionResetError / OSError → RST 等，**dead**
+
+        操作是非阻塞 syscall（peek 不消耗数据），asyncio 单线程下 O(1) 微秒级。
+        """
+        transport = self.writer.transport
+        sock = transport.get_extra_info("socket")
+        if sock is None:
+            return True  # 拿不到底层 socket，保守认为活
+        try:
+            data = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+            if data == b"":
+                return False  # 对端 FIN
+            # 收到非空 = 对端在推数据，但我们的协议下这时不该有 → 异常状态
+            return False
+        except BlockingIOError:
+            return True  # 缓冲空 = 正常空闲
+        except (ConnectionResetError, OSError):
+            return False
+        except Exception:
+            return True  # 未知错误保守认为活，让后续 send 报错
+
     def close(self):
         try:
             self.writer.close()
@@ -235,18 +299,25 @@ class BrutalPool:
     async def acquire(self) -> _ReadyTunnel | None:
         """
         取出一条可用隧道，同时触发后台补充。
-        跳过超过 _MAX_IDLE_SEC 的过期连接（关闭并触发补充）。
+        - 跳过 is_stale（超过 _MAX_IDLE_SEC）的过期连接
+        - 跳过 is_alive=False 的僵尸连接（对端已 FIN/RST 但我们 TCP 没感知）
         若池暂时为空，等待最多 5 秒；超时则直接新建一条（不丢请求）。
         """
         self._schedule_refills()
         try:
             while True:
                 ready = await asyncio.wait_for(self._queue.get(), timeout=5.0)
-                if not ready.is_stale:
-                    return ready
-                ready.close()
-                logger.debug("Discarded stale pool connection, rebuilding")
-                self._schedule_refills()
+                if ready.is_stale:
+                    ready.close()
+                    logger.debug("Discarded stale pool connection, rebuilding")
+                    self._schedule_refills()
+                    continue
+                if not ready.is_alive:
+                    ready.close()
+                    logger.debug("Discarded zombie pool connection (peer FIN/RST), rebuilding")
+                    self._schedule_refills()
+                    continue
+                return ready
         except asyncio.TimeoutError:
             logger.info("Pool exhausted, building direct connection")
             # 即便是 exhausted fallback 也走池级游标：避免多个并发 fallback
@@ -358,6 +429,11 @@ class BrutalPool:
                 server_reader, server_writer = await asyncio.open_connection(
                     cfg["server_host"], cfg["server_port"], limit=262144
                 )
+
+            # 1b. 开 SO_KEEPALIVE：服务端 NAT 表项过期 / VPS 抖动等情况下，
+            # OS 内核探测包能在 ~90s 内 RST 死连接，配合 _ReadyTunnel.is_alive
+            # 在 acquire 时实时检测，把"池里有僵尸 tunnel"概率降到极小。
+            _enable_tcp_keepalive(server_writer)
 
             # 2. 发送含认证 token 的 ClientHello，提取 client_random 用于密钥派生
             token = make_session_token(cfg["password"])

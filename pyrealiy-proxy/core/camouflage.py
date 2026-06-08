@@ -90,7 +90,9 @@ async def server_read_hello_and_decide(
             and verify_session_token(password, session_id)
             and replay_cache.check_and_mark(session_id)):
         logger.info("In-Hello auth OK")
-        ok = await cache.send_server_hello_done(client_writer)
+        # 把客户端的 session_id（即我们的 token）传给 send_server_hello_done，
+        # 让 ServerHello.session_id_echo 与之严格对应（TLS 1.3 spec MUST）
+        ok = await cache.send_server_hello_done(client_writer, session_id)
         if not ok:
             logger.warning("Handshake cache empty, closing legitimate connection")
             client_writer.close()
@@ -101,5 +103,7 @@ async def server_read_hello_and_decide(
         return True, client_random
 
     logger.debug("Probe or unauthorized connection, replying from cache")
-    await cache.serve_probe(client_reader, client_writer)
+    # 探测路径也 echo 探测端的 session_id（如果 ClientHello 里有的话）—— 真实
+    # TLS server 必须 echo，伪装路径也照做避免行为不一致被 GFW 识别
+    await cache.serve_probe(client_reader, client_writer, probe_session_id=session_id)
     return False, None

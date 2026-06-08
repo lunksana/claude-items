@@ -35,6 +35,25 @@ from cryptography.hazmat.primitives.poly1305 import Poly1305
 
 TIMESTAMP_TOLERANCE = 60  # 秒
 
+# ── 时钟源（默认系统时钟；TimeSync.start() 后会注入校正后的时间）─────────────
+#   client/server.py 启动期调 set_time_provider(TimeSync.corrected_time) 后，
+#   下面所有时间相关计算（token 时间戳、replay cache 桶）都走带 offset 的时间，
+#   避免 VPS 时钟漂移 > TIMESTAMP_TOLERANCE 导致全部 token 被误判超时。
+from typing import Callable as _Callable
+
+_time_provider: _Callable[[], float] = time.time
+
+
+def set_time_provider(fn: _Callable[[], float]) -> None:
+    """注入时间源。fn() 返回 Unix UTC 秒（小数）"""
+    global _time_provider
+    _time_provider = fn
+
+
+def _now() -> int:
+    """整数 Unix 秒。所有 token 流程走这个，不直接调 time.time()"""
+    return int(_time_provider())
+
 
 # ── Token 重放缓存 ─────────────────────────────────────────────────────────────
 
@@ -86,7 +105,7 @@ class TokenReplayCache:
         self._buckets: dict[int, set[bytes]] = {}
 
     def _bucket(self) -> int:
-        return int(time.time()) // TIMESTAMP_TOLERANCE
+        return _now() // TIMESTAMP_TOLERANCE
 
     def check_and_mark(self, token: bytes) -> bool:
         """
@@ -140,7 +159,7 @@ def _poly1305_tag(password_bytes: bytes, ts_bytes: bytes, random_prefix: bytes) 
 def make_session_token(password: str) -> bytes:
     """生成 32 字节 session token，嵌入 ClientHello 的 legacy_session_id"""
     random_prefix = os.urandom(8)
-    ts = int(time.time())
+    ts = _now()   # 经 TimeSync 校正的 Unix 秒
     ts_bytes = struct.pack("!Q", ts)
     # 掩码时间戳：XOR 后字节分布均匀，统计分析无法从中提取时间信息
     mask = _ts_mask(password, random_prefix)
@@ -166,7 +185,7 @@ def verify_session_token(password: str, token: bytes) -> bool:
     ts_bytes = bytes(a ^ b for a, b in zip(hidden_ts, mask))
     ts = struct.unpack("!Q", ts_bytes)[0]
 
-    if abs(int(time.time()) - ts) > TIMESTAMP_TOLERANCE:
+    if abs(_now() - ts) > TIMESTAMP_TOLERANCE:
         return False
 
     expected_tag = _poly1305_tag(password.encode(), ts_bytes, random_prefix)

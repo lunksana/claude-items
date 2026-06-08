@@ -22,6 +22,8 @@ import random
 
 import struct
 
+import time
+
 import hashlib
 
 
@@ -187,10 +189,9 @@ class EncryptedTunnel:
         失败静默：任何异常都不打断后续 close 流程。
         """
         try:
-            import time as _time
-            deadline = _time.monotonic() + max_seconds
+            deadline = time.monotonic() + max_seconds
             while True:
-                remaining = deadline - _time.monotonic()
+                remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return
                 chunk = await asyncio.wait_for(self._reader.read(65536), timeout=remaining)
