@@ -338,21 +338,38 @@ async def _ensure_one(
     update_days: float,
     meta: dict,
     pool=None,                       # 给定则每个 URL 都先试隧道再走直连
+    force: bool = False,
 ) -> bool:
     urls = [url] if isinstance(url, str) else [u for u in url if u]
     if not urls:
         return False
 
     dest             = _dat_path(cache_dir, key)
+    exists           = os.path.exists(dest)
     downloaded_at    = meta["sources"].get(key, {}).get("downloaded_at", 0)
-    age_days         = (time.time() - downloaded_at) / 86400
-    needs_download   = not os.path.exists(dest) or age_days > update_days
+    age_days         = (time.time() - downloaded_at) / 86400 if downloaded_at else float("inf")
 
-    if not needs_download:
-        logger.debug("geo[%s] up-to-date (%.1f days old)", key, age_days)
+    # 决定是否要重新下载 + 给出清晰的"为什么"，方便用户排查
+    if force:
+        reason = "force update"
+        needs_download = True
+    elif not exists:
+        reason = "local .dat missing"
+        needs_download = True
+    elif downloaded_at == 0:
+        reason = "no downloaded_at timestamp in meta.json (first run or meta lost)"
+        needs_download = True
+    elif age_days > update_days:
+        reason = f"age {age_days:.1f}d > update_days {update_days:.1f}d"
+        needs_download = True
+    else:
+        # 命中缓存：INFO 级别打出，让用户能看到"今天没下载"的事实
+        logger.info("geo[%s] up-to-date, skip download (age %.1fd < %.1fd, file=%s)",
+                    key, age_days, update_days, dest)
         return True
 
-    logger.info("Downloading geo[%s] from %d mirror(s) ...", key, len(urls))
+    logger.info("Downloading geo[%s] from %d mirror(s) — %s",
+                key, len(urls), reason)
 
     for i, u in enumerate(urls, start=1):
         # 优先：经我们自己的加密隧道（弱网更稳）
@@ -392,6 +409,7 @@ async def _ensure_typed(
     default_update_days: float,
     meta: dict,
     pool=None,
+    force: bool = False,
 ) -> dict[str, str]:
     """并发确保一组同类型源可用，返回 {source_name: dat_path}"""
     # 先过滤出有效条目，tasks 与 valid 一一对应；zip 必须用过滤后的列表，
@@ -408,6 +426,7 @@ async def _ensure_typed(
             update_days = s.get("update_days", default_update_days),
             meta        = meta,
             pool        = pool,
+            force       = force,
         )
         for s in valid
     ]
@@ -429,9 +448,31 @@ async def ensure_all(cfg: dict, pool=None) -> tuple[dict[str, str], dict[str, st
 
     兼容旧版单源字段 geosite_url / geosite_path：
       自动转换为名为 "default" 的 geosite 源。
+
+    ── 缓存命中策略 ──────────────────────────────────────────────────────────
+    cfg 字段：
+      geosite_dir         缓存目录（默认 ".geosite"）。**相对路径基于 CWD**——
+                          建议写绝对路径，否则不同启动目录会找到不同的缓存
+      geosite_update_days 默认刷新周期（天）。每个源可在 sources 里独立覆盖
+      force_geosite_update 设为 true 时一律强制重新下载（默认 false）
+
+    决定是否下载的判据（详见 _ensure_one 的日志输出）：
+      1. force_geosite_update=true → 重下
+      2. 本地 .dat 不存在 → 重下
+      3. meta.json 缺该源的 downloaded_at → 重下
+      4. 距上次下载 > update_days → 重下
+      其余 → INFO 日志"skip download"，复用缓存
     """
-    cache_dir    = cfg.get("geosite_dir", ".geosite")
+    # **绝对路径化**：相对路径 CWD 漂移是"每次启动都下载"的常见根因
+    cache_dir_raw = cfg.get("geosite_dir", ".geosite")
+    cache_dir     = os.path.abspath(cache_dir_raw)
+    if cache_dir != cache_dir_raw:
+        logger.info("geo cache dir: %s (resolved from %r)", cache_dir, cache_dir_raw)
+    else:
+        logger.info("geo cache dir: %s", cache_dir)
+
     default_days = cfg.get("geosite_update_days", 7)
+    force        = bool(cfg.get("force_geosite_update", False))
 
     # 兼容旧版单源配置
     site_sources = cfg.get("geosite_sources") or []
@@ -455,9 +496,20 @@ async def ensure_all(cfg: dict, pool=None) -> tuple[dict[str, str], dict[str, st
     os.makedirs(cache_dir, exist_ok=True)
     meta = _read_meta(cache_dir)
 
+    # 透明诊断：从 meta.json 实际读到的内容
+    n_entries = len(meta.get("sources", {}))
+    meta_path = os.path.join(cache_dir, _META_FILE)
+    if n_entries == 0:
+        logger.info("meta.json empty / not found (%s) — all sources will download",
+                    meta_path)
+    else:
+        logger.info("meta.json: %d source(s) tracked at %s", n_entries, meta_path)
+
     # geosite 和 geoip 并发下载
-    site_task = _ensure_typed("site", site_sources, cache_dir, default_days, meta, pool)
-    ip_task   = _ensure_typed("ip",   ip_sources,   cache_dir, default_days, meta, pool)
+    site_task = _ensure_typed("site", site_sources, cache_dir, default_days,
+                              meta, pool, force=force)
+    ip_task   = _ensure_typed("ip",   ip_sources,   cache_dir, default_days,
+                              meta, pool, force=force)
     site_paths, ip_paths = await asyncio.gather(site_task, ip_task)
 
     site_paths.update(site_fallback)

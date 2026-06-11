@@ -17,6 +17,110 @@
 
 ---
 
+## [0.4.15] - 2026-06-11
+
+### 内部 / 性能
+
+- **`brutal_pool_size` 默认 10 → 20**
+  - 背景：2026-06-10 B1 性能基线（`bench.py`，c=16 并发上行）显示，原默认 10
+    + 0.3s 阶梯（staircase）下，16 并发触发 6 条冷建，bench 前 ~2s 被啃掉，实测
+    上行吞吐 243 Mbps；池设到 32 后同测试得 477 Mbps（+96%）。
+  - 浏览器日常并发 5-10、HTTP/2 多路复用后更低；默认 20 即覆盖 95% 个人使用
+    场景，避免冷建拖慢。内存代价 ~ 10 条 × 50KB tunnel state = +500KB，可忽略。
+- **新增配置项 `stagger_step_sec` / `stagger_jitter_sec`**
+  - 之前阶梯延迟硬编码在 `_STAGGER_STEP=0.30` / `_STAGGER_JITTER=0.08`。
+    现可在 outbound 节点配置里覆盖。
+  - 默认仍是 0.30 / 0.08（pcap 反 SYN-burst 指纹的实测值）；高并发且不在意 GFW
+    流量分析的内网场景可降到 0.05 / 0.02 加速 refill。
+
+### 新增
+
+- **`bench.py`：吞吐 + 延迟基准脚本**
+  - 场景：upload / download / bidir / latency（小包 ping-pong，P50/P95/P99）
+  - 参数：`-c` 并发连接、`-d` 时长、`--scenarios`、`--no-uvloop`、`--warmup-wait`、
+    `--json` 落盘
+  - 测量目标进程的本地 sink/source/echo 由脚本自启自停
+- **`PYREALIY_NO_UVLOOP=1` 环境变量**：禁用 uvloop（A/B 对照用）
+  - 实测对比（c=16 × 10s）：uvloop 关→开 上行 +12.6%、bidir 聚合 +18.2%、
+    P95 延迟从 54.5ms 降至 4.8ms（-91%）。结论：uvloop 该留默认开。
+
+### 文档
+
+- `README.md` 节点配置参数表新增 `stagger_step_sec` / `stagger_jitter_sec`
+  说明；`brutal_pool_size` 文档加上 "按预期最大并发 conn 数定" 的指导
+
+### 性能基线（POC 单进程 Python，对比仅供参考）
+
+实测环境：单机 loopback，Python 3.11.2 + uvloop 0.17.0，c=16 并发 × 10s：
+
+| 项目 | 结果 |
+|---|---|
+| Upload | 243 → 477 Mbps（池 10→32 时） |
+| Download 16 conn | ~344 Mbps（uvloop 无差异 → CPU 瓶颈） |
+| Latency P50 | ~1.5 ms |
+| Latency P95 (uvloop) | ~4.8 ms |
+| Latency P95 (默认 asyncio) | ~54 ms |
+| 单核 CPU | server + client 双方均 80-100% pegged |
+
+**单进程 Python 单核天花板 ~500 Mbps**（ChaCha20-Poly1305 AEAD × 双方加解密 × 4
+次/包）。突破这条线需要多进程 / Rust 重写——POC 阶段不做。
+
+### 迁移
+
+- **无破坏性改动**。
+- 原 `brutal_pool_size: 10` 配置仍工作；不写则默认升到 20。
+- 内存敏感的部署可显式写回 `brutal_pool_size: 10`。
+
+---
+
+## [0.4.14] - 2026-06-08
+
+### 修复 / 透明化
+
+- **修：geosite/geoip 缓存"每次启动都下载"的隐性根因 + 给出可见诊断**
+  - 现象：用户每次启动 client 都看到下载，**实际上代码里已有 `geosite_update_days`
+    判定**，但因为几个原因看起来像没生效：
+    1. **`geosite_dir` 默认 `.geosite` 是相对路径**，systemd 启动 / 不同 CWD →
+       每次找到不同的物理 `.geosite` → 找不到上次的 meta.json → 视为首次下载
+    2. **"up-to-date" 命中日志是 DEBUG 级别**，用户看不到"今天没下载"的事实，
+       只看到"Downloading geo[...]"以为每次都重下
+    3. 没有任何日志显示 meta.json 在哪、读到几条记录
+  - 修法（全部在 `core/geosite_cache.py`）：
+    1. **绝对路径化**：`ensure_all` 启动期 `os.path.abspath(cache_dir)`，无论
+       从哪起 CWD，缓存目录位置固定（如果原是相对路径会同时打日志展示解析结果）
+    2. **命中日志改 INFO**：`geo[<key>] up-to-date, skip download (age N.Nd < M.Md, file=...)`，
+       用户能直接看到"今天复用缓存"
+    3. **诊断行**：`meta.json: N source(s) tracked at <path>` 或 `meta.json empty
+       / not found (<path>) — all sources will download`，把读到的状态摊开
+    4. **下载理由清晰化**：`Downloading geo[<key>] from N mirror(s) — <reason>`，
+       reason ∈ `{local .dat missing, no downloaded_at timestamp in meta.json,
+       age N.Nd > update_days M.Md, force update}`
+
+### 新增
+
+- **`cfg["force_geosite_update"]` 可选 bool**：设为 true 时一律强制重下载（默认
+  false）。**用于"GitHub 释放了新版规则我想立刻拉一次"或"调试 geo 下载链路"**
+  的场景。一次性 force → 把它设回 false 即可恢复正常的 update_days 判定
+
+### 验证
+
+端到端 4 场景实测：
+
+| 场景 | 期望 | 实际 |
+|---|---|---|
+| 空缓存目录（首次启动）| "meta.json empty" + 触发下载 | ✓ |
+| 1 天前下载（< 7 天）| `skip download (age 1.0d < 7.0d)` | ✓ |
+| 8 天前下载（> 7 天）| `Downloading — age 8.0d > update_days 7.0d` | ✓ |
+| `force_geosite_update: true` | `Downloading — force update` | ✓ |
+
+### 迁移
+
+- 行为变化：缓存目录现以绝对路径解析，从不同 CWD 启动 client 不再各自维护一份
+  `.geosite/`。**用户感知是"原本每次启动都下载，现在第一次后就不动了"**
+- 老配置无需改动：`geosite_update_days` 默认 7 天，`force_geosite_update` 默认 false
+
+---
+
 ## [0.4.13] - 2026-06-07
 
 全模块自审，找到 1 个真 leak + 2 处微优化。
@@ -683,7 +787,9 @@ sniffer / router 等）。除上面 3 处，**未发现其它真问题**：
 
 更早的历史在 git log 里；从 `0.3.0` 起按本规范打 tag。
 
-[未发布]: https://github.com/<你的仓库>/compare/v0.4.13...HEAD
+[未发布]: https://github.com/<你的仓库>/compare/v0.4.15...HEAD
+[0.4.15]: https://github.com/<你的仓库>/releases/tag/v0.4.15
+[0.4.14]: https://github.com/<你的仓库>/releases/tag/v0.4.14
 [0.4.13]: https://github.com/<你的仓库>/releases/tag/v0.4.13
 [0.4.12]: https://github.com/<你的仓库>/releases/tag/v0.4.12
 [0.4.11]: https://github.com/<你的仓库>/releases/tag/v0.4.11

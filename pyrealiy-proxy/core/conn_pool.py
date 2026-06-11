@@ -17,7 +17,10 @@ Brutal 连接预建池
   server_host / server_port  服务端地址
   password / camouflage_host 鉴权 + SNI
   brutal_rate_bps            每条连接的 Brutal 速率（建议 5~10 Mbps，0=关）
-  brutal_pool_size           预建连接数（建议 10~20，影响最大并发吞吐）
+  brutal_pool_size           预建连接数（默认 20，按预期最大并发 conn 数定）
+  stagger_step_sec           相邻 build 间隔（默认 0.30，反 SYN-burst 指纹；
+                             不在意 GFW 检测可降到 0.05 加速 refill）
+  stagger_jitter_sec         上面间隔的随机抖动（默认 0.08）
 
 回调：
   on_latency(ms): 每次 build_one 成功后通知调用方实际握手耗时
@@ -242,8 +245,12 @@ class BrutalPool:
         on_failure: Optional[Callable[[], None]] = None,
     ):
         self._cfg       = cfg
-        self._pool_size = cfg.get("brutal_pool_size", 10)
+        self._pool_size = cfg.get("brutal_pool_size", 20)
         self._rate_bps  = cfg.get("brutal_rate_bps", 0)
+        # 阶梯延迟可调：默认沿用 _STAGGER_STEP/_JITTER（基于 pcap 反 SYN-burst 指纹）。
+        # 高并发场景且不在意 GFW 指纹的用户可降到 0.05 / 0.02 加速 refill。
+        self._stagger_step   = float(cfg.get("stagger_step_sec", _STAGGER_STEP))
+        self._stagger_jitter = float(cfg.get("stagger_jitter_sec", _STAGGER_JITTER))
         self._queue: asyncio.Queue[_ReadyTunnel] = asyncio.Queue()
         # 正在建立中的连接数。asyncio 单线程，在任意两个 await 之间修改是原子的，
         # 因此可以用普通 int 代替 Lock 来防止并发超建。
@@ -268,7 +275,7 @@ class BrutalPool:
         if self._next_build_at < now:
             self._next_build_at = now
         delay = self._next_build_at - now
-        self._next_build_at += _STAGGER_STEP + random.uniform(-_STAGGER_JITTER, _STAGGER_JITTER)
+        self._next_build_at += self._stagger_step + random.uniform(-self._stagger_jitter, self._stagger_jitter)
         return delay
 
     async def warmup(self) -> int:

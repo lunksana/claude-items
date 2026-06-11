@@ -1,0 +1,16 @@
+[*] uvloop enabled
+2026-06-08 15:45:07,829 [INFO] client: File descriptor limit raised: 1024 -> 1048576
+2026-06-08 15:45:07,829 [INFO] client: PyReality client v0.4.14
+2026-06-08 15:45:12,832 [WARNING] time_sync: time_sync initial sync timed out (5.0s); using system time, will retry in background
+2026-06-08 15:45:12,833 [INFO] time_sync: time_sync background loop started (interval 3600s)
+2026-06-08 15:45:12,835 [INFO] outbound: Legacy config detected (no 'outbounds'), synthesizing single pyrealiy outbound 'proxy'
+2026-06-08 15:45:12,836 [INFO] outbound: Auto-added implicit 'direct' outbound
+2026-06-08 15:45:12,836 [INFO] outbound: Auto-added implicit 'block' outbound
+2026-06-08 15:45:12,836 [INFO] client: Outbounds loaded: proxy(pyrealiy), direct(direct), block(block)
+2026-06-08 15:45:16,986 [INFO] conn_pool: Pool warmed up: 10/10 connections ready (rate=0 Mbps each, staggered)
+2026-06-08 15:45:16,987 [INFO] client: geo download will tunnel through outbound 'proxy'
+2026-06-08 15:45:16,987 [INFO] geo_cache: geo cache dir: /opt/claude/pyrealiy-proxy/.geosite (resolved from '.geosite')
+2026-06-08 15:45:16,988 [INFO] geo_cache: meta.json empty / not found (/opt/claude/pyrealiy-proxy/.geosite/meta.json) — all sources will download
+2026-06-08 15:45:16,990 [INFO] router: Router built: 0 rules total |  | default=proxy
+2026-06-08 15:45:16,990 [INFO] healthcheck: Health check started: 1 pyrealiy outbound(s), every 60s, stale=300s
+2026-06-08 15:45:16,991 [INFO] client: SOCKS5 listening on 127.0.0.1:1080

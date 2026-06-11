@@ -269,7 +269,9 @@ ssh -L 8080:127.0.0.1:8080 user@your-vps
 | `password` | 与服务端一致 |
 | `sni` | 伪装 SNI，与服务端 `camouflage_host` 一致 |
 | `brutal_rate_bps` | 可选，默认 0（客户端不启用 Brutal） |
-| `brutal_pool_size` | 可选，预建连接池大小，默认 10 |
+| `brutal_pool_size` | 可选，预建连接池大小，默认 20。**按预期最大并发 conn 数定**：浏览器日常 8-16 足够；爬虫 / 下载器场景设 32+。池过小时，并发请求会触发冷建（每条 ~0.3s staircase 间隔），实测拖慢 16-并发上行近 50% |
+| `stagger_step_sec` | 可选，相邻 build 之间的最小间隔（秒），默认 0.30。基于 pcap 实测的反 SYN-burst 指纹值。**仅在不在意 GFW 流量分析的内网/可信链路场景下**可降到 0.05 加速 refill |
+| `stagger_jitter_sec` | 可选，上一参数的随机抖动（秒），默认 0.08 |
 
 > **`direct` / `block` 自动补全**：即便未在 `outbounds` 显式声明，启动期也会自动补出 `{"type":"direct","tag":"direct"}` 与 `{"type":"block","tag":"block"}` 两个出口，分流规则可直接引用这两个 tag。
 

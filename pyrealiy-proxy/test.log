@@ -1,0 +1,3 @@
+[TCP Test] Local target sink started on port 9999
+[TCP Test] Connecting to PyRealiy client (SOCKS5) on port 1080...
+[-] Could not connect to SOCKS5 port: [Errno 111] Connect call failed ('127.0.0.1', 1080)

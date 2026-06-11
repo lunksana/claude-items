@@ -304,28 +304,37 @@ def _normalize_pyrealiy_cfg(item: dict) -> dict:
     把 sing-box 风格的 outbound 字段（server / server_port / sni）规范化为
     BrutalPool 期望的内部字段（server_host / server_port / camouflage_host）。
     """
-    return {
+    out = {
         "server_host":      item.get("server") or item.get("server_host"),
         "server_port":      int(item.get("server_port", 443)),
         "password":         item.get("password", ""),
         "camouflage_host":  item.get("sni") or item.get("camouflage_host", "www.apple.com"),
         "brutal_rate_bps":  int(item.get("brutal_rate_bps", 0)),
-        "brutal_pool_size": int(item.get("brutal_pool_size", 10)),
+        "brutal_pool_size": int(item.get("brutal_pool_size", 20)),
     }
+    # 可选阶梯参数：仅在显式配置时透传，否则让 BrutalPool 用模块默认
+    for k in ("stagger_step_sec", "stagger_jitter_sec"):
+        if k in item:
+            out[k] = float(item[k])
+    return out
 
 
 def _synthesize_legacy_outbound(cfg: dict) -> list[dict]:
     """老配置（server_host 顶层）→ 单 pyrealiy outbound"""
     logger.info("Legacy config detected (no 'outbounds'), synthesizing single pyrealiy outbound 'proxy'")
-    return [{
+    item = {
         "type": "pyrealiy", "tag": "proxy",
         "server":           cfg["server_host"],
         "server_port":      cfg["server_port"],
         "password":         cfg["password"],
         "sni":              cfg.get("camouflage_host", "www.apple.com"),
         "brutal_rate_bps":  cfg.get("brutal_rate_bps", 0),
-        "brutal_pool_size": cfg.get("brutal_pool_size", 10),
-    }]
+        "brutal_pool_size": cfg.get("brutal_pool_size", 20),
+    }
+    for k in ("stagger_step_sec", "stagger_jitter_sec"):
+        if k in cfg:
+            item[k] = cfg[k]
+    return [item]
 
 
 def build_outbounds(cfg: dict) -> dict[str, Outbound]:

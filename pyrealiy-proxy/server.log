@@ -1,0 +1,19 @@
+[*] uvloop enabled
+2026-06-08 15:44:59,722 [INFO] server: File descriptor limit raised: 1024 -> 1048576
+2026-06-08 15:44:59,722 [INFO] server: PyReality server v0.4.14
+2026-06-08 15:45:04,724 [WARNING] time_sync: time_sync initial sync timed out (5.0s); using system time, will retry in background
+2026-06-08 15:45:04,725 [INFO] time_sync: time_sync background loop started (interval 3600s)
+2026-06-08 15:45:04,725 [INFO] server: anti-DoS: idle_timeout=1800s, max_conns_per_ip=100, tcp_keepalive=True
+2026-06-08 15:45:04,725 [INFO] handshake_cache: Fetching 32 TLS 1.3 sessions from www.apple.com ...
+2026-06-08 15:45:06,977 [INFO] handshake_cache: Cached 32/32 TLS sessions from www.apple.com
+2026-06-08 15:45:06,979 [INFO] server: Listening on 127.0.0.1:443 | camouflage -> www.apple.com | cache ready: True
+2026-06-08 15:45:12,844 [INFO] camouflage: In-Hello auth OK
+2026-06-08 15:45:13,117 [INFO] camouflage: In-Hello auth OK
+2026-06-08 15:45:13,423 [INFO] camouflage: In-Hello auth OK
+2026-06-08 15:45:13,773 [INFO] camouflage: In-Hello auth OK
+2026-06-08 15:45:14,006 [INFO] camouflage: In-Hello auth OK
+2026-06-08 15:45:14,308 [INFO] camouflage: In-Hello auth OK
+2026-06-08 15:45:14,600 [INFO] camouflage: In-Hello auth OK
+2026-06-08 15:45:14,829 [INFO] camouflage: In-Hello auth OK
+2026-06-08 15:45:15,137 [INFO] camouflage: In-Hello auth OK
+2026-06-08 15:45:15,482 [INFO] camouflage: In-Hello auth OK
