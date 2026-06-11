@@ -187,6 +187,10 @@ class TimeSync:
     """
 
     _offset: float = 0.0
+    # Clash API /pyrealiy/timesync 用：最近一次成功同步的来源 + 时刻 + 样本数
+    _last_source: str = ""
+    _last_sync_at_epoch: float = 0.0
+    _last_sample_count: int = 0
     _initialized: bool = False
 
     def __init__(self, cfg: dict):
@@ -255,6 +259,7 @@ class TimeSync:
     async def _sync_once(self) -> bool:
         """从多源采样，取 median 决定新 offset。返回是否成功"""
         samples: list[float] = []
+        used_source = "ntp"
 
         # 1) UDP NTP 优先
         for srv in self.udp_servers:
@@ -267,6 +272,7 @@ class TimeSync:
         # 2) UDP 全黑（防火墙拦 123）→ HTTPS Date 兜底
         if not samples:
             logger.info("UDP NTP unreachable, falling back to HTTPS Date")
+            used_source = "https"
             for srv in self.tcp_servers:
                 t = await _ntp_query_https(srv)
                 if t is not None:
@@ -294,6 +300,9 @@ class TimeSync:
         old = TimeSync._offset
         TimeSync._offset = new_offset
         TimeSync._initialized = True
+        TimeSync._last_source = used_source
+        TimeSync._last_sync_at_epoch = time.time()
+        TimeSync._last_sample_count = len(samples)
         logger.info("time_sync: offset %.2fs → %.2fs (Δ%+.2fs, %d source%s)",
                     old, new_offset, new_offset - old, len(samples),
                     "" if len(samples) == 1 else "s")

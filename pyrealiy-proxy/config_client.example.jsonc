@@ -1,0 +1,278 @@
+// ─────────────────────────────────────────────────────────────────────────────
+//  PyRealiy 客户端配置示例（schema_version=1 推荐格式）
+//
+//  用法：去掉所有注释，复制为 config_client.json
+//        或：bash install.sh 用向导生成（无需手工编辑）
+//
+//  schema_version=1 合约：详见 README "schema_version=1 合约" 章节
+// ─────────────────────────────────────────────────────────────────────────────
+{
+    // ═══════════════════════════════════════════════════════
+    //   1. 元字段
+    // ═══════════════════════════════════════════════════════
+
+    // 锁定 schema_version=1：合约保证此 schema 周期内顶层 8 key 不再加
+    "schema_version": 1,
+
+
+    // ═══════════════════════════════════════════════════════
+    //   2. 日志
+    // ═══════════════════════════════════════════════════════
+
+    // "text"（默认人类可读）或 "json"（每行一个 JSON）
+    // JSON schema：{ts, level, logger, msg, extra?, exc?}，详见 README "结构化日志"
+    "log": {"format": "text"},
+
+
+    // ═══════════════════════════════════════════════════════
+    //   3. 入站监听（应用层接入点）
+    // ═══════════════════════════════════════════════════════
+
+    "inbounds": [
+        // SOCKS5：浏览器 / curl 等应用层用此接入
+        //   curl -x socks5h://127.0.0.1:1080 https://example.com
+        //
+        // listen "0.0.0.0:1080" 即允许 LAN 设备共用本机代理
+        {"type": "socks5", "listen": "127.0.0.1:1080"}
+    ],
+
+
+    // ═══════════════════════════════════════════════════════
+    //   4. 出站节点
+    // ═══════════════════════════════════════════════════════
+
+    "outbounds": [
+        // pyrealiy 节点：与服务端对应
+        {
+            "tag":         "node-jp-1",                // 唯一标识，被 rules / 组引用
+            "type":        "pyrealiy",
+            "server":      "your.tokyo.server.ip",     // 服务端公网 IP 或域名
+            "server_port": 443,                        // 与服务端 listen_port 一致
+            "password":    "<与服务端 password 一致>",
+            "sni":         "www.apple.com"             // 与服务端 camouflage_host 一致
+
+            // === 节点级 tuning（可选，按需打开）===
+            // "brutal_rate_bps":    8000000,        // 此节点单连接 Brutal 速率（bytes/s），0 = 关
+            // "brutal_pool_size":   20,             // 预建连接数；浏览器 8-16 够，爬虫 32+
+            // "stagger_step_sec":   0.30,           // 池建连最小间距（反 SYN-burst 指纹）
+            // "stagger_jitter_sec": 0.08            // 上一项随机抖动
+        },
+        {
+            "tag":         "node-us-1",
+            "type":        "pyrealiy",
+            "server":      "your.us.server.ip",
+            "server_port": 443,
+            "password":    "<同上>",
+            "sni":         "www.apple.com"
+        },
+
+        // urltest 组：在 children 里选 median latency 最低的
+        // tolerance 防抖：current vs best 差 < 50ms 时保持 current，避免频繁切换
+        {
+            "tag":       "auto",
+            "type":      "urltest",
+            "outbounds": ["node-jp-1", "node-us-1"],
+            "interval":  "60s",
+            "tolerance": 50
+        },
+
+        // fallback 组：按声明顺序选第一个 healthy（手动指定优先级）
+        {
+            "tag":       "us-only",
+            "type":      "fallback",
+            "outbounds": ["node-us-1"]
+        },
+
+        // direct / block 即使不显式声明也会自动补全，这里写出来便于规则引用
+        {"tag": "direct", "type": "direct"},
+        {"tag": "block",  "type": "block"}
+    ],
+
+
+    // ═══════════════════════════════════════════════════════
+    //   5. 路由规则
+    // ═══════════════════════════════════════════════════════
+
+    "route": {
+        // 未命中任何 rule 时的兜底 outbound tag
+        "default": "auto",
+
+        // 规则按数组顺序扫描，首条命中即用其 outbound
+        "rules": [
+            // 广告 → block
+            {"rule_set": ["loyalsoldier:category-ads-all"], "outbound": "block"},
+
+            // 内网 → direct
+            {"ip_cidr":  ["127.0.0.0/8", "10.0.0.0/8",
+                          "172.16.0.0/12", "192.168.0.0/16",
+                          "169.254.0.0/16"],                 "outbound": "direct"},
+
+            // 国内 → direct
+            {"rule_set": ["loyalsoldier:private"],           "outbound": "direct"},
+            {"rule_set": ["loyalsoldier:cn"],                "outbound": "direct"},
+            {"geoip":    ["loyalsoldier:cn"],                "outbound": "direct"},
+
+            // 流媒体 → 走美国节点（演示按地区/服务分流）
+            {"rule_set": ["loyalsoldier:netflix",
+                          "loyalsoldier:disney",
+                          "loyalsoldier:openai"],            "outbound": "us-only"}
+
+            // ── rules 还支持的字段（每条 rule 只允许一种 criterion，禁多字段 AND）：
+            //
+            // 精确域名：
+            //   {"domain": ["example.com", "www.example.com"], "outbound": "..."}
+            //
+            // 域名后缀：
+            //   {"domain_suffix": [".openai.com", ".huggingface.co"], "outbound": "..."}
+            //
+            // 域名关键字（子串）：
+            //   {"domain_keyword": ["youtube", "googlevideo"], "outbound": "..."}
+            //
+            // 域名正则：
+            //   {"domain_regex": ["^(.+\\.)?google\\.com$"], "outbound": "..."}
+            //
+            // 取反（典型：除 cn 外都走代理）：
+            //   {"geoip": ["loyalsoldier:cn"], "invert": true, "outbound": "proxy"}
+        ]
+    },
+
+
+    // ═══════════════════════════════════════════════════════
+    //   6. DNS 转发器（可选）
+    // ═══════════════════════════════════════════════════════
+
+    "dns": {
+        // 监听地址，未设则不启 DNS 服务
+        //   5353：无需 root
+        //   53  ：需 root 或 CAP_NET_BIND_SERVICE
+        "listen": "127.0.0.1:5353"
+
+        // 注意：dns.resolvers + dns.rules 的 schema 已就位但 dns_forwarder
+        // 当前还没消费它，cn_dns / remote_dns 仍写在顶层（见下面 §9）
+    },
+
+
+    // ═══════════════════════════════════════════════════════
+    //   7. Clash 兼容 API（可选）
+    // ═══════════════════════════════════════════════════════
+
+    "api": {
+        // 监听地址，未设则不启 API
+        // 强烈建议保持 127.0.0.1；要 LAN 共用请配合防火墙限 IP
+        "listen": "127.0.0.1:9090",
+
+        // Bearer 鉴权 token；Yacd / metacubexd 登录用
+        // 生成：openssl rand -base64 24
+        // **不能为空**，否则启动期 ConfigError 直接拒绝
+        "secret": "<your-strong-api-token>",
+
+        // CORS 白名单。浏览器 UI 必需 *；只用本地 curl 测时可去掉
+        "cors": ["*"]
+    },
+
+
+    // ═══════════════════════════════════════════════════════
+    //   8. 高级调优（可选；默认值适合家用场景，不写整 section 也行）
+    // ═══════════════════════════════════════════════════════
+
+    "tuning": {
+        // 每条 SOCKS5 连接的 dispatch INFO 日志开关
+        // 默认 false（高并发下打开会显著拖慢吞吐）；调试规则时再开
+        "access_log": false,
+
+        // 路由决策缓存（domain → outbound_tag，TTL 1h）
+        // 命中后跳过 router.match，热门域名节省规则扫描开销
+        "routing_cache": {"enabled": true, "max_entries": 10000, "ttl_sec": 3600},
+
+        // DNS 响应缓存（(domain, qtype) → 响应字节，TTL 跟随 answer.TTL）
+        // 命中后跳过上游查询，实测 DoH 400ms → 0.3ms
+        "dns_cache":     {"enabled": true, "max_entries": 10000},
+
+        // tunnel 写缓冲积压超过此值才 drain（bytes）。默认 64KB
+        // 跨境长肥管道（高 BDP）调到 256KB-1MB 能让 pipeline 填满
+        "drain_threshold": 65536,
+
+        // 各模块日志级别覆盖（DEBUG / INFO / WARNING / ERROR / CRITICAL）
+        // 可用 logger 名见 core/utils.py::apply_log_levels 文档
+        "log_levels": {
+            // "core.tunnel": "WARNING",
+            // "outbound": "DEBUG"
+        }
+    },
+
+
+    // ═══════════════════════════════════════════════════════
+    //   8.5. 时钟同步（可选；防 VPS 时钟漂移导致 token 校验失败）
+    // ═══════════════════════════════════════════════════════
+
+    "time_sync": {
+        "enabled":         true,
+        "interval":        "1h",          // 周期重同步
+        "startup_timeout": "5s",          // 首次同步阻塞上限（失败后台重试）
+        "max_offset_sec":  86400          // > 1 天的偏移视为污染，拒绝
+    },
+
+
+    // ═══════════════════════════════════════════════════════
+    //   8.6. 透明代理 TProxy（可选；需要 root + iptables 配置）
+    // ═══════════════════════════════════════════════════════
+
+    // TProxy 监听端口，0 = 禁用
+    // 启用后还需 iptables TPROXY 规则把流量重定向过来，详见 README "TProxy 防火墙规则"
+    "tproxy_port": 0,
+
+
+    // ═══════════════════════════════════════════════════════
+    //   8.7. UDP relay 调优（可选；SOCKS5 UDP ASSOCIATE）
+    // ═══════════════════════════════════════════════════════
+
+    // UDP relay 本地绑定地址（SOCKS5 UDP ASSOCIATE 回包端口绑这里）
+    // 默认跟随 SOCKS5 监听地址；LAN 共享代理时改 "0.0.0.0"
+    // "udp_relay_host": "127.0.0.1",
+
+    // UDP 会话闲置多久关（秒）。默认 60
+    // 长寿命 UDP 会话（如 WireGuard / QUIC）建议调大
+    "udp_idle_timeout": 60,
+
+
+    // ═══════════════════════════════════════════════════════
+    //   9. 仍保留在顶层的字段（schema 过渡期）
+    // ═══════════════════════════════════════════════════════
+    //   dns.resolvers + dns.rules 计划在未来 MINOR 版本接入；
+    //   当前 dns_forwarder 仍读下面这几个老顶层 key。
+    //   启动期会有一条 "unknown top-level keys ignored" WARN，**功能正常**。
+    // ═══════════════════════════════════════════════════════
+
+    // 命中 direct 出口的 DNS 查询走此 UDP 服务器
+    // 推荐：119.29.29.29 (DNSPod)、223.5.5.5 (阿里 DNS)
+    "cn_dns": "119.29.29.29",
+
+    // 命中 pyrealiy 出口的 DNS 查询经隧道走此服务器
+    //
+    // 支持三种 scheme：
+    //   "1.1.1.1:53"                   纯 UDP 经隧道（默认）
+    //   "tls://1.1.1.1:853"            DoT：端到端 TLS + 长度前缀 DNS
+    //   "https://1.1.1.1/dns-query"    DoH：端到端 TLS + HTTP/1.1 POST
+    //
+    // DoH URL 的 host 必须是 IP literal（防 bootstrap 死循环）
+    // TLS 由客户端做端到端，server 看不到明文 DNS
+    "remote_dns": "1.1.1.1:53",
+
+    // GeoSite / GeoIP 缓存
+    "geosite_dir":         ".geosite",
+    "geosite_update_days": 7,
+
+    // 自定义 geosite / geoip 数据源（可选；不写则用 loyalsoldier 默认源）
+    // name 即 rules 里 `loyalsoldier:cn` 的前缀部分
+    "geosite_sources": [
+        // {"name": "loyalsoldier",
+        //  "url": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"}
+    ],
+    "geoip_sources": [
+        // {"name": "loyalsoldier",
+        //  "url": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"}
+    ],
+
+    // 强制刷新 geo 数据（忽略 geosite_update_days），下次启动后建议改回 false
+    "force_geosite_update": false
+}

@@ -1,4 +1,8 @@
 #!/bin/bash
+# 同 run_test.sh，精简版
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
 pkill -9 -f 'python3.*server.py' || true
 pkill -9 -f 'python3.*client.py' || true
 sleep 1
@@ -19,7 +23,7 @@ for i in {1..15}; do
     sleep 1
 done
 
-python3 -u throughput_test.py
+python3 -u tests/throughput_test.py
 
 kill $CLIENT_PID
 kill $SERVER_PID

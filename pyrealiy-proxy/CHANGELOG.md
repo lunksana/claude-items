@@ -17,6 +17,1093 @@
 
 ---
 
+## [0.4.32] - 2026-06-11
+
+### 修改 / 示例文件补全所有功能模块
+
+自查 0.4.31 示例文件发现 11 个功能模块漏列。本版本补齐到 server.py / client.py
+实际读的全部 cfg 字段。
+
+### 服务端示例 — 新增 9 项
+
+| 模块 | 字段 |
+|---|---|
+| 伪装非标端口 | `camouflage_port`（默认 443） |
+| **反 DoS 三件套** | `idle_timeout_sec` / `max_conns_per_ip` / `tcp_keepalive` |
+| 服务端 access log | `access_log`（与 client 同义） |
+| 长肥管道调优 | `drain_threshold`（默认 64 KB，跨境 BDP 高时调大） |
+| **时钟同步** | `time_sync` section（`enabled` / `interval` / `startup_timeout` / `max_offset_sec` + udp/tcp 服务器源） |
+| **SO_MARK 多出口** | `egresses[]` + `egress_rules[]`（WARP / 多 WireGuard / 多 ISP 场景，示例注释保留） |
+
+服务端示例顶层 key：**10 → 19**
+
+### 客户端示例 — 新增 6 项
+
+| 模块 | 字段 |
+|---|---|
+| 节点级 tuning | 每个 pyrealiy 节点的 `brutal_rate_bps` / `brutal_pool_size` / `stagger_step_sec` / `stagger_jitter_sec`（注释保留） |
+| 长肥管道 | `tuning.drain_threshold` |
+| 时钟同步 | `time_sync` section（与服务端同 schema） |
+| TProxy | `tproxy_port`（top-level，0 = 禁用） |
+| UDP relay 调优 | `udp_relay_host` / `udp_idle_timeout` |
+| Rules 类型扩展 | `domain` / `domain_suffix` / `domain_keyword` / `domain_regex` / `invert` 5 种形态在 route 末尾以注释展示 |
+| 自定义 geo 源 | `geosite_sources` / `geoip_sources` / `force_geosite_update` |
+
+客户端示例顶层 key：**12 → 18**
+
+### 验证
+
+```
+config_server.example.jsonc: VALID  (19 top-level keys)
+config_client.example.jsonc: VALID  (18 top-level keys)
+
+行数：157 + 278 = 435 行
+```
+
+去除 `//` 和 `/* */` 后 `json.loads` 通过。
+
+### 设计原则
+
+- **常用字段**直接显示默认值（不需要解释也能用）
+- **可选字段**注释掉但保留在示例里（让用户知道存在、可发现）
+- **类型扩展**（如 5 种 domain rule 形态）以注释段集中展示，不污染主流程
+- 每个 section 顶部一行 `═══` 分隔符 + 含义说明
+
+### 与 README 联动
+
+`config_*.example.jsonc` 是**字段层面**的参考；README 是**概念层面**的说明
+（schema 合约、Clash API、热加载、DoH/DoT 等）。两者互补。
+
+---
+
+## [0.4.31] - 2026-06-11
+
+### 新增 / 带注释的示例配置文件
+
+为不愿用 `install.sh` 向导而想手编配置的用户，提供两份**完整带注释**的示例文件：
+
+| 文件 | 行数 / 注释 | 内容 |
+|---|---|---|
+| `config_server.example.jsonc` | 5.4 KB / **57 行注释** | 服务端全字段说明：监听 / 鉴权 / TLS 伪装 / Brutal / Web 管理面板 / 日志。仍是 schema_v0 平铺格式 |
+| `config_client.example.jsonc` | 10.6 KB / **90 行注释** | 客户端 **schema_v1** 完整字段：log / inbounds / outbounds（含 urltest + fallback 组）/ route / dns / api / tuning / 老顶层 DNS 字段 |
+
+### 格式选择：JSONC
+
+JSON 不支持注释。**JSONC = JSON with Comments**（`//` 和 `/* */`），VSCode / Sublime / JetBrains 等主流编辑器**原生**识别 `.jsonc` 扩展名并高亮。
+
+### 使用流程
+
+```bash
+# 方式 1：用 install.sh 向导生成（推荐，无需手编）
+sudo bash install.sh
+
+# 方式 2：从示例复制，去注释后保存为 .json
+python3 -c "
+import re, json
+src = open('config_client.example.jsonc').read()
+src = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
+src = re.sub(r'//[^\n]*', '', src)
+json.dump(json.loads(src), open('config_client.json','w'), indent=4)
+"
+```
+
+### 验证
+
+- 两个 `.jsonc` 文件去掉 `//` 和 `/* */` 后 `json.loads` 通过
+- server 示例顶层 10 key，client 示例顶层 12 key（schema_v1 8 个 + 顶层过渡 DNS 字段）
+
+### 联动改动
+
+- **README "手动配置" 章节**：开头加示例文件说明 + 去注释命令
+- **README 项目结构文件树**：加 `.example.jsonc` 两行
+- **install.sh 完成提示**：尾部加一行指向示例文件 + README
+
+---
+
+## [0.4.30] - 2026-06-11
+
+### 文档 / README 大同步
+
+把 0.4.16 之后的所有用户可见特性补进 README。新增 5 个顶层 section + 客户端
+config 示例改用 schema_v1 形态。
+
+### 新增 section
+
+| Section | 内容 |
+|---|---|
+| **schema_version=1 合约** | 顶层 8 key 锁定、合约表（什么改动在哪个版本允许）、向后兼容说明 |
+| **Clash 兼容 API（client 端只读）** | 11 个端点清单（含 GET/PUT/WS） + Bearer 鉴权 + Yacd 接入信息 + 不实现的控制类列表 |
+| **DNS 转发器（含 DoH / DoT + 决策缓存）** | UDP/DoT/DoH 三种 scheme 表格、决策缓存的两层 LRU 描述（实测 ~400ms → ~0.3ms） |
+| **配置热加载** | 三种触发方式（systemctl reload / PUT /configs / SIGHUP）、可热加载 vs locked field 表、不打断现有连接的设计 |
+| **结构化日志** | `cfg.log.format` 切换、JSON schema 字段表、jq 解析示例 |
+
+### 客户端 config 示例改造
+
+- 加 `schema_version: 1` 顶层字段
+- inbounds 数组、route.default、dns.listen、api.listen+secret、tuning section 全部
+  按 schema_v1 形态写
+- `cn_dns` / `remote_dns` / `geosite_*` 保留在顶层（dns_forwarder 尚未消费
+  `dns.resolvers` schema），文中说明这个过渡状态
+- urltest / fallback 组示例保留
+- direct / block outbound 显式写出（即使自动补全也写）
+
+### 字段表更新
+
+- 顶层字段表覆盖全部 schema_v1 + 仍生效的 legacy 顶层
+- `remote_dns` 行注明支持 UDP / DoT / DoH 三种 scheme，指向新 DNS section
+
+### 不动的（仍准确）
+
+- 服务端 Web 管理面板（`admin_host` / `admin_port` / `admin_token`）—— server.py
+  里这部分代码仍在，文档准确
+- 多节点 / urltest / fallback section
+- TProxy section
+- TCP Brutal section
+- 系统服务 section（OpenRC / SysV 在 0.4.28 已补齐）
+- 协议设计 section（历史时不变）
+
+### 修订
+
+- Web 管理面板（server）和 Clash API（client）分开成两个独立 section，避免混淆
+- 取消之前 README 里"方式一 / 方式二"双部署路径，改为单一 `install.sh` 入口
+  （0.4.27 已做，此版本再清一遍）
+
+### 验证
+
+- 客户端 JSON 示例 `json.loads()` 通过；顶层 keys 包含 `schema_version` 等 12 项
+- 100 个 code fence 平衡（even）
+- 14 个顶层 `## ` section 顺序合理
+- 无残余 `setup.py` 引用
+- `admin_*` 字段仍只出现在服务端章节
+
+---
+
+## [0.4.29] - 2026-06-11
+
+### 修复 / 自查清账（0.4.27 + 0.4.28 遗留）
+
+自查发现 6 个问题（2 个真 bug + 4 个旧 docstring + 1 个死代码），全部修复：
+
+- **C1：`pip install --break-system-packages` 在 pip < 23.0.1 系统上报错**
+  - 现象：Debian 11 / Ubuntu 22 / 老 CentOS 的 pip 不识别该 flag，`install_pip_deps` 直接退出
+  - 修：用 `compgen -G "/usr/lib/python3*/EXTERNALLY-MANAGED"` 检测 PEP 668 marker；只在
+    确实是 PEP 668 environment 时才加该 flag
+  - 检测到时额外打印 `info "  检测到 PEP 668 environment，加 --break-system-packages"`
+- **C2：服务端配置写 `"schema_version": 1` 触发 unknown-top-keys WARN**
+  - 现象：服务端用老平铺字段（`listen_host` / `listen_port` 等不在 schema_v1 的 7 个
+    顶层 key 里），写 `schema_version: 1` 后 load_config 每次启动 WARN 一条
+    `unknown top-level keys ignored: [...]`
+  - 修：服务端 config 不写 `schema_version` 字段，让 load_config 走"Legacy schema
+    detected" 路径直接返回（服务端的 schema_v1 化是未来工作）
+  - 验证：load_config 现在只打一条 INFO `Legacy schema detected`，无 WARN
+- **C3 / C4 / C5：3 处 docstring 引用已删除的 `setup.py`**
+  - `client.py:17`：删 "由 setup.py 生成"，改为 "参考 README TProxy 防火墙规则一节手配"
+  - `core/tproxy.py:6`：同上
+  - `core/egress.py:56`：删 "setup.py 的 WARP 一键脚本会一并写好"，改为通用说明
+- **C6：`SERVICE_CMD` 全局变量声明 + 赋值但全文未读取**
+  - 死代码，移除（4 处赋值 + 1 处声明 + 1 处注释）
+- **C7：`core/egress.py:86,89` 残余 `setup-warp.sh` 引用**（第一轮扫漏了）
+  - 改为 "典型的 WireGuard policy routing" + "用户自行加 `ip -6 rule`"
+
+### 全项目最终 setup* 引用
+
+```
+$ grep -rE 'setup\.py|setup-warp' --include='*.py' --include='*.sh' .
+install.sh:15:# 单一安装入口；旧 setup.py 已淘汰。     ← 仅剩这一处说明性注释
+```
+
+CHANGELOG 历史条目里的引用保留（记录用）。
+
+### 自查覆盖（这次过的，未发现问题）
+
+- `bash -n install.sh` 语法 ✓
+- 服务端 / 客户端 JSON 在各 preset 组合下都通过 `json.load`
+- `detect_init_system` 当前环境识别为 `systemd` ✓
+- 3 种 init unit 模板（systemd / OpenRC / SysV）heredoc 变量替换正确，
+  `\$MAINPID` / `\$network` / `\${RC_SVCNAME}` 保留为 literal
+- `${kind^}` 大小写转换是 bash 4+ 内建，shebang `#!/usr/bin/env bash` 保证
+- `ask_choice` 1-based 索引 + 输入边界检查
+- 服务端尾声打印的客户端 cfg 模板格式合法
+
+---
+
+## [0.4.28] - 2026-06-11
+
+### 新增 / install.sh 支持 OpenRC + SysV init.d
+
+`install.sh` 之前只生成 systemd unit。本版本加入 init 系统自动检测 + 三种 unit 模板：
+
+- **systemd**（多数 Linux 发行版默认）— 已有
+- **OpenRC**（Alpine、Gentoo）— 新增
+- **SysV init.d**（CentOS 6、老 Debian、部分嵌入式 Linux）— 新增
+
+### 检测顺序
+
+```
+[ -d /run/systemd/system ] || systemctl   → systemd
+rc-service && rc-update                    → openrc
+[ -d /etc/init.d ] && (update-rc.d|chkconfig)  → sysv
+else                                       → unknown（手动启动）
+```
+
+启动时打印 `[*] 检测到 init 系统：<name>`。
+
+### 三种 unit 都支持的子命令
+
+| 子命令 | systemd | OpenRC | SysV |
+|---|---|---|---|
+| start / stop / restart | ✓ | ✓ | ✓ |
+| status | ✓ | ✓ | ✓ |
+| **reload（SIGHUP，触发热加载）** | `ExecReload=/bin/kill -HUP $MAINPID` | `start-stop-daemon --signal HUP --pidfile ...` | `kill -HUP $(cat $PIDFILE)` |
+
+### OpenRC unit 关键字段
+
+```
+#!/sbin/openrc-run
+command="/usr/bin/python3"
+command_args="<work_dir>/<kind>.py <work_dir>/config_<kind>.json"
+command_background=true
+pidfile="/run/pyrealiy-<kind>.pid"
+rc_ulimit="-n 65536"
+depend() { need net; after net; }
+reload() { ... start-stop-daemon --signal HUP ... }
+```
+
+### SysV init.d unit 关键字段
+
+```
+### BEGIN INIT INFO
+# Provides:          pyrealiy-<kind>
+# Required-Start:    $network $remote_fs
+# Default-Start:     2 3 4 5
+### END INIT INFO
+
+nohup python3 ... >> $LOG 2>&1 &
+echo $! > $PIDFILE
+```
+
+- enable：`update-rc.d` 优先（Debian 系），`chkconfig` 次之（RedHat 系）
+- `ulimit -n 65536` 在脚本顶部
+
+### 用户命令提示自适应
+
+客户端安装末尾的"常用命令"段根据检测到的 init 自动切换：
+
+| init | 状态 | 重载 |
+|---|---|---|
+| systemd | `systemctl status pyrealiy-client` | `systemctl reload pyrealiy-client` |
+| openrc | `rc-service pyrealiy-client status` | `rc-service pyrealiy-client reload` |
+| sysv | `service pyrealiy-client status` | `service pyrealiy-client reload` |
+| unknown | `kill -HUP $(pgrep -f 'python3.*client.py')` |
+
+### 验证
+
+| init | 模板生成 | enable 命令 |
+|---|---|---|
+| systemd | `[Unit] Description=... ExecReload=/bin/kill -HUP $MAINPID ...` | `systemctl daemon-reload && systemctl enable` |
+| OpenRC | `#!/sbin/openrc-run ... reload() { start-stop-daemon --signal HUP ... }` | `rc-update add pyrealiy-* default` |
+| SysV | `### BEGIN INIT INFO ... case "$1" in start|stop|reload|status)` | `update-rc.d pyrealiy-* defaults` or `chkconfig --add` |
+
+三种模板在当前环境（systemd）+ 手工 stub 后各自生成的 unit 文件**变量替换正确**：
+- `${WORK_DIR}` 展开为绝对路径
+- `\$MAINPID` / `\$network` / `\${RC_SVCNAME}` 保留为 literal（运行时由 init 解释）
+
+### 修订
+
+- 0.4.27 CHANGELOG / README 之前写"仅支持 systemd"是错的，本版本订正
+
+---
+
+## [0.4.27] - 2026-06-11
+
+### 修改 / 工程结构整理
+
+- **删除 `setup.py`**（1536 行）。它的全部功能并入 `install.sh`
+- **新增 `tests/` 目录**，归集所有测试脚本（保持 `bench.py` 在根，作为主要性能基准）
+  ```
+  tests/
+  ├── throughput_test.py
+  ├── gfw_probe_test.py
+  ├── test_admin.py
+  ├── traffic_analyzer.py
+  ├── run_test.sh        ← 自动 cd 到项目根
+  └── run_test_v2.sh
+  ```
+- **`install.sh` 重写**（370 → 540 行 bash）成交互式向导
+
+### `install.sh` 新流程
+
+```
+sudo bash install.sh
+↓
+[1] 服务端 / [2] 客户端 / [3] 两端
+```
+
+**服务端**：
+
+| 步骤 | 行为 |
+|---|---|
+| 监听地址 + 端口 | 默认 `0.0.0.0:443` |
+| 密码 | `openssl rand -base64 24` 自动生成 或手输 |
+| 伪装 SNI | **`openssl s_client -tls1_3` 实测目标 TLS 1.3**，失败询问是否继续 |
+| TCP Brutal | 检测内核模块（可选） |
+| 写 `config_server.json` | schema_version=1 |
+| systemd unit | `/etc/systemd/system/pyrealiy-server.service`，含 `ExecReload=/bin/kill -HUP $MAINPID` |
+| **末尾自动打印对应客户端 cfg** | 含 `curl ipify` 探出的公网 IP + 密码 + SNI + 完整 JSON 模板 + scp 提示 |
+
+**客户端**：
+
+| 步骤 | 行为 |
+|---|---|
+| 服务端地址 / 端口 / 密码 / SNI | 与服务端匹配 |
+| SOCKS5 监听口 | 默认 1080 |
+| **路由模板**（三选一） | `china_split`（默认）/ `transparent`（全代理）/ `custom`（用户编辑） |
+| **DNS 方案**（三选一） | `china_split`（默认）/ `full_proxy` / `off` |
+| Clash API | 可选，默认开；自动 `openssl rand` 生成 secret |
+| systemd unit | `pyrealiy-client.service` |
+
+### DNS 默认方案（用户指定）
+
+- **国内**：`cn_dns: "119.29.29.29"` （DNSPod 公共 DNS，国内最快）
+- **国外**：`remote_dns: "1.1.1.1:53"` （Cloudflare via VPS 转发；DNS 查询从 VPS 出，避开本地 GFW DNS 污染）
+- 配合 `china_split` 路由：geosite:cn / 内网 → 直连用 cn_dns；其余 → 经隧道用 remote_dns
+
+### 路由 `china_split` 模板
+
+```json
+{
+  "default": "proxy",
+  "rules": [
+    {"ip_cidr": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12",
+                 "192.168.0.0/16", "169.254.0.0/16"], "outbound": "direct"},
+    {"geosite": ["loyalsoldier:cn"], "outbound": "direct"},
+    {"geoip":   ["loyalsoldier:cn"], "outbound": "direct"}
+  ]
+}
+```
+
+geosite/geoip 数据由客户端启动时自动下载（geosite_cache）。
+
+### systemd unit 模板
+
+```
+[Service]
+Type=simple
+WorkingDirectory=<project_dir>
+ExecStart=/usr/bin/python3 <project_dir>/{server,client}.py <project_dir>/config_{server,client}.json
+ExecReload=/bin/kill -HUP $MAINPID         ← 配合 0.4.25 的热加载
+Restart=on-failure
+LimitNOFILE=65536
+```
+
+### 文档同步
+
+- README "快速部署" 章节重写：单一入口 `bash install.sh`，删 setup.py 方式二
+- 文件树更新：去 setup.py，加 install.sh / bench.py / tests/
+- TProxy 防火墙规则：从"setup.py 自动生成"改为"按下面 iptables 模板手配"
+- 系统服务章节：从"setup.py 多 init 支持"改为"install.sh 自动检测 init（**0.4.28 起支持 systemd / OpenRC / SysV**）"
+
+### 迁移
+
+| 旧用法 | 新用法 |
+|---|---|
+| `python setup.py` | `sudo bash install.sh` |
+| `python throughput_test.py` | `python tests/throughput_test.py` |
+| `bash run_test.sh` | `bash tests/run_test.sh`（脚本自动 cd 到项目根） |
+
+向后兼容：现有 `config_server.json` / `config_client.json` 不需要改动。
+
+---
+
+## [0.4.26] - 2026-06-11
+
+### 修复 / 热加载状态一致性
+
+自查 0.4.25 热加载找到两个状态一致性问题：
+
+- **B1：`GET /configs` 在 reload 后返回旧 cfg 快照**
+  - 根因：`APIContext.cfg` 在 API 启动时绑定到当时的 cfg dict；Reloader 只更新自己
+    的 `self.cfg`，没动 api_ctx，所以 `/configs` 端点永远返回老值
+  - 修：Reloader 持有 `api_ctx` 引用，reload 成功后同步 `api_ctx.cfg = new_cfg`
+  - 实测：`remote_dns: https://1.1.1.1/dns-query → 1.1.1.1:53` reload 后 GET /configs
+    立即反映新值
+- **B2：reload 路由规则后，DNS 缓存里来自旧路由的 IP 仍能命中**
+  - 根因：reload 时 invalidate 了 routing_cache，但 dns_cache 没动
+  - 场景：原 `cn.bing.com → direct` 缓存到本地 DNS 返回的 IP；改成
+    `cn.bing.com → proxy` 后，下一次 DNS 查询命中老 IP（来自老 outbound），用户
+    感受"改了规则没生效"
+  - 修：`DnsCache.invalidate()` 新增公共方法；Reloader rebuild router 时也清 dns_cache
+  - 实测：reload 报告 `router (routing_cache cleared 1, dns_cache cleared 1)`
+
+### 已知限制（已审计，本版本不修）
+
+| ID | 项 | 现状 |
+|---|---|---|
+| E1 | DoH `Connection: close` 不响应 | 下次查询命中已关连接，自动重连，无功能影响 |
+| E2 | DoH chunked 响应不支持 | 所有主流 DoH 服务返回固定长度，未观测到 |
+| E3 | DoT/DoH SNI 无法独立配置 | 主流公共 DoT/DoH 证书 SAN 含 IP，可用；自建 DoT 服务可能撞 |
+| E4 | `print("[*] uvloop ...")` 不走 logging | JSON 模式下 stdout 混入两行非 JSON，0.4.22 CHANGELOG 已注 |
+
+### 自查矩阵（这次过的项）
+
+- RouterRef 替换的原子性（Python 属性赋值原子 + asyncio 单线程）
+- Reloader 并发 lock（`asyncio.Lock`）
+- reload 失败回滚（`load_config` 抛错时不动任何状态）
+- `_extract_min_ttl` 的 DNS 解析（question 段指针压缩、answer NAME pointer、RDLENGTH 跳过都正确）
+- LogBroadcaster 多订阅（`list(self._queues)` 拷贝防 race；满队列 drop 老消息）
+- WSConnection 双向 close ack 符合 RFC 6455
+- DoH `Content-Length` 大写敏感（`re.IGNORECASE`）
+- 上游 timeout 处理（`asyncio.TimeoutError` 不 drop tunnel）
+
+---
+
+## [0.4.25] - 2026-06-11
+
+### 新增 / 配置热加载
+
+- **`core/reload.py`**（~170 行）：`RouterRef` + `Reloader` 协调子系统更新
+  - `RouterRef`：1-级间接，让 `_dispatch` / DNSForwarder 通过 ref 访问，热加载时
+    `replace(new_inner)` 原子替换
+  - `Reloader`：持有各子系统引用，`reload()` 按顺序更新；防并发 lock
+- **两种触发方式**
+
+| 触发 | 用法 |
+|---|---|
+| `SIGHUP` 信号 | `kill -HUP <pid>`（systemd `Reload=` 友好），客户端启动时日志会打出 PID |
+| `PUT /configs` | Clash 兼容，需 Bearer 鉴权；响应含 `{ok, changed, warnings}` |
+
+### 可热加载范围
+
+| 字段 | 行为 |
+|---|---|
+| `route.rules` / `route.default` / CSV `rules` / `final` | rebuild Router + routing_cache invalidate |
+| `cn_dns` / `remote_dns`（含 DoH/DoT scheme 切换） | DNSForwarder.reload()：drop _tunnels，下一次查询时按新地址重建 |
+| `log.format` / `log_levels` | re-apply（之后日志立即按新格式输出） |
+| `tuning.access_log` 等运行时可调项 | 注册的 `tuning_handlers` 被回调 |
+
+### 不动（locked field，新值仅警告不生效）
+
+`schema_version` / `inbounds` / `outbounds` / `api.listen` / `api.secret` /
+legacy 顶层 `socks5_host` / `server_host` / `password` 等。检测到改动 →
+`warnings: ["locked: <field>"]`。
+
+### 实测 4 场景
+
+| 场景 | 结果 |
+|---|---|
+| `PUT /configs` 无改动 | `{ok:true, changed:["log","tuning","router (cache cleared 0)","dns_forwarder"]}` ✓ |
+| 改 `remote_dns: 1.1.1.1:53 → tls://1.1.1.1:853`，发 SIGHUP | log: `dns reload: ... remote https://1.1.1.1/dns-query -> tls://1.1.1.1:853` ✓ |
+| reload 后查 example.org（新域名） | DoT 路径 61B 响应 ✓ |
+| `PUT /configs` 改回 DoH | 缓存清 1 条，立即生效 ✓ |
+
+### 设计要点
+
+- **不打断现有连接**：outbounds + inbounds 不动；正在跑的 TCP 隧道继续用老 router
+  的决策结果（cache 命中）或下一次 dispatch 时切到新 router
+- **DNS upstream 跌掉时优雅**：旧 upstream `close()` 让 in-flight queries 抛
+  OSError 回退到 NXDOMAIN；下一次查询自动按新 cfg 重建 upstream
+- **geo 数据不重下**：`available_site` / `available_ip` 在启动期下载一次保留下来，
+  reload 沿用，避免每次 SIGHUP 都打几 MB 流量
+- **CHANGELOG 合约保持**：`schema_version=1` 期间顶层 8 个 key 不动，本次没新加
+
+### 不做的（按之前对齐 + 性价比考量）
+
+- `inbounds` 重 bind（socket 已绑；用户改了端口请 restart）
+- `outbounds` 重建（会断现有所有连接）
+- 自动监听 file watch（用户敲 SIGHUP 显式控制更可预测；inotify 会因 editor 临时
+  文件触发误 reload）
+
+---
+
+## [0.4.24] - 2026-06-11
+
+### 新增 / 路由决策缓存 + DNS 响应缓存
+
+- **`core/decision_cache.py`**（~190 行）：两个 LRU+TTL 缓存
+  - `RoutingCache`：domain → outbound_tag，TTL 默认 1h（路由规则静态）
+  - `DnsCache`：(domain, qtype) → 原始 DNS 响应字节，**TTL 从响应 answer 段直接抽
+    `min(TTL)`**（截断到 30s–3600s）
+  - `OrderedDict` 实现 LRU；过期 entry 在 get 时延迟回收
+  - asyncio 单线程，无锁
+- **集成点**
+  - `client.py::_dispatch`：命中 RoutingCache 即跳过 `router.match`
+  - `core/dns_forwarder.py::_handle`：双层缓存
+    - DnsCache 命中 → 直接回包（替换 tx_id），跳过路由 + 上游
+    - DnsCache 未命中 → 查 RoutingCache → 上游查询 → 写两个 cache
+- **新端点 `GET /pyrealiy/cache`**：
+  ```json
+  {"routing":{"entries":2,"max":10000,"hits":0,"misses":2,"ttl_sec":3600,"hit_rate":0},
+   "dns":    {"entries":2,"max":10000,"hits":3,"misses":2,"hit_rate":0.6}}
+  ```
+
+### 配置
+
+```json
+"tuning": {
+  "routing_cache": {"enabled": true, "max_entries": 10000, "ttl_sec": 3600},
+  "dns_cache":     {"enabled": true, "max_entries": 10000}
+}
+```
+
+- 默认开启（max 10k entries 各 50-100 字节，约 1MB 内存）
+- 可显式 `"enabled": false` 退化到无缓存（debug 用）
+
+### 实测性能（DoH 路径，最坏情况）
+
+| 查询 | 路径 | 耗时 |
+|---|---|---|
+| q1 cold: example.com | DoH 全程：TLS + HTTP/1.1 + 上游 | **417 ms** |
+| q2 hot: example.com | 缓存命中（dict get）→ tx_id 重写 | **0.3 ms**（~1300×） |
+| q3 cold: google.com | DoH 全程（TLS 已建可复用） | **142 ms** |
+| q4 hot: google.com | 缓存命中 | **0.4 ms** |
+| q5 hot: example.com（TTL 内） | 缓存命中 | **0.4 ms** |
+
+5 次查询 DNS cache `hit_rate = 0.6`。
+
+### 设计要点
+
+- **tx_id 重写**：缓存里存的是 first response 的字节，要把响应里的 tx_id 替换成
+  本次查询的（DNS 协议规定回包 ID 必须与请求一致）
+- **TTL 跟 DNS answer 的实际 TTL**：不固定写死，给 ttl=86400 的 CDN 节省大量
+  上游查询，给 ttl=60 的不滥缓存
+- **negative cache**：NXDOMAIN / 空 answer 也缓存（默认 60s），防止反复打不存在的
+  域名拖垮上游
+- **路由 + DNS 各自独立 LRU**：DNS 命中后不再问路由（响应即答案），所以路由 cache
+  hits 通常只在 TCP dispatch 路径上累加；两层独立是 by design
+
+### 限制 / 后续
+
+- 当前不持久化（重启丢）。落盘 cache 是 Option B（不做，按之前对齐）
+- 不与 DNS 客户端的本地缓存协作（客户端按返回 TTL 自己缓存；我们缓存的 TTL 是
+  原值，不动态衰减）
+
+---
+
+## [0.4.23] - 2026-06-11
+
+### 新增 / DoH + DoT 上游 resolver
+
+`cfg.remote_dns` 现在接受 3 种 scheme，统一由 `core/dns/upstream.py::make_upstream`
+工厂派发：
+
+| address 形式 | upstream | 说明 |
+|---|---|---|
+| `"1.1.1.1:53"` / `"dns://..."` / `"1.1.1.1"` | UdpUpstream | 旧行为：pyrealiy 隧道 → server plain TCP → UDP 53 |
+| `"tls://1.1.1.1:853"` | DotUpstream | 端到端 TLS 1.2+ + 长度前缀 DNS pipeline |
+| `"https://1.1.1.1/dns-query"` | DohUpstream | 端到端 TLS + HTTP/1.1 POST `application/dns-message`，单连接 keep-alive 串行 |
+
+### 新模块
+
+- **`core/dns/tls_over_tunnel.py`**（~110 行）：`TlsOverTunnel` 用 `ssl.MemoryBIO`
+  在 EncryptedTunnel 上跑标准 TLS。pyrealiy 隧道是 message 模式（不是 raw socket），
+  无法直接 `ssl.wrap_socket`；MemoryBIO 允许手工拉送 SSL 状态机的入/出字节
+- **`core/dns/upstream.py`**（~370 行）：
+  - `UdpUpstream`：迁移自原 `_DnsTunnel`，行为不变（向后兼容）
+  - `DotUpstream`：TLS 握手 + 长度前缀 DNS 帧 pipeline + tx_id 重写
+  - `DohUpstream`：TLS + HTTP/1.1 POST + `Content-Length` 响应解析
+  - `make_upstream(outbound, address)` 工厂
+- **`core/dns/__init__.py`**：导出 `make_upstream`
+
+### 内部
+
+- `core/dns_forwarder.py`：删除原 `_DnsTunnel` 类（移到 dns/upstream.py），
+  `_tunnel_for` 改用 `make_upstream` 工厂；删除 `struct` / `pack_address` /
+  `_TUNNEL_TIMEOUT` 等 orphan 导入
+- DoH 的 `Host` header 与 SNI 用 URL 的 hostname；上游 server 用 IP literal 是
+  **硬性要求**（域名 host 会导致 bootstrap 死循环 —— DNS 服务要先解析 DNS 服务器的
+  域名），工厂在 parse 时即拒绝
+
+### TLS 端到端的拓扑
+
+```
+[client app] → UDP DNS 5454 → [DNSForwarder]
+                                    ↓
+                          pyrealiy 加密隧道（AEAD）
+                                    ↓
+                          [server.py 透明 TCP 转发到 host:443]
+                                    ↓
+                         [客户端进程内 TLS 握手到 host]  ← TLS 端到端，server 看不到明文
+                                    ↓
+                         HTTP/1.1 POST application/dns-message
+                                    ↓
+                          Cloudflare 1.1.1.1 DoH 回包
+```
+
+### 验证
+
+| 场景 | 结果 |
+|---|---|
+| scheme 解析（8 种组合） | UDP/DoT/DoH 分发正确 ✓；DoH domain host 被拒（ValueError） |
+| `1.1.1.1:53`（UDP） | 105 B 响应，qid 一致，2 条 A 记录 ✓ |
+| `tls://1.1.1.1:853`（DoT） | 61 B 响应，qid 一致，2 条 A ✓ |
+| `https://1.1.1.1/dns-query`（DoH） | 61 B 响应，qid 一致，2 条 A ✓ |
+| DoH keep-alive 第二次查询 | 44 B 响应（google.com），同一 TLS 连接复用 ✓ |
+
+### 限制 / 后续
+
+- DoH URL 的 host 必须是 IP literal（如 `https://1.1.1.1/dns-query`）。要支持
+  `https://cloudflare-dns.com/dns-query` 需要 bootstrap resolver（先用 IP DoH 解析
+  域名 DoH 服务器的 IP），留待后续
+- 当前所有 DNS 查询走同一 upstream（`cfg.remote_dns`）。按 `cfg.dns.resolvers` +
+  `dns.rules` 做 per-domain 上游分流，留待后续（schema 已就位）
+- DoT/DoH 都是端到端 TLS；服务器侧不能 MITM（这是设计目标）
+
+---
+
+## [0.4.22] - 2026-06-11
+
+### 新增 / 结构化日志
+
+- **`cfg.log.format: "text" | "json"`**：日志格式开关，默认 `text`（向后兼容）
+- **`core/utils.py::JsonFormatter`**：每行一个 JSON
+  ```json
+  {"ts":"2026-06-11T06:29:48.416Z","level":"info","logger":"time_sync",
+   "msg":"time_sync: offset 0.00s → -3.10s","extra":{...}}
+  ```
+- **`apply_log_format(cfg)`**：替换 root handler 的 formatter；在 `load_config`
+  开头先 peek 一次，确保配置校验自身的 INFO/WARN 也走 JSON
+- **`logger.info("...", extra={"k":"v"})`** 的 extras 自动收进 `extra` 字段
+- **异常**：traceback 进 `exc` 字段
+
+### Schema 定义（写进 README）
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `ts` | string | ISO-8601 UTC，毫秒精度 `2026-06-11T06:29:48.416Z` |
+| `level` | string | `debug` / `info` / `warning` / `error` / `critical` |
+| `logger` | string | logger 名（`client` / `conn_pool` / `time_sync` 等） |
+| `msg` | string | 格式化后的消息 |
+| `extra` | object | 可选；调用方传 `extra=` 的字段集合 |
+| `exc` | string | 可选；异常时的 traceback 文本 |
+
+### 解析示例（Loki / ELK / jq）
+
+```bash
+# 看 conn_pool 的所有 WARNING+
+cat client.log | jq 'select(.level=="warning" or .level=="error") | select(.logger=="conn_pool")'
+
+# 流量异常时筛连接级日志
+cat client.log | jq 'select(.extra.outbound=="proxy")'
+```
+
+### 验证
+
+| 场景 | 结果 |
+|---|---|
+| `cfg.log.format` 缺省 | 仍是 `2026-06-11 14:24:07,896 [INFO] config: ...` 文本格式 ✓ |
+| `cfg.log.format: "json"` 单次启动 | 15/15 日志行都是 JSON，含校验阶段的 2 条 INFO ✓ |
+| 同一行带 extras | `extra` 字段出现并含 `{outbound, dst}` 等 ✓ |
+| WS `/logs` 端点（P4） | 仍按 `[%(name)s] %(message)s` 推送（API 表层 schema 不变） |
+
+### 已知边界
+
+- WS `/logs` 的 `payload` 字段始终是 Clash UI 期望的紧凑文本格式，**不**随
+  `cfg.log.format` 改变（Clash 协议层）。stderr 日志输出受控；WS 日志输出独立
+- 现有代码里的 `logger.info("...")` 调用**完全不动**；想结构化某条只需要传
+  `extra=` 字典，不传也兼容
+
+---
+
+## [0.4.21] - 2026-06-11
+
+### 新增 / Clash API P5：pyrealiy 私有诊断端点
+
+- **`core/api/pyrealiy_endpoints.py`**（~140 行）：3 个非 Clash 端点，
+  pyrealiy 私有命名空间（Yacd 不读，curl 排查用）。
+
+| 端点 | 返回 |
+|---|---|
+| `GET /pyrealiy/pool` | 每 pyrealiy outbound 的 `BrutalPool` 实时快照：`ready` / `building` / `target` / `next_build_in_sec`（staircase 游标距离）/ `stagger_step_sec` / `latency_ms` / `latency_age_sec` / `healthy` / `consecutive_failures` |
+| `GET /pyrealiy/timesync` | `offset_sec`（当前时钟修正）/ `last_source`（"ntp" / "https"）/ `last_sync_epoch` / `last_sample_count` / `max_offset_sec` / `since_sync_sec` |
+| `GET /pyrealiy/geo` | `cache_dir`（绝对路径）/ `update_days` / `sources[*]`：`key` / `file_path` / `exists` / `file_size` / `downloaded_epoch` / `age_days` / `url` |
+
+### 内部
+
+- `core/time_sync.py`：类级新增 `_last_source` / `_last_sync_at_epoch` /
+  `_last_sample_count`，`_sync_once` 成功路径写入。无业务行为变化
+- `core/api/server.py::_register_endpoints`：注册 pyrealiy_endpoints
+
+### 实测
+
+| 端点 | 数据 |
+|---|---|
+| `/pyrealiy/pool` | `{"proxy": {"ready": 20, "building": 0, "target": 20, "latency_ms": 1506.8, "healthy": true}}` |
+| `/pyrealiy/timesync` | `{"offset_sec": -3.097, "last_source": "ntp", "last_sample_count": 2, "since_sync_sec": 14.4}` |
+| `/pyrealiy/geo` | `{"cache_dir": "/opt/.../.geosite", "update_days": 7.0, "sources": []}` |
+
+### Clash API 完整能力（P0-P5 全部完成）
+
+```
+HTTP /version            ✓ P1
+HTTP /configs            ✓ P1
+HTTP /connections        ✓ P2
+HTTP /proxies            ✓ P3
+HTTP /proxies/{name}     ✓ P3
+HTTP /rules              ✓ P3
+WS   /traffic            ✓ P4
+WS   /logs?level=...     ✓ P4
+HTTP /pyrealiy/pool      ✓ P5
+HTTP /pyrealiy/timesync  ✓ P5
+HTTP /pyrealiy/geo       ✓ P5
+```
+
+**总代码量**：`core/api/` 9 个文件 ~1200 行，**零外部依赖**（仅 stdlib + asyncio）。
+
+### 不实现的（控制类，留待 P6 或不做）
+
+- `POST /proxies/{group}` 切换 urltest 选择
+- `GET /proxies/{name}/delay` 触发主动 probe
+- `DELETE /connections/{id}` 杀连接
+- `PUT /configs` 热更配置
+
+按之前对齐：Clash API v1 范围是**纯查询**。控制类等真有需求再开 P6。
+
+---
+
+## [0.4.20] - 2026-06-11
+
+### 新增 / Clash API P4：WebSocket 推流
+
+- **`core/api/ws_proto.py`**（~170 行）：RFC 6455 服务端最小实现
+  - 握手：GET + Upgrade + Sec-WebSocket-Key/Version 13 → 101 + base64(SHA1(key+GUID))
+  - 帧编解码：服务端发不 mask；客户端发自动解 mask；单帧 ≤ 1MB
+  - 自动响应 client → server 的 ping（回 pong）和 close（回 close ack）
+  - `WSConnection` 类：构造时启 `_read_loop` 后台协程；`send_text(s)` 加发送锁防交错
+  - 故意不支持：分片、扩展（permessage-deflate）、WSS（本身 127.0.0.1）
+- **`core/api/ws_endpoints.py`**（~140 行）：两个端点 + LogBroadcaster
+  - `WS /traffic`：1Hz 推 `{"up": bytes_per_sec, "down": bytes_per_sec}`（速率 =
+    delta(meter.totals) / dt，每订阅独立采样）
+  - `WS /logs?level=info|warning|error|debug`：实时日志流，每条 `{"type": level,
+    "payload": "[logger] msg"}`
+  - `LogBroadcaster(logging.Handler)`：挂到 root logger，emit 写每个订阅者的队列；
+    队列满 → drop 老消息保留新的（订阅者消费慢不影响其他订阅者）
+
+### 路由层
+
+- `core/api/router.py::Router.add_ws(pattern, handler)`：注册 WS 路由
+- `core/api/router.py::Router.match_ws(path) → (handler, params)`：单独匹配
+- `core/api/server.py::_handle_conn`：检测 `Upgrade: websocket` 头优先走 WS 分支
+- `core/api/server.py::_maybe_dispatch_ws`：鉴权 → handshake → 把 reader/writer
+  交给 handler；handler 退出后协程结束
+
+### client.py 集成
+
+- 启动期：`LogBroadcaster()` + `attach()` 到 root logger，挂进 APIContext
+- shutdown：`log_bc.detach()` 解除 logging handler
+- `tuning.access_log: true` 也支持（之前仅顶层 cfg.access_log）
+
+### 验证（端到端 `/tmp/ws_test.py`）
+
+| 测试 | 结果 |
+|---|---|
+| 无 Authorization 头 → 101 应失败 | ✓ 返回 `HTTP/1.1 401 Unauthorized` |
+| Sec-WebSocket-Accept 校验 | ✓ 客户端按 RFC 算的 expected 出现在响应里 |
+| `/traffic` 连续 5 帧 | ✓ 17 → 61 → 61 → 61 → 4.9 MB/s（与 bench 时序一致） |
+| `/logs?level=info` 触发 bench | ✓ 3 条 `[info] [client] proxy 127.0.0.1:19001 [FINAL]` |
+| 客户端发 close → 服务端回 close ack | ✓ 干净退出 |
+
+### Yacd 此时
+
+| 功能 | 状态 |
+|---|---|
+| 节点列表 + 延迟 + alive（P3） | ✓ |
+| 规则面板（P3） | ✓ |
+| 连接列表（P2） | ✓ |
+| **流量曲线（实时 up/down 速率）** | ✓ |
+| **实时日志流** | ✓ |
+| pyrealiy 私有指标（handshake/pool/timesync/geo） | ✗ P5 |
+
+P4 之后 Yacd / metacubexd 的核心功能（除控制类操作）全部可用。
+
+---
+
+## [0.4.19] - 2026-06-11
+
+### 新增 / Clash API P3：proxies + rules 端点
+
+- **`GET /proxies`**：返回所有 outbounds 的 Clash 格式 dict
+  ```json
+  {"proxies": {
+    "proxy":  {"type":"Trojan", "name":"proxy", "server":"...", "port":443,
+               "alive":true, "udp":true, "history":[{"time":"...","delay":150}]},
+    "direct": {"type":"Direct", "name":"direct", "alive":true, "udp":true, "history":[]},
+    "block":  {"type":"Reject", "name":"block",  "alive":true, "udp":true, "history":[]},
+    "auto":   {"type":"URLTest", "name":"auto", "all":["a","b"], "now":"a", ...}
+  }}
+  ```
+- **`GET /proxies/{name}`**：单个 outbound（404 if not found）
+- **`GET /rules`**：路由规则列表
+  ```json
+  {"rules":[
+    {"type":"DomainSuffix","payload":"google.com","proxy":"proxy","invert":false},
+    {"type":"IPCIDR","payload":"192.168.0.0/16","proxy":"direct","invert":false},
+    {"type":"Match","payload":"","proxy":"proxy","invert":false}
+  ]}
+  ```
+
+### 类型映射（pyrealiy → Clash）
+
+| pyrealiy 类型 | Clash 类型 | 备注 |
+|---|---|---|
+| `pyrealiy` | `Trojan` | 行为最接近，UI 图标对应；带 `server` + `port` |
+| `direct` | `Direct` | |
+| `block` | `Reject` | |
+| `urltest` | `URLTest` | 带 `all` + `now` |
+| `fallback` | `Fallback` | 带 `all` + `now`（取 resolve_leaf 结果） |
+
+### Rule 类型映射
+
+router 内部 `DOMAIN-SUFFIX` / `IPCIDR` / `GEOSITE` 等映射到 Clash CamelCase：
+`DomainSuffix` / `IPCIDR` / `GeoSite` / `Match` / 等。Yacd UI 直接读这些字符串
+决定显示文案。
+
+### 内部
+
+- `core/router.py::Router.rules`：新增只读 property，从 `_rules` 提取
+  `(type, payload, proxy, invert)`
+- `core/router.py::_clash_rule_type()`：UPPER-HYPHEN → CamelCase 映射表
+- `core/api/clash_endpoints.py::_outbound_to_clash()`：单 outbound → Clash dict；
+  叶子带 server/port，组节点带 all/now
+- `core/api/clash_endpoints.py::_history_for()`：把 `latency_ms` + `latency_age_sec`
+  合成单条 Clash history 条目（Yacd 只读 `history[-1].delay`）
+- `FINAL` 规则末尾追加为 `Match` 让 UI 看到默认动作
+
+### 验证
+
+| 场景 | 结果 |
+|---|---|
+| legacy config `/proxies` | 显示 proxy/direct/block 3 节点 ✓ |
+| legacy config `/proxies/proxy` | 单 dict，含 server/port/history ✓ |
+| `/proxies/nope` | 404 `{"code":404,"message":"proxy not found"}` ✓ |
+| 4 条规则配置 `/rules` | DomainSuffix×2 / Domain / DomainKeyword / IPCIDR + FINAL Match 6 条 ✓ |
+| Trojan history.delay | 1507ms（来自首次 handshake 实测，后续 urltest probe 会更新） |
+
+### Yacd 此时能看到
+
+✓ 节点列表 + 当前延迟 + alive 状态  
+✓ 规则面板（按顺序显示，UI 可按 host 试匹配）  
+✓ 实时连接列表（P2）  
+✗ 流量曲线（P4 实现 `WS /traffic`）  
+✗ 实时日志流（P4 实现 `WS /logs`）
+
+### 不做的
+
+P3 范围**纯查询**，不实现：
+- `POST /proxies/{group}` 切换 urltest/fallback 选择（控制类）
+- `GET /proxies/{name}/delay` 触发主动 probe（控制类）
+- `DELETE /connections/{id}` 杀连接（控制类）
+
+这些都是写动作，按之前对齐留待下一个版本（如有需要再开 P6）。
+
+---
+
+## [0.4.18] - 2026-06-11
+
+### 新增 / Clash API P2：连接表 + 流量计
+
+- **`core/api/stats.py`**：ConnectionRegistry + TrafficMeter
+  - `ConnInfo` 字段贴 Clash 格式（`metadata.{network,type,sourceIP,sourcePort,
+    destinationIP,destinationPort,host}` + `upload` / `download` / `start` /
+    `chains` / `rule` / `rulePayload`）
+  - asyncio 单线程模型下注册 / 注销 / 遍历都在 loop 内，无 Lock
+  - 关闭连接保留 5 秒（linger）让 UI 看到"刚关闭"，避免快闪流量丢失
+  - 全局 `TrafficMeter` 累计 `up_total` / `down_total`（monotonic，不重置）
+
+- **`GET /connections`**：Clash 标准格式
+  ```json
+  {
+    "downloadTotal": 12345678,
+    "uploadTotal":   234567,
+    "memory":        0,
+    "connections": [
+      { "id": "abc...", "metadata": {...}, "upload": 1234,
+        "download": 5678, "start": "2026-06-11T12:00:00.000Z",
+        "chains": ["proxy"], "rule": "DomainSuffix", "rulePayload": "google.com" }
+    ]
+  }
+  ```
+
+- **byte 计数器：在 relay 路径**注入 on_up / on_down 回调（最小侵入）
+  - `core/outbound.py::_bidi_tunnel_relay` 加 `on_up` / `on_down` 形参
+  - `core/utils.py::relay`（DirectOutbound 用）同上
+  - `core/udp_relay.py::UDPRelay` 构造增加 `on_up` / `on_down` 形参，绑到
+    `_handle_uplink` / `_send_to_socks_client`
+  - `Outbound.handle` 基类签名扩展（向后兼容默认 None）
+
+- **client.py 集成**
+  - 启动期检测 `cfg.api.listen` → 创建 `ConnectionRegistry`
+  - `_dispatch` / `_dispatch_udp` 在调 `outbound.handle` 前注册 ConnInfo、生成
+    byte 回调，finally 注销
+  - APIContext 增加 `registry` 字段
+
+### 设计要点
+
+- **关闭后仍可见 5 秒**：避免 Yacd 轮询 1Hz 时"刚关的连接没看见"
+- **chains 顺序"叶在前"**：Clash UI 数组首项是实际跑流量的节点
+- **rule split**：router 的 source 字符串拆成 `(rule_type, rule_payload)`，支持
+  `DomainSuffix:google.com` / `GeoIP:cn` / `default` 等形式
+- **零性能回归**：byte 回调是无锁原子加，bench 同条件 c=4 上行 483 Mbps，与
+  0.4.17 同区间
+
+### 验证
+
+| 场景 | 实测 |
+|---|---|
+| 启动期空 registry | `{"uploadTotal":0,"downloadTotal":0,"connections":[]}` |
+| 4 条 SOCKS5 上行 bench 期间 | 5 conn（含 sanity ping），每条 upload ~30MB |
+| metadata 全字段 | `tcp/Socks5 127.0.0.1:48200 -> 127.0.0.1:19001` 正确 |
+| chains | `['proxy']` |
+| bench 结束 + 5s 内 | 5 conn 仍可见（linger） |
+| bench 结束 + 5s 后 | `connections = 0`，但 `uploadTotal` monotonic 不重置 |
+| bench 吞吐 | 483 Mbps（与无 API 时 ~520 Mbps 持平，无回归） |
+
+### Yacd 此时能看到
+
+- ✓ 实时活跃连接列表（source / destination / host / chains）
+- ✓ 每条连接的 upload/download 字节数
+- ✓ 全局上下行累计
+- ✗ 节点列表（P3 实现 `/proxies`）
+- ✗ 规则面板（P3 实现 `/rules`）
+- ✗ 流量曲线（P4 实现 `WS /traffic`）
+
+---
+
+## [0.4.17] - 2026-06-11
+
+### 新增 / Clash 兼容 API（P1）
+
+- **`core/api/`：从零原生实现的 HTTP/1.1 + 路由 + 鉴权 + CORS**
+  - 零外部依赖（不引 aiohttp / starlette），只用 stdlib + asyncio
+  - `http_proto.py`（~160 行）：Request / Response / read_request / write_response，
+    支持 keep-alive、CORS 头注入、4xx/5xx 错误路径
+  - `router.py`（~30 行）：method × path 模式匹配，`{name}` 捕获路径参数
+  - `server.py`（~170 行）：APIServer + Bearer Token 鉴权（常量时间比较）+
+    `?token=` query 备用 + CORS 中间件 + keep-alive 串行处理
+  - `clash_endpoints.py`（~80 行）：`/version` + `/configs`
+- **支持的端点**（P1 范围）
+
+  | 路径 | 行为 |
+  |---|---|
+  | `GET /version` | `{"version":"0.4.17","meta":true,"premium":false}` |
+  | `GET /configs` | Clash 标准字段（`socks-port` / `mode` / `log-level` / ...）+ pyrealiy cfg 摘要（脱敏） |
+  | `OPTIONS *` | CORS preflight，返回 `Allow-Origin/Methods/Headers/Max-Age` |
+  | 其他 | 404 / 405 / 401 / 400 / 500，统一 `{"code":N,"message":"..."}` |
+
+- **脱敏**：`/configs` 响应里 `password` / `credential` / `api.secret` 都替换为 `"***"`
+- **鉴权**：所有路径（含 `/version`）必须带 secret。不带 → 401。Yacd 历史用法
+  `?token=<secret>` 也支持
+- **keep-alive**：默认 HTTP/1.1 keep-alive，闲置 75s 关连接；同一 socket 上可
+  跑无限多请求（实测 3 个串行 RTT < 5ms）
+
+### 配置
+
+```json
+"api": {
+  "listen": "127.0.0.1:9090",
+  "secret": "your-strong-token",
+  "cors": ["*"]
+}
+```
+
+- `listen` 缺失 → 不启 API（向后兼容默认）
+- `secret` 缺失 → schema 校验阶段就 ConfigError 拒绝启动（0.4.16 已合约）
+
+### 验证
+
+9 个 curl / raw socket 测试矩阵：
+- 无鉴权 / 错 token → 401 ✓
+- Bearer + 401 query token → 200 ✓
+- `/configs` 含 Clash 字段 + pyrealiy 摘要 + password 脱敏 ✓
+- 未知路径 → 404，错方法 → 405 ✓
+- CORS preflight → 204 + 完整头 ✓
+- 同一 socket 3 个串行请求（keep-alive） → 全 200 ✓
+
+E2E：API 启动后跑 bench c=4 上行 + 延迟，throughput 不受 API 监听影响，
+P50 1.5ms 与无 API 时一致。
+
+### 内部
+
+- `client.py` 在 build_outbounds / build_router 之后启动 APIServer；shutdown
+  时优雅 stop
+- API server 与 SOCKS5 server 在同一 asyncio loop，无额外线程 / 进程
+
+### 后续
+
+P2-P5 接续：connections registry（活跃连接列表 + 流量计）→ proxies/rules 映射 →
+WebSocket traffic/logs 推流 → pyrealiy 私有端点。
+
+---
+
+## [0.4.16] - 2026-06-11
+
+### 新增 / 配置 schema 合约
+
+- **配置 schema_version=1 落地**（`core/config.py`）
+  - 顶层 8 个 key 锁定：`schema_version` `log` `inbounds` `outbounds` `route`
+    `dns` `api` `tuning`。**合约**：schema_version=1 期间不再加第 9 个；新功能
+    进入已有 section 的 nested key
+  - 配置文件加 `"schema_version": 1` 即识别为 v1，触发严格验证
+  - 缺 `schema_version` + 命中 legacy 顶层 key（`server_host` / `password` / ...）
+    → 视为 v0 legacy，启动期 INFO 日志，保持现有自动合成行为
+  - 未知顶层 key → WARNING（不阻止启动，便于发现拼写错误）
+- **`dns` 顶层 section**（DNS 转发 + 缓存 + 分流 + hosts + fakeip）
+  - `dns.listen`（"host:port"，缺省不起 DNS 服务）
+  - `dns.default`（resolver tag；**未填时自动回退到 `resolvers[0].tag`** 并
+    INFO 提示）
+  - `dns.resolvers[*]`：`tag` / `address` / **`via` 必填**（必须指到某 outbound tag）
+  - `dns.rules[*]`：`match` 用 `kind:value` 前缀语法（`domain:` / `domain-suffix:`
+    / `geosite:` / `ipcidr:` / `geoip:` 等），`use` 指 resolver tag
+  - `dns.cache` / `dns.hosts` / `dns.fakeip` 占位（实际逻辑后续 MINOR 实现）
+  - `dns.strategy`：`prefer_ipv4` / `prefer_ipv6` / `ipv4_only` / `ipv6_only`
+- **`tuning` 顶层 section**（高级调优）
+  - 所有 perf knob（pool_size、stagger_step_sec、idle_timeout 等）今后归入这里
+  - 启动期检测到非空 tuning → INFO `tuning overrides active: <keys>`，便于事后
+    排查"为什么这台机器表现不一样"
+  - README 单独章节文档化为 "advanced"，主表 / 快速开始**不出现**
+- **`api` 顶层 section**（schema 占位，端点逻辑在后续 P1-P5 实现）
+  - `api.listen` / `api.secret` / `api.cors`
+  - **强制鉴权**：`api.listen` 设了但 `api.secret` 缺失 → 启动期 ConfigError
+  - 非 loopback 绑定 → 启动期 WARNING
+
+### 内部
+
+- `core/config.py::load_config()` 替代 `client.py` / `server.py` 里的
+  `json.load`；统一配置入口
+- `core/config.py::validate_cross_refs(cfg, outbound_tags)` 在 `build_outbounds`
+  之后调用，校验 `dns.resolvers[*].via` 引用的 outbound 确实存在
+- v1 → legacy projection：v1 的 `inbounds[0]`（socks5）/ `dns.listen` 投射到
+  `cfg['socks5_host']` / `cfg['socks5_port']` / `cfg['dns_listen_*']`，让下游
+  模块不必同时支持两套 schema。下游模块逐步迁移到读 v1 sub-section 后可删除
+
+### 稳定性合约（写进 schema_version=1）
+
+| 改动 | 允许在哪个版本 |
+|---|---|
+| 新顶层 section | 只 MAJOR（`schema_version` 升号） |
+| 新 nested key（带默认值） | MINOR |
+| 改字段含义 / 移除 | 只 MAJOR |
+| 重命名（保留老名为 alias） | MINOR，老名至少保留 3 个 MINOR |
+| 默认值变化 | PATCH（CHANGELOG 必须标注） |
+| 校验严格度提升 | MINOR，先 WARN 一轮再 ERROR |
+
+### 迁移
+
+- **完全向后兼容**：现有 `config_client.json` / `config_server.json` 不需要
+  改动，启动后看到 `Legacy schema detected ...` INFO 日志即正常
+- 自愿迁移：在配置首行加 `"schema_version": 1`，按 README 的 v1 模板把
+  legacy 顶层 key 重构到对应 section（`socks5_host` → `inbounds`、
+  `server_host` → `outbounds[0]`）
+- 自动迁移工具 `pyrealiy migrate-config` 留待后续 MINOR
+
+### 验证
+
+- 7 个验证场景全通：legacy 识别 / 最小 v1 / 完整 dns / 缺 via 报错 / 跨引用
+  报错 / 未知顶层 key WARN / api 鉴权强制
+- E2E：legacy 配置 + v1 配置分别跑通，bench c=4 上行 ~520 Mbps，与 0.4.15
+  无回归
+
+---
+
 ## [0.4.15] - 2026-06-11
 
 ### 内部 / 性能
@@ -787,7 +1874,24 @@ sniffer / router 等）。除上面 3 处，**未发现其它真问题**：
 
 更早的历史在 git log 里；从 `0.3.0` 起按本规范打 tag。
 
-[未发布]: https://github.com/<你的仓库>/compare/v0.4.15...HEAD
+[未发布]: https://github.com/<你的仓库>/compare/v0.4.32...HEAD
+[0.4.32]: https://github.com/<你的仓库>/releases/tag/v0.4.32
+[0.4.31]: https://github.com/<你的仓库>/releases/tag/v0.4.31
+[0.4.30]: https://github.com/<你的仓库>/releases/tag/v0.4.30
+[0.4.29]: https://github.com/<你的仓库>/releases/tag/v0.4.29
+[0.4.28]: https://github.com/<你的仓库>/releases/tag/v0.4.28
+[0.4.27]: https://github.com/<你的仓库>/releases/tag/v0.4.27
+[0.4.26]: https://github.com/<你的仓库>/releases/tag/v0.4.26
+[0.4.25]: https://github.com/<你的仓库>/releases/tag/v0.4.25
+[0.4.24]: https://github.com/<你的仓库>/releases/tag/v0.4.24
+[0.4.23]: https://github.com/<你的仓库>/releases/tag/v0.4.23
+[0.4.22]: https://github.com/<你的仓库>/releases/tag/v0.4.22
+[0.4.21]: https://github.com/<你的仓库>/releases/tag/v0.4.21
+[0.4.20]: https://github.com/<你的仓库>/releases/tag/v0.4.20
+[0.4.19]: https://github.com/<你的仓库>/releases/tag/v0.4.19
+[0.4.18]: https://github.com/<你的仓库>/releases/tag/v0.4.18
+[0.4.17]: https://github.com/<你的仓库>/releases/tag/v0.4.17
+[0.4.16]: https://github.com/<你的仓库>/releases/tag/v0.4.16
 [0.4.15]: https://github.com/<你的仓库>/releases/tag/v0.4.15
 [0.4.14]: https://github.com/<你的仓库>/releases/tag/v0.4.14
 [0.4.13]: https://github.com/<你的仓库>/releases/tag/v0.4.13

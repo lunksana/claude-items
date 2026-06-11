@@ -34,61 +34,68 @@ pip install cryptography uvloop   # uvloop 仅 Linux/macOS 有效
 
 ## 快速部署
 
-提供两种部署方式，选其一即可：
-
-### 方式一：一键 bash 脚本
-
-适合快速上手，无需 Python 环境预装，`curl` 即可运行：
+唯一入口：`install.sh` 交互式向导。
 
 ```bash
-bash install.sh
-# 或从远程直接运行
-bash <(curl -fsSL https://your-server/install.sh)
+sudo bash install.sh
 ```
 
-向导依次完成（服务端）：
+启动后选 `[1] 服务端 / [2] 客户端 / [3] 两端都装`，向导自动检测环境、安装依赖、生成配置、注册 systemd。
 
-1. 系统检测、Python 3.10+ 及依赖安装
-2. 基础参数配置（端口、密码、伪装域名）
-3. TCP Brutal 检测与安装（可选），可用时询问速率
-4. Web 管理面板配置（监听地址、端口、访问令牌，可选启用）
-5. systemd 系统服务安装（可选，需 root）
+**服务端流程**：
 
-向导依次完成（客户端）：
+1. 系统检测、Python 3.10+ 及 `cryptography` / `uvloop` 安装
+2. 监听端口（默认 443）、密码（自动 `openssl rand` 24 字符或手输）、伪装 SNI（自动 `openssl s_client -tls1_3` 探测）
+3. TCP Brutal 检测（可选，自建 VPS 推荐）
+4. 写 `config_server.json` + 注册 `pyrealiy-server.service`
+5. **末尾自动打印对应客户端配置**（含公网 IP、密码、SNI），可直接复制到客户端机器
 
-1. 系统检测、Python 3.10+ 及依赖安装
-2. 基础参数配置（服务端地址、密码、本地 SOCKS5 端口）
-3. 本地 DNS 转发器配置（可选）
-4. TProxy 透明代理端口配置（可选，仅设置 `tproxy_port`）
-5. systemd 系统服务安装（可选，需 root）
+**客户端流程**：
 
-> **TProxy 注意**：`install.sh` 仅在配置文件中写入 `tproxy_port`，不生成防火墙规则。需另行配置 iptables/nftables，或运行 `python setup.py` 由向导自动生成脚本（见方式二）。
+1. 系统检测 + 依赖安装
+2. 服务端地址 / 端口 / 密码 / 伪装 SNI / SOCKS5 监听口（默认 1080）
+3. **路由模板**三选一：
+   - 国内外分流（推荐）：geosite:cn + 内网 → 直连；其余走代理
+   - 全代理：所有流量走 proxy 出口
+   - 自定义：生成空 rules，安装后用户自行编辑
+4. **DNS 方案**三选一：
+   - 国内外分流（推荐，默认）：国内域名查 `119.29.29.29` 直连；其余通过 VPS 转发到 `1.1.1.1:53`
+   - 全代理：所有 DNS 走 proxy 隧道（隐私优先）
+   - 不启用：系统继续用 `/etc/resolv.conf`
+5. Clash 兼容 API（可选，默认开；自动生成 secret，Yacd / metacubexd 可直接登录）
+6. 写 `config_client.json` + 注册 `pyrealiy-client.service`
 
-### 方式二：Python 交互向导（完整配置）
-
-提供完整的规则选择、TProxy 防火墙脚本生成和多 init 系统支持：
-
-```bash
-python setup.py
-```
-
-向导依次完成：
-
-1. 服务端 / 客户端参数配置
-2. （仅服务端）TCP Brutal 检测与安装，可用时自动启用并询问速率
-3. （仅服务端）Web 管理面板配置（监听地址、端口、访问令牌，可选启用）
-4. （仅客户端）本地 DNS 转发器配置（监听端口、国内/境外 DNS 服务器）
-5. （仅客户端）分流规则选择（列出常用 GeoSite/GeoIP tag 供逐项勾选）
-6. （仅客户端）TProxy 透明代理配置：询问端口、代理范围（全局/仅转发）、防火墙工具（iptables/nftables），自动生成 `tproxy_rules.sh` / `tproxy_cleanup.sh`；若已配置 DNS 转发器，可同时启用 DNS 透明捕获
-7. 系统服务安装（可选，支持 systemd / SysV init / OpenRC）
+**热加载**：改完 `config_client.json` 后 `systemctl reload pyrealiy-client` 即生效（不重 bind socket、不断连接）。详见 [0.4.25 CHANGELOG](CHANGELOG.md#0425---2026-06-11)。
 
 ---
 
 ## 手动配置
 
+不想用 `install.sh` 向导也可手编。仓库提供两份**详细带注释的示例文件**作为参考：
+
+| 文件 | 用途 |
+|---|---|
+| `config_server.example.jsonc` | 服务端完整字段说明（JSONC 格式，VSCode 等编辑器原生支持高亮） |
+| `config_client.example.jsonc` | 客户端 schema_v1 完整示例（含 DoH/DoT、Clash API、tuning 全部 section） |
+
+JSONC = JSON with Comments。**Python 的 `json.load()` 不接受注释**，所以要用时先去掉注释保存为 `.json`：
+
+```bash
+# 一行命令：去注释 + 保存
+python3 -c "
+import re, json, sys
+src = open('config_client.example.jsonc').read()
+src = re.sub(r'/\*.*?\*/', '', src, flags=re.S)
+src = re.sub(r'//[^\n]*', '', src)
+json.dump(json.loads(src), open('config_client.json','w'), indent=4)
+"
+
+# 或编辑器里直接删注释另存为 .json
+```
+
 ### 服务端（墙外 VPS）
 
-编辑 `config_server.json`：
+参考 `config_server.example.jsonc`。最小配置：
 
 ```json
 {
@@ -174,54 +181,40 @@ ssh -L 8080:127.0.0.1:8080 user@your-vps
 
 ### 客户端（本地）
 
-客户端配置采用 **sing-box 风格的 outbounds + route 结构**，编辑 `config_client.json`：
+客户端使用 **schema_version=1**（推荐）。8 个顶层 key 在该 schema 周期内永不新增（见下方 **schema_version=1 合约**）。编辑 `config_client.json`：
 
 ```json
 {
-    "socks5_host": "0.0.0.0",
-    "socks5_port": 1080,
-    "tproxy_port": 0,
+    "schema_version": 1,
+    "log": {"format": "text"},
 
-    "dns_listen_host": "127.0.0.1",
-    "dns_listen_port": 5353,
-    "cn_dns": "223.5.5.5",
-    "remote_dns": "8.8.8.8",
-
-    "geosite_dir": ".geosite",
-    "geosite_update_days": 7,
-
-    "geosite_sources": [
-        {
-            "name": "loyalsoldier",
-            "url": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"
-        }
-    ],
-    "geoip_sources": [
-        {
-            "name": "loyalsoldier",
-            "url": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
-        }
+    "inbounds": [
+        {"type": "socks5", "listen": "127.0.0.1:1080"}
     ],
 
     "outbounds": [
         {
-            "type": "pyrealiy", "tag":  "node-jp-1",
+            "tag": "node-jp-1", "type": "pyrealiy",
             "server": "your.tokyo.server.ip", "server_port": 443,
             "password": "your-strong-password-here",
             "sni": "www.apple.com"
         },
         {
-            "type": "pyrealiy", "tag":  "node-us-1",
+            "tag": "node-us-1", "type": "pyrealiy",
             "server": "your.us.server.ip", "server_port": 443,
             "password": "your-strong-password-here",
             "sni": "www.apple.com"
         },
 
-        { "type": "urltest",  "tag": "auto",    "outbounds": ["node-jp-1", "node-us-1"], "interval": "60s", "tolerance": 50 },
-        { "type": "fallback", "tag": "us-only", "outbounds": ["node-us-1"] }
+        {"tag": "auto",    "type": "urltest",  "outbounds": ["node-jp-1", "node-us-1"], "interval": "60s", "tolerance": 50},
+        {"tag": "us-only", "type": "fallback", "outbounds": ["node-us-1"]},
+
+        {"tag": "direct", "type": "direct"},
+        {"tag": "block",  "type": "block"}
     ],
 
     "route": {
+        "default": "auto",
         "rules": [
             {"rule_set": ["loyalsoldier:category-ads-all"], "outbound": "block"},
 
@@ -229,8 +222,6 @@ ssh -L 8080:127.0.0.1:8080 user@your-vps
             {"geoip":    ["loyalsoldier:private"],          "outbound": "direct"},
 
             {"rule_set": ["loyalsoldier:cn"],               "outbound": "direct"},
-            {"rule_set": ["loyalsoldier:apple-cn"],         "outbound": "direct"},
-            {"rule_set": ["loyalsoldier:google-cn"],        "outbound": "direct"},
             {"geoip":    ["loyalsoldier:cn"],               "outbound": "direct"},
 
             {"ip_cidr": ["127.0.0.0/8", "10.0.0.0/8",
@@ -238,26 +229,51 @@ ssh -L 8080:127.0.0.1:8080 user@your-vps
 
             {"rule_set": ["loyalsoldier:netflix",
                           "loyalsoldier:disney",
-                          "loyalsoldier:openai"],           "outbound": "us-only"}
-        ],
-        "final": "auto"
-    }
+                          "loyalsoldier:openai"],            "outbound": "us-only"}
+        ]
+    },
+
+    "dns": {
+        "listen": "127.0.0.1:5353"
+    },
+
+    "api": {
+        "listen": "127.0.0.1:9090",
+        "secret": "your-strong-api-token",
+        "cors": ["*"]
+    },
+
+    "tuning": {
+        "access_log": false
+    },
+
+    "cn_dns": "119.29.29.29",
+    "remote_dns": "1.1.1.1:53",
+    "geosite_dir": ".geosite",
+    "geosite_update_days": 7
 }
 ```
 
+> **关于 cn_dns / remote_dns 的顶层位置**：`dns.resolvers` + `dns.rules` schema 已在 0.4.16 落地但 dns_forwarder 还没消费（计划在迁移期把它整体接入）。当前阶段：
+> - `dns.listen` 字段已生效（schema_v1 投射到老顶层 `dns_listen_host` / `dns_listen_port`）
+> - `cn_dns` / `remote_dns` 仍写在**顶层**；启动时会有一条 `unknown top-level keys ignored` WARN，**功能正常**
+
 | 顶层字段 | 说明 |
 |---|---|
-| `socks5_host` | SOCKS5 监听地址，`0.0.0.0` 允许局域网内其他设备使用 |
-| `socks5_port` | SOCKS5 监听端口 |
-| `tproxy_port` | TProxy 监听端口，0 禁用；需要 root / CAP_NET_ADMIN |
-| `dns_listen_host` | DNS 转发器监听地址，建议 `127.0.0.1` |
-| `dns_listen_port` | DNS 转发器端口，0 禁用；5353 无需 root，53 需要 root |
-| `cn_dns` | 命中 `direct` 出口的 DNS 查询走此 UDP 服务器，默认 `223.5.5.5` |
-| `remote_dns` | 命中 `pyrealiy` 出口的 DNS 查询经隧道走此 TCP 服务器，默认 `8.8.8.8` |
+| `schema_version` | 固定为 `1`。**合约：1 期间不再加第 9 个顶层 key**（详见下方"schema_version=1 合约"） |
+| `log` | `{"format": "text" | "json"}`，默认 text。json 模式每行一个 JSON 行（见"结构化日志"） |
+| `inbounds[*]` | 入站监听。当前仅 `{"type":"socks5","listen":"host:port"}` |
+| `outbounds[*]` | 出口节点 + 组定义，见 **多节点与自适应选路** |
+| `route.default` | 未命中任何 rule 时的兜底 outbound tag（替代老的 `route.final`） |
+| `route.rules[*]` | 分流规则（sing-box 结构化对象数组），见 **分流规则** |
+| `dns.listen` | DNS 转发器监听 `"host:port"`，未设则不启用 |
+| `api.listen` | Clash 兼容 API 监听 `"host:port"`，未设则不启用。**`api.secret` 同时必填** |
+| `api.secret` | Bearer token；Yacd / metacubexd 登录用 |
+| `api.cors` | CORS allow-origin 列表，默认 `["*"]` |
+| `tuning.*` | 高级调优，主表不出现；详见 **高级调优字段** |
+| `cn_dns` | 命中 `direct` 出口的 DNS 查询走此 UDP 服务器，默认 `119.29.29.29` |
+| `remote_dns` | 命中 `pyrealiy` 出口的 DNS 查询经隧道走此服务器，支持 **UDP / DoT / DoH** 三种 scheme（见 **DNS 转发器**） |
 | `geosite_dir` / `geosite_update_days` | GeoSite/GeoIP 缓存目录与默认刷新周期 |
-| `geosite_sources` / `geoip_sources` | 数据源列表，见下方说明 |
-| `outbounds` | 出口节点 + 组定义，见 **多节点与自适应选路** |
-| `route.rules` / `route.final` | 分流规则（sing-box 结构化对象数组）+ 兜底动作，见 **分流规则** |
 
 **outbound 内字段（`pyrealiy` 类型）：**
 
@@ -433,7 +449,7 @@ TProxy 工作在网络层，由内核将匹配流量直接转交给代理进程�
 
 ### 防火墙规则
 
-运行 `python setup.py` 配置客户端时选择启用 TProxy，向导会自动检测系统防火墙工具（iptables / nftables），生成两个脚本：
+TProxy 防火墙规则需要手动配置（`install.sh` 不再自动生成）。下面给出 iptables 模板，按需调整：
 
 ```bash
 sudo bash tproxy_rules.sh     # 应用规则（重启后失效）
@@ -539,7 +555,7 @@ EOF
 
 清除：`nft delete table ip pyrealiy_nat`
 
-`setup.py` 配置 TProxy 时会询问是否同时启用 DNS 捕获，选择后自动将上述规则写入 `tproxy_rules.sh`，并把 `dns_listen_host` 改为 `0.0.0.0` 以接收 LAN 设备的 DNS 请求。
+如果要做 DNS 捕获（让 LAN 设备的 DNS 查询透明转发），把 `dns_listen_host` 改为 `0.0.0.0` 并在防火墙规则里 redirect 53 端口到 `dns_listen_port`。
 
 如需同时为局域网设备代理，还需开启 IP 转发：
 
@@ -704,6 +720,183 @@ CSV 的 action 部分对老关键字 `PROXY` / `DIRECT` / `REJECT` 自动映射�
 
 ---
 
+## schema_version=1 合约
+
+`schema_version` 字段是配置文件的**契约**：
+
+- **顶层 8 个 key 锁定**：`schema_version` / `log` / `inbounds` / `outbounds` / `route` / `dns` / `api` / `tuning`。`schema_version=1` 期间永不新增第 9 个顶层 key
+- **新功能进入已有 section 的 nested key**，不污染顶层
+- **类型特定字段塞进 outbound 的 `params` 子对象**，新增协议变种 = 新 `type`，schema 不动
+- **复杂调优用命名预设**，不开放裸参数（如 `transport: "brutal-default"`）
+
+### 合约表
+
+| 改动类型 | 允许在哪个版本 |
+|---|---|
+| 新顶层 section | 只 MAJOR（schema_version 升号） |
+| 新 nested key（带默认值） | MINOR |
+| 改字段含义 / 移除 | 只 MAJOR |
+| 重命名（保留老名为 alias） | MINOR，老名至少保留 3 个 MINOR |
+| 默认值变化 | PATCH（CHANGELOG 必须标注） |
+| 校验严格度提升 | MINOR，先 WARN 一轮再 ERROR |
+
+### 向后兼容
+
+- 无 `schema_version` + 命中 legacy 顶层 key（`server_host` / `password` / `socks5_host` 等）→ 启动期 INFO `Legacy schema detected`，行为保持现有
+- 服务端**当前仍是 legacy 平铺格式**，没有 schema_version 字段（避免触发 unknown-top-keys WARN）
+- 老 `config_client.json` / `config_server.json` 不需要改动
+
+---
+
+## Clash 兼容 API（client 端只读）
+
+启用 `api.listen` + `api.secret` 后，客户端启动一个 HTTP/1.1 + WebSocket 服务器，与 Yacd / metacubexd 等 Clash UI 100% 兼容。零外部依赖（仅 stdlib + asyncio）。
+
+### 端点清单（11 个）
+
+| 路径 | 方法 | 用途 |
+|---|---|---|
+| `/version` | GET | `{"version":"...","meta":true}`；UI 检测心跳 |
+| `/configs` | GET | 当前 cfg（脱敏）+ Clash 标准字段（socks-port / mode 等） |
+| `/configs` | **PUT** | **触发配置热加载**（与 SIGHUP 等效） |
+| `/proxies` | GET | 所有 outbound + 组（pyrealiy 映射成 Clash `Trojan` 类型） |
+| `/proxies/{name}` | GET | 单个 outbound |
+| `/rules` | GET | 路由规则（Clash CamelCase 类型，末尾自动追加 `Match`） |
+| `/connections` | GET | 活跃 + 5s linger 的关闭连接，含 up/down/chains/rule |
+| `/traffic` | **WS** | 1Hz 推 `{"up": B/s, "down": B/s}` |
+| `/logs?level=info` | **WS** | 实时日志流（按 level 过滤） |
+| `/pyrealiy/pool` | GET | BrutalPool 实时（ready / building / cursor / latency / healthy） |
+| `/pyrealiy/timesync` | GET | offset / last_source / last_sync_epoch |
+| `/pyrealiy/geo` | GET | meta.json 视图（cache_dir / update_days / sources[]） |
+| `/pyrealiy/cache` | GET | 决策缓存命中率（见 **DNS 转发器**） |
+
+### 鉴权
+
+- `Authorization: Bearer <secret>` 或 `?token=<secret>`（兼容 Yacd 老用法）
+- secret 常量时间比较；强制 127.0.0.1 绑定（0.0.0.0 启动期 WARN）
+
+### Yacd 接入
+
+```
+host=127.0.0.1  port=9090  secret=<api.secret>
+```
+
+### 不实现（控制类，按设计）
+
+`POST /proxies/{group}` 切节点、`GET /proxies/{name}/delay` 触发 probe、`DELETE /connections/{id}` 杀连接。Clash API v1 范围是纯查询。
+
+---
+
+## DNS 转发器（含 DoH / DoT + 决策缓存）
+
+设了 `dns.listen` 后客户端起一个 UDP DNS 服务。每个查询：
+
+1. **DnsCache 命中** → 直接返回（替换 tx_id）
+2. miss → router.match(domain) → 决定走 `direct`（用 `cn_dns`）或 `pyrealiy`（用 `remote_dns`，经隧道）
+3. 上游响应后写两层缓存
+
+### remote_dns 的三种 scheme
+
+| 形式 | 实现 |
+|---|---|
+| `1.1.1.1:53` / `dns://1.1.1.1:53` | UDP：经隧道到 server，server 端 plain TCP forward 到 1.1.1.1:53 |
+| `tls://1.1.1.1:853` | **DoT**：经隧道到 server pass-through TCP，**客户端进程内 TLS 1.2+ 端到端** + 长度前缀 DNS pipeline |
+| `https://1.1.1.1/dns-query` | **DoH**：同上 + HTTP/1.1 POST `application/dns-message`，单连接 keep-alive 串行 |
+
+**DoH URL 的 host 必须是 IP literal**（防 bootstrap 死循环）。三种 scheme **服务端代码完全透明**，TLS 由客户端做端到端，server 看不到明文 DNS。
+
+### 决策缓存（无脑开，无需配置）
+
+- `RoutingCache`：domain → outbound_tag，TTL 1h（路由规则静态）
+- `DnsCache`：(domain, qtype) → 原始 DNS 响应字节，**TTL 从 answer 段直接抽 `min(TTL)`**（截断到 30s-3600s）
+- LRU 上限各 10k entries，**总内存 ~1MB**
+- 实测：同域名第二次查询从 **~400ms（DoH 全程） 降到 ~0.3ms（dict 查找 + tx_id 重写）**
+
+### `tuning` 里相关参数
+
+```json
+"tuning": {
+  "routing_cache": {"enabled": true, "max_entries": 10000, "ttl_sec": 3600},
+  "dns_cache":     {"enabled": true, "max_entries": 10000}
+}
+```
+
+`/pyrealiy/cache` 端点查实时命中率。
+
+---
+
+## 配置热加载
+
+改完 `config_client.json` 后两种触发方式：
+
+```bash
+# 方式 1：systemd / OpenRC / SysV 都支持的 reload 子命令
+systemctl reload pyrealiy-client
+rc-service  pyrealiy-client reload
+service     pyrealiy-client reload
+
+# 方式 2：Clash API（需 api.listen）
+curl -X PUT -H "Authorization: Bearer <secret>" http://127.0.0.1:9090/configs
+
+# 方式 3：直接发 SIGHUP
+kill -HUP $(pgrep -f 'python3.*client.py')
+```
+
+### 可热加载
+
+| 字段 | 行为 |
+|---|---|
+| `route.rules` / `route.default` | rebuild Router + routing_cache 清空 + dns_cache 清空 |
+| `cn_dns` / `remote_dns`（含 DoH / DoT scheme 切换） | DNSForwarder.reload：drop _tunnels，下次查询按新地址重建 |
+| `log.format` / `log_levels` | 立即应用 |
+| `tuning.access_log` 等运行时可调项 | 注册的 handler 回调 |
+
+### 不动（locked field）
+
+`schema_version` / `inbounds` / `outbounds` / `api.listen` / `api.secret` / legacy 顶层鉴权字段。检测到改动 → `warnings: ["locked: <field>"]`，新值不生效。改这些需 restart。
+
+### 不打断现有连接
+
+- outbounds + 池不动，正在跑的 TCP 隧道继续用
+- 新 dispatch 命中新路由
+- DNS upstream 跌掉时旧 in-flight 查询抛 OSError 回退 NXDOMAIN，下一次重建
+
+---
+
+## 结构化日志
+
+`cfg.log.format` 决定输出格式：
+
+| 值 | 输出 |
+|---|---|
+| `"text"`（默认） | `2026-06-11 14:24:07,896 [INFO] config: dns.default not set; using first resolver 'proxy-dns'` |
+| `"json"` | 每行一个 JSON |
+
+JSON schema：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `ts` | string | ISO-8601 UTC，毫秒精度 `2026-06-11T06:29:48.416Z` |
+| `level` | string | `debug` / `info` / `warning` / `error` / `critical` |
+| `logger` | string | logger 名（`client` / `conn_pool` / `time_sync` 等） |
+| `msg` | string | 格式化后的消息 |
+| `extra` | object | 可选；调用方传 `extra=` 的字段集合 |
+| `exc` | string | 可选；异常时的 traceback 文本 |
+
+### 解析示例
+
+```bash
+# 看 conn_pool 的所有 WARNING+
+cat client.log | jq 'select(.level=="warning" or .level=="error") | select(.logger=="conn_pool")'
+
+# 按 outbound 筛连接级日志
+cat client.log | jq 'select(.extra.outbound=="proxy")'
+```
+
+WS `/logs` 端点的 `payload` 字段始终是紧凑文本（Clash 协议要求），**不**随 `cfg.log.format` 改变。
+
+---
+
 ## TCP Brutal
 
 TCP Brutal 是针对跨境链路设计的拥塞控制算法，以固定速率发送数据，不因丢包降速。**仅需在服务端（Linux VPS）安装**，客户端无需任何内核模块。
@@ -720,7 +913,7 @@ git clone --depth=1 https://github.com/apernet/tcp-brutal
 cd tcp-brutal && make dkms
 ```
 
-或直接运行 `python setup.py` 选择服务端角色，向导检测到模块可用时会自动启用并询问速率。
+或运行 `sudo bash install.sh` 选择服务端，向导检测到 Brutal 模块可用时会询问速率并写入 cfg。
 
 **速率设置建议：**
 
@@ -731,7 +924,7 @@ cd tcp-brutal && make dkms
 
 ## 系统服务
 
-运行 `python setup.py` 时向导会询问是否安装为系统服务，自动检测 init 系统并生成对应的启动脚本（含 `ulimit -n 65536`）。
+`install.sh` 自动检测 init 系统并生成对应 unit：**systemd**（多数主流发行版）/ **OpenRC**（Alpine、Gentoo）/ **SysV init.d**（CentOS 6、老 Debian 等）。三种都支持 `reload` 子命令（发 SIGHUP 触发 0.4.25 的热加载）。
 
 ### systemd
 
@@ -810,9 +1003,13 @@ tail -f /var/log/pyrealiy-server.log
 pyrealiy-proxy/
 ├── server.py              服务端入口
 ├── client.py              客户端入口（SOCKS5 + 分流 + 连接池）
-├── setup.py               交互式部署向导（规则选择 / TProxy / 系统服务安装）
-├── config_server.json     服务端配置示例
-├── config_client.json     客户端配置示例
+├── install.sh             一键交互式部署向导（服务端 / 客户端 / 两端）
+├── bench.py               吞吐 + 延迟基准（DNS / SOCKS5 / 各种 scenario）
+├── config_server.json            服务端运行时配置（install.sh 生成；也可手编）
+├── config_client.json            客户端运行时配置（install.sh 生成；也可手编）
+├── config_server.example.jsonc   服务端带注释示例（JSONC，供参考）
+├── config_client.example.jsonc   客户端带注释示例（JSONC，schema_v1 完整字段）
+├── tests/                 测试脚本（throughput / gfw_probe / admin / traffic_analyzer / run_test*.sh）
 └── core/
     ├── hello_auth.py      ClientHello token 生成与验证（Poly1305 + 时间戳掩码 + nonce 防重放）
     ├── camouflage.py      服务端 TLS 伪装决策（认证通过 → 代理模式；探测/重放 → 回放缓存）
@@ -997,7 +1194,7 @@ bash scripts/test-py-matrix.sh
 
 - 用 `uv python install` 确保 3.9 / 3.10 / 3.11 / 3.12 / 3.13 都装好
 - 为每个版本分别在 `.venvs/py3.x` 建独立虚拟环境
-- 装 `cryptography` 后对全部 16 个 `core.*` 模块 + `client.py` / `server.py` / `setup.py` 做 `import` 测试
+- 装 `cryptography` 后对全部 `core.*` 模块 + `client.py` / `server.py` 做 `import` 测试
 - 任何版本失败立即用红色提示，并以 exit code 1 退出
 
 #### 3. 跑子集（调试单个版本）

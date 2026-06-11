@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import datetime as _dt
+import json as _json
 import logging
 
 import socket
@@ -17,6 +19,72 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
+
+
+# ── 结构化日志 ────────────────────────────────────────────────────────────────
+
+# LogRecord 的内置字段，从 record.__dict__ 里减掉这些就剩下 extra=
+_LOG_RECORD_BUILTIN_ATTRS = frozenset({
+    "args", "asctime", "created", "exc_info", "exc_text", "filename",
+    "funcName", "levelname", "levelno", "lineno", "message", "module",
+    "msecs", "msg", "name", "pathname", "process", "processName",
+    "relativeCreated", "stack_info", "thread", "threadName", "taskName",
+})
+
+
+class JsonFormatter(logging.Formatter):
+    """
+    输出每行一个 JSON：
+      {"ts": "ISO-8601 UTC","level":"info","logger":"conn_pool",
+       "msg":"Pool warmed up: 20/20","extra":{...}}
+
+    `extra` 字段来自 `logger.info("...", extra={"k":"v"})`。无 extra 时不出现该键。
+    异常用 "exc" 字段附 traceback 文本。
+
+    用法：见 apply_log_format(cfg) —— cfg["log"]["format"] == "json" 时切换。
+    """
+
+    def format(self, record: logging.LogRecord) -> str:  # noqa: A003
+        ts = _dt.datetime.fromtimestamp(record.created, tz=_dt.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S."
+        ) + f"{int(record.msecs):03d}Z"
+        out: dict = {
+            "ts":     ts,
+            "level":  record.levelname.lower(),
+            "logger": record.name,
+            "msg":    record.getMessage(),
+        }
+        extras = {
+            k: v for k, v in record.__dict__.items()
+            if k not in _LOG_RECORD_BUILTIN_ATTRS and not k.startswith("_")
+        }
+        if extras:
+            out["extra"] = extras
+        if record.exc_info:
+            out["exc"] = self.formatException(record.exc_info)
+        return _json.dumps(out, ensure_ascii=False, default=str)
+
+
+def apply_log_format(cfg: dict) -> None:
+    """
+    根据 cfg["log"]["format"] 切换日志格式：
+      "text" / 缺省  → basicConfig 的原格式（向后兼容）
+      "json"         → JsonFormatter（每行一个 JSON）
+
+    替换所有 root logger 已挂的 handler 的 formatter。需要在任何业务日志前调。
+    """
+    log_cfg = (cfg.get("log") or {})
+    fmt = str(log_cfg.get("format", "text")).lower()
+    if fmt not in ("text", "json"):
+        logging.getLogger("utils").warning(
+            "log.format must be 'text' or 'json', got %r; using text", fmt
+        )
+        return
+    if fmt == "text":
+        return  # basicConfig 已是 text
+    json_fmt = JsonFormatter()
+    for h in logging.getLogger().handlers:
+        h.setFormatter(json_fmt)
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -257,7 +325,7 @@ async def wait_both_with_grace(task_a: asyncio.Task, task_b: asyncio.Task,
 
 async def relay(reader_a: asyncio.StreamReader, writer_b: asyncio.StreamWriter,
                 reader_b: asyncio.StreamReader, writer_a: asyncio.StreamWriter,
-                label: str = "") -> None:
+                label: str = "", on_up=None, on_down=None) -> None:
     """
     双向透明中继（无加密，用于直连路径）。
 
@@ -271,13 +339,15 @@ async def relay(reader_a: asyncio.StreamReader, writer_b: asyncio.StreamWriter,
       2. 由外层 wait_both_with_grace 等另一 pipe 也自然退出（最多 2s）
       3. 然后两边一并 safe_close —— 此时接收缓冲已被对方 pipe 排空
     """
-    async def pipe(reader, writer, direction):
+    async def pipe(reader, writer, direction, on_bytes):
         try:
             while True:
                 data = await reader.read(_RELAY_BUF)
                 if not data:
                     break
                 writer.write(data)
+                if on_bytes:
+                    on_bytes(len(data))
                 if writer.transport.get_write_buffer_size() > _DRAIN_THRESHOLD:
                     await writer.drain()
         except Exception as e:
@@ -290,8 +360,8 @@ async def relay(reader_a: asyncio.StreamReader, writer_b: asyncio.StreamWriter,
         except Exception:
             pass
 
-    task_a = asyncio.create_task(pipe(reader_a, writer_b, "local→remote"))
-    task_b = asyncio.create_task(pipe(reader_b, writer_a, "remote→local"))
+    task_a = asyncio.create_task(pipe(reader_a, writer_b, "local→remote", on_up))
+    task_b = asyncio.create_task(pipe(reader_b, writer_a, "remote→local", on_down))
     try:
         await wait_both_with_grace(task_a, task_b)
     finally:

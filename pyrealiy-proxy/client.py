@@ -14,7 +14,7 @@ PyReality 客户端
   延迟数据：复用 BrutalPool 每次 build 的握手耗时（无额外探测）；长时间
   无流量时由 HealthCheck 主动 probe 兜底。
 
-可选 TProxy 透明代理（需要 root + iptables TPROXY 规则，由 setup.py 生成）
+可选 TProxy 透明代理（需要 root + iptables TPROXY 规则，参考 README "TProxy 防火墙规则" 一节手配）
 
 老配置（顶层 server_host）：build_outbounds 自动合成单 pyrealiy outbound 'proxy'。
 老 rules（CSV 字符串）：PROXY/DIRECT/REJECT 关键字自动映射到 proxy/direct/block 三个 tag。
@@ -33,6 +33,8 @@ import resource
 import sys
 
 from core.version import __version__
+from core.config import load_config, validate_cross_refs, ConfigError
+from core.reload import RouterRef, Reloader
 from core.time_sync import TimeSync
 from core.hello_auth import set_time_provider
 from core.socks5 import parse_socks5_request, reply_udp_associate
@@ -43,7 +45,7 @@ from core.sniffer import sniff_domain, PrefixedReader
 from core.geosite_cache import ensure_all as geo_ensure_all
 from core.router import build_router, PROXY, DIRECT, REJECT
 from core.healthcheck import HealthCheck
-from core.utils import (get_logger, safe_close, apply_log_levels,
+from core.utils import (get_logger, safe_close, apply_log_levels, apply_log_format,
                         install_stale_gaierror_handler, set_drain_threshold)
 from core import brutal
 
@@ -68,6 +70,9 @@ async def _dispatch(
     outbounds: dict[str, Outbound],
     router,
     routing_host: str | None = None,
+    registry=None,
+    inbound_type: str = "Socks5",
+    routing_cache=None,
 ) -> None:
     """
     路由判断 + 委派给命中的 outbound。SOCKS5 / TProxy 两个入口共用。
@@ -75,9 +80,25 @@ async def _dispatch(
     routing_host: 用于路由匹配的域名（TProxy sniff 结果）；
                   None 时退化为 target_host。
     target_host:  实际连接目标。
+    registry:     ConnectionRegistry，None 时不做统计；非 None 时注册/注销
+                  conn_info 并把 byte 回调传给 outbound.handle。
+    routing_cache: RoutingCache（None 时不查/不写）。命中即跳过 router.match，
+                   显著缩短热门域名的分发开销。
     """
-    route_key      = routing_host or target_host
-    action, source = router.match(route_key)
+    route_key = routing_host or target_host
+
+    # 决策缓存：命中即跳过规则扫描
+    action = None
+    source = ""
+    if routing_cache is not None:
+        cached = routing_cache.get(route_key)
+        if cached is not None:
+            action = cached
+            source = "cached"
+    if action is None:
+        action, source = router.match(route_key)
+        if routing_cache is not None:
+            routing_cache.put(route_key, action)
 
     outbound = outbounds.get(action)
     if outbound is None:
@@ -94,7 +115,37 @@ async def _dispatch(
     else:
         _alog("info", "%-8s %s  [%s]", outbound.tag, label, source)
 
-    await outbound.handle(local_reader, local_writer, target_host, target_port)
+    on_up = on_down = None
+    conn_id = None
+    if registry is not None:
+        from core.api.stats import ConnInfo, ConnMetadata, new_conn_id, split_rule
+        peer = local_writer.get_extra_info("peername") or ("", 0)
+        rule_kind, rule_payload = split_rule(source)
+        meta = ConnMetadata(
+            network="tcp",
+            type=inbound_type,
+            source_ip=str(peer[0]) if peer else "",
+            source_port=str(peer[1]) if peer else "",
+            destination_ip=str(target_host) if not routing_host else "",
+            destination_port=str(target_port),
+            host=routing_host or str(target_host),
+        )
+        # chains 顺序：Clash 期望"叶在前，入口在后"（数组首项是实际跑流量的节点）
+        chains = [leaf.tag] if leaf is outbound else [leaf.tag, outbound.tag]
+        info = ConnInfo(
+            id=new_conn_id(), metadata=meta, chains=chains,
+            rule=rule_kind, rule_payload=rule_payload,
+        )
+        registry.register(info)
+        on_up, on_down = registry.make_callbacks(info)
+        conn_id = info.id
+
+    try:
+        await outbound.handle(local_reader, local_writer, target_host, target_port,
+                              on_up=on_up, on_down=on_down)
+    finally:
+        if registry is not None and conn_id is not None:
+            registry.unregister(conn_id)
 
 
 async def handle_local_connection(
@@ -103,6 +154,8 @@ async def handle_local_connection(
     outbounds: dict[str, Outbound],
     router,
     udp_cfg: dict,
+    registry=None,
+    routing_cache=None,
 ) -> None:
     parsed = await parse_socks5_request(local_reader, local_writer)
     if parsed is None:
@@ -110,9 +163,11 @@ async def handle_local_connection(
         return
     cmd, host, port = parsed
     if cmd == "tcp":
-        await _dispatch(local_reader, local_writer, host, port, outbounds, router)
+        await _dispatch(local_reader, local_writer, host, port, outbounds, router,
+                        registry=registry, routing_cache=routing_cache)
     elif cmd == "udp":
-        await _dispatch_udp(local_reader, local_writer, outbounds, router, udp_cfg)
+        await _dispatch_udp(local_reader, local_writer, outbounds, router, udp_cfg,
+                            registry=registry)
     else:
         await safe_close(local_writer)
 
@@ -123,6 +178,7 @@ async def _dispatch_udp(
     outbounds: dict[str, Outbound],
     router,
     udp_cfg: dict,
+    registry=None,
 ) -> None:
     """
     SOCKS5 UDP ASSOCIATE 分派。
@@ -170,8 +226,32 @@ async def _dispatch_udp(
         await safe_close(local_writer)
         return
 
+    on_up = on_down = None
+    conn_id = None
+    if registry is not None and leaf is not None:
+        from core.api.stats import ConnInfo, ConnMetadata, new_conn_id
+        peer = local_writer.get_extra_info("peername") or ("", 0)
+        meta = ConnMetadata(
+            network="udp",
+            type="Socks5",
+            source_ip=str(peer[0]) if peer else "",
+            source_port=str(peer[1]) if peer else "",
+            destination_ip="0.0.0.0",   # UDP-ASSOCIATE 目标在每包 frame 里
+            destination_port="0",
+            host="udp-associate",
+        )
+        chains = [leaf.tag] if leaf is outbound else [leaf.tag, outbound.tag]
+        info = ConnInfo(
+            id=new_conn_id(), metadata=meta, chains=chains,
+            rule="Match", rule_payload=default_action,
+        )
+        registry.register(info)
+        on_up, on_down = registry.make_callbacks(info)
+        conn_id = info.id
+
     relay = UDPRelay(local_reader, local_writer, tunnel, server_writer,
-                     bind_host=bind_host, idle_timeout=idle_timeout)
+                     bind_host=bind_host, idle_timeout=idle_timeout,
+                     on_up=on_up, on_down=on_down)
     try:
         bnd_host, bnd_port = await relay.start()
         await reply_udp_associate(local_writer, bnd_host, bnd_port)
@@ -181,6 +261,8 @@ async def _dispatch_udp(
     except Exception as e:
         logger.debug("UDP relay error: %s", e)
     finally:
+        if registry is not None and conn_id is not None:
+            registry.unregister(conn_id)
         if server_writer is not None:
             await safe_close(server_writer)
         await safe_close(local_writer)
@@ -251,10 +333,10 @@ async def main(config_path: str) -> None:
     _raise_fd_limit()
     install_stale_gaierror_handler(asyncio.get_running_loop())
 
-    with open(config_path) as f:
-        cfg = json.load(f)
+    cfg = load_config(config_path)
 
-    # 在任何业务日志之前应用 log_levels，否则启动日志仍按旧级别走
+    # 在任何业务日志之前应用日志格式 + 级别，否则启动日志仍按旧设置走
+    apply_log_format(cfg)
     apply_log_levels(cfg)
 
     logger.info("PyReality client v%s", __version__)
@@ -269,7 +351,8 @@ async def main(config_path: str) -> None:
         time_sync.start()
 
     global _ACCESS_LOG
-    _ACCESS_LOG = bool(cfg.get("access_log", False))
+    _tuning = cfg.get("tuning") or {}
+    _ACCESS_LOG = bool(_tuning.get("access_log", cfg.get("access_log", False)))
     if _ACCESS_LOG:
         logger.info("access_log enabled (per-connection dispatch logging on)")
 
@@ -281,6 +364,7 @@ async def main(config_path: str) -> None:
     # ── 构建 outbound 字典 ────────────────────────────────────────────────
     _check_brutal_kernel(cfg)
     outbounds = build_outbounds(cfg)
+    validate_cross_refs(cfg, set(outbounds.keys()))
     # legacy_action_map 总是提供：即便用户在新 outbounds + CSV rules 混用，
     # 用 PROXY/DIRECT/REJECT 关键字也能继续工作（前提是定义了同名 outbound）。
     # 用户用了自定义 tag（如 "tokyo-1"）的 CSV 行会原样作为 outbound 名查找，
@@ -308,11 +392,13 @@ async def main(config_path: str) -> None:
     available_site, available_ip = await geo_ensure_all(cfg, pool=geo_pool)
 
     # ── 构建 router ───────────────────────────────────────────────────────
-    router = build_router(
+    router_inner = build_router(
         cfg, available_site, available_ip,
         valid_actions=set(outbounds.keys()),
         legacy_action_map=legacy_map,
     )
+    # 包一层 RouterRef 让热加载可以原子替换 inner
+    router = RouterRef(router_inner)
 
     # ── HealthCheck：长闲时主动 probe 兜底 ────────────────────────────────
     health = HealthCheck(outbounds.values())
@@ -324,22 +410,78 @@ async def main(config_path: str) -> None:
         "udp_idle_timeout": cfg.get("udp_idle_timeout", 60),
     }
 
+    # ── Clash API 连接统计：仅在 api.listen 配置时启用 ─────────────────────
+    api_registry = None
+    if (cfg.get("api") or {}).get("listen"):
+        from core.api.stats import ConnectionRegistry
+        api_registry = ConnectionRegistry()
+
+    # ── 路由决策缓存：默认开（命中跳过 router.match）─────────────────────
+    routing_cache = None
+    _tuning_cache = (cfg.get("tuning") or {}).get("routing_cache") or {}
+    if _tuning_cache.get("enabled", True):
+        from core.decision_cache import RoutingCache
+        routing_cache = RoutingCache(
+            max_entries=int(_tuning_cache.get("max_entries", 10000)),
+            ttl_sec=float(_tuning_cache.get("ttl_sec", 3600)),
+        )
+
     socks5_server = await asyncio.start_server(
-        lambda r, w: handle_local_connection(r, w, outbounds, router, udp_cfg),
+        lambda r, w: handle_local_connection(r, w, outbounds, router, udp_cfg,
+                                             registry=api_registry,
+                                             routing_cache=routing_cache),
         cfg["socks5_host"],
         cfg["socks5_port"],
         limit=262144,
     )
     logger.info("SOCKS5 listening on %s:%d", cfg["socks5_host"], cfg["socks5_port"])
 
+    # DNS 响应缓存：仅在 DNS forwarder 启用时建
+    dns_cache = None
+    if cfg.get("dns_listen_port", 0):
+        _tuning_dns = (cfg.get("tuning") or {}).get("dns_cache") or {}
+        if _tuning_dns.get("enabled", True):
+            from core.decision_cache import DnsCache
+            dns_cache = DnsCache(max_entries=int(_tuning_dns.get("max_entries", 10000)))
+
     dns_forwarder = None
     if cfg.get("dns_listen_port", 0):
         try:
-            dns_forwarder = DNSForwarder(cfg, router, outbounds)
+            dns_forwarder = DNSForwarder(cfg, router, outbounds,
+                                         routing_cache=routing_cache,
+                                         dns_cache=dns_cache)
             await dns_forwarder.start()
         except OSError as e:
             logger.error("DNS forwarder failed to start: %s", e)
             dns_forwarder = None
+
+    api_server = None
+    log_bc = None
+    api_ctx = None
+    if (cfg.get("api") or {}).get("listen"):
+        from core.api import APIServer
+        from core.api.server import APIContext
+        from core.api.ws_endpoints import LogBroadcaster
+        log_bc = LogBroadcaster()
+        log_bc.attach()
+        api_ctx = APIContext(
+            version=__version__,
+            cfg=cfg,
+            outbounds=outbounds,
+            router_engine=router,
+            registry=api_registry,
+            log_broadcaster=log_bc,
+            routing_cache=routing_cache,
+            dns_cache=dns_cache,
+        )
+        api_server = APIServer(cfg, api_ctx)
+        try:
+            await api_server.start()
+        except OSError as e:
+            logger.error("API failed to start: %s", e)
+            api_server = None
+            log_bc.detach()
+            log_bc = None
 
     tproxy_server = None
     tproxy_port = cfg.get("tproxy_port", 0)
@@ -354,6 +496,39 @@ async def main(config_path: str) -> None:
         except OSError as e:
             logger.error("TProxy failed to start: %s", e)
 
+    # ── Reloader：SIGHUP + POST /configs 都用这个 ─────────────────────────
+    reloader = Reloader(config_path, cfg)
+    reloader.router_ref = router
+    reloader.outbounds = outbounds
+    reloader.routing_cache = routing_cache
+    reloader.dns_cache = dns_cache
+    reloader.dns_forwarder = dns_forwarder
+    reloader.available_site = available_site
+    reloader.available_ip = available_ip
+    reloader.legacy_action_map = legacy_map
+
+    def _refresh_access_log(new_cfg: dict) -> None:
+        global _ACCESS_LOG
+        t = new_cfg.get("tuning") or {}
+        _ACCESS_LOG = bool(t.get("access_log", new_cfg.get("access_log", False)))
+    reloader.add_tuning_handler(_refresh_access_log)
+
+    if api_ctx is not None:
+        api_ctx.reloader = reloader
+        reloader.api_ctx = api_ctx   # B1：reload 后同步 api_ctx.cfg
+
+    # SIGHUP → schedule reload as task
+    import signal
+    def _sighup_handler():
+        logger.info("SIGHUP received, scheduling config reload")
+        asyncio.create_task(reloader.reload())
+    try:
+        asyncio.get_event_loop().add_signal_handler(signal.SIGHUP, _sighup_handler)
+        logger.info("SIGHUP handler installed (kill -HUP %d to reload)", os.getpid())
+    except (NotImplementedError, AttributeError):
+        # Windows 不支持 SIGHUP；忽略
+        pass
+
     try:
         if tproxy_server:
             async with socks5_server, tproxy_server:
@@ -367,6 +542,10 @@ async def main(config_path: str) -> None:
     finally:
         await time_sync.stop()
         await health.stop()
+        if api_server:
+            await api_server.stop()
+        if log_bc:
+            log_bc.detach()
         if dns_forwarder:
             dns_forwarder.stop()
         for o in outbounds.values():

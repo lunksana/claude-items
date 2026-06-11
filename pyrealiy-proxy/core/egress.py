@@ -53,11 +53,12 @@ class MarkedEgress(Egress):
       ip rule add fwmark {mark} table {table}
       ip route add default dev {wg_iface} table {table}
 
-    setup.py 的 WARP 一键脚本会一并写好。
+    需用户手动配置 `ip rule` + `ip route` 把指定 fwmark 的流量送进 WireGuard
+    路由表。参考 wg-quick + warp-cli 等工具的说明。
 
-    重要：当前只针对 IPv4（setup-warp.sh 只配 v4 路由表）。如目标域名解析出 v6
-    地址会照样 setsockopt(SO_MARK) 成功但内核找不到 v6 策略路由，连接会超时。
-    解决：把宿主机或 server 端配置成 v4 优先，或者扩展 setup 脚本加 `ip -6 rule`。
+    重要：当前只针对 IPv4。如目标域名解析出 v6 地址会照样 setsockopt(SO_MARK)
+    成功但内核找不到 v6 策略路由，连接会超时。
+    解决：把宿主机或 server 端配置成 v4 优先，或者再加一条 `ip -6 rule`。
     """
 
     def __init__(self, name: str, mark: int):
@@ -82,10 +83,10 @@ class MarkedEgress(Egress):
 
     async def open_connection(self, host, port):
         loop = asyncio.get_event_loop()
-        # **强制 v4**：setup-warp.sh 只配 v4 策略路由表，如果用户主机偏好 v6（gai.conf
-        # 默认行为，IPv6 有 AAAA 时优先）会选出 v6 sockaddr，SO_MARK 设上但内核找不到
-        # v6 路由表 → 连接默默走错出口或超时。强制 v4 让"目标只有 v6"的连接显式失败
-        # （gaierror），避免静默错误。需要 v6 WARP 的话扩展 setup-warp.sh 加 `ip -6 rule`。
+        # **强制 v4**：典型的 WireGuard policy routing 只配 v4 路由表，如果用户主机偏好
+        # v6（gai.conf 默认行为，IPv6 有 AAAA 时优先）会选出 v6 sockaddr，SO_MARK 设上但
+        # 内核找不到 v6 路由表 → 连接默默走错出口或超时。强制 v4 让"目标只有 v6"的连接
+        # 显式失败（gaierror），避免静默错误。需要 v6 WARP 的话用户自行加 `ip -6 rule`。
         infos = await loop.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
         af, socktype, proto, _, sockaddr = infos[0]
         sock = socket.socket(af, socktype, proto)

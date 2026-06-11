@@ -293,6 +293,27 @@ def load_geoip_dat(path: str) -> dict[str, tuple[list, bool]]:
 _AddrType = Union[ipaddress.IPv4Address, ipaddress.IPv6Address, None]
 
 
+# Clash 风格规则 type 映射（Yacd UI 用）
+_CLASH_RULE_TYPE = {
+    "DOMAIN":          "Domain",
+    "DOMAIN-SUFFIX":   "DomainSuffix",
+    "DOMAIN-KEYWORD":  "DomainKeyword",
+    "DOMAIN-REGEX":    "DomainRegex",
+    "IP-CIDR":         "IPCIDR",
+    "IPCIDR":          "IPCIDR",
+    "GEOIP":           "GeoIP",
+    "GEOSITE":         "GeoSite",
+    "FINAL":           "Match",
+    "PORT":            "DstPort",
+    "SRC-PORT":        "SrcPort",
+    "PROCESS-NAME":    "ProcessName",
+}
+
+
+def _clash_rule_type(raw: str) -> str:
+    return _CLASH_RULE_TYPE.get(raw.upper(), raw)
+
+
 class _Rule:
     """
     单条规则基类。
@@ -493,6 +514,33 @@ class Router:
     def default(self) -> str:
         """当前 FINAL action（外部只读访问；避免调用方碰 _default 私有名）"""
         return self._default
+
+    @property
+    def rules(self) -> list[dict]:
+        """
+        给 Clash API（/rules）用的只读视图。每条规则一个 dict:
+          {"type": "DomainSuffix", "payload": "google.com", "proxy": "<tag>", "invert": False}
+
+        type 字段从规则 desc 的 "#N KIND value" 格式抽出 KIND 并映射成 Clash 风格
+        CamelCase（DomainSuffix / Domain / IPCIDR / GeoIP 等）。Yacd 接受任意字符串。
+        """
+        out: list[dict] = []
+        for r in self._rules:
+            # desc 形如 "#3 DOMAIN-SUFFIX google.com"
+            parts = r.desc.split(" ", 2)
+            if len(parts) >= 3:
+                kind_raw, payload = parts[1], parts[2]
+            elif len(parts) == 2:
+                kind_raw, payload = parts[1], ""
+            else:
+                kind_raw, payload = r.desc, ""
+            out.append({
+                "type":    _clash_rule_type(kind_raw),
+                "payload": payload,
+                "proxy":   r.action,
+                "invert":  bool(r.invert),
+            })
+        return out
 
     def add(self, rule: _Rule) -> None:
         # 给规则编号，方便日志归因到具体 config 行

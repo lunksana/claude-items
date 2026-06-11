@@ -3,7 +3,7 @@ TProxy 透明代理监听器（仅限 Linux）
 
 需要：
   - root 权限或 CAP_NET_ADMIN capability
-  - iptables TPROXY 规则将目标流量重定向到此端口（由 setup.py 生成）
+  - iptables TPROXY 规则将目标流量重定向到此端口（参考 README "TProxy 防火墙规则" 模板）
 
 连接到达时 writer.get_extra_info('sockname') 直接返回原始目标地址，
 无需任何协议握手，与 SOCKS5 处理逻辑完全兼容。

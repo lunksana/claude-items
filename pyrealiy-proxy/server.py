@@ -28,6 +28,8 @@ import sys
 
 from core.camouflage import server_read_hello_and_decide
 
+from core.config import load_config
+
 from core.handshake_cache import HandshakeCache
 
 from core.hello_auth import TokenReplayCache
@@ -40,7 +42,7 @@ from core.router import build_router
 
 from core.geosite_cache import ensure_all as geo_ensure_all
 
-from core.utils import (get_logger, unpack_address, safe_close, apply_log_levels,
+from core.utils import (get_logger, unpack_address, safe_close, apply_log_levels, apply_log_format,
                         install_stale_gaierror_handler, set_drain_threshold,
                         get_drain_threshold, wait_both_with_grace)
 from core.udp_relay import handle_udp_tunnel
@@ -291,10 +293,10 @@ async def main(config_path: str) -> None:
     # 静音 stale getaddrinfo future 的噪音（详见 utils.install_stale_gaierror_handler）
     install_stale_gaierror_handler(asyncio.get_running_loop())
 
-    with open(config_path) as f:
-        cfg = json.load(f)
+    cfg = load_config(config_path)
 
-    # 在任何业务日志之前应用 log_levels，否则启动日志仍按旧级别走
+    # 在任何业务日志之前应用日志格式 + 级别，否则启动日志仍按旧设置走
+    apply_log_format(cfg)
     apply_log_levels(cfg)
 
     logger.info("PyReality server v%s", __version__)

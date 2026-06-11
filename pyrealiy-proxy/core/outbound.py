@@ -74,7 +74,8 @@ class Outbound:
     def is_healthy(self) -> bool:
         return True
 
-    async def handle(self, local_reader, local_writer, target_host: str, target_port: int) -> None:
+    async def handle(self, local_reader, local_writer, target_host: str, target_port: int,
+                     on_up=None, on_down=None) -> None:
         raise NotImplementedError
 
 
@@ -87,7 +88,8 @@ class DirectOutbound(Outbound):
     def __init__(self, tag: str = "direct"):
         self.tag = tag
 
-    async def handle(self, local_reader, local_writer, target_host, target_port):
+    async def handle(self, local_reader, local_writer, target_host, target_port,
+                     on_up=None, on_down=None):
         try:
             target_reader, target_writer = await asyncio.open_connection(target_host, target_port)
         except Exception as e:
@@ -95,7 +97,8 @@ class DirectOutbound(Outbound):
             await safe_close(local_writer)
             return
         await relay(local_reader, target_writer, target_reader, local_writer,
-                    label=f"{self.tag} {target_host}:{target_port}")
+                    label=f"{self.tag} {target_host}:{target_port}",
+                    on_up=on_up, on_down=on_down)
 
 
 class BlockOutbound(Outbound):
@@ -152,7 +155,8 @@ class PyrealiyOutbound(Outbound):
             return None
         return self.latency_ms
 
-    async def handle(self, local_reader, local_writer, target_host, target_port):
+    async def handle(self, local_reader, local_writer, target_host, target_port,
+                     on_up=None, on_down=None):
         ready = await self._pool.acquire()
         if ready is None:
             logger.error("[%s] no tunnel for %s:%d", self.tag, target_host, target_port)
@@ -168,7 +172,8 @@ class PyrealiyOutbound(Outbound):
             await safe_close(local_writer)
             return
         await _bidi_tunnel_relay(local_reader, local_writer, tunnel, server_writer,
-                                 label=f"{self.tag} {target_host}:{target_port}")
+                                 label=f"{self.tag} {target_host}:{target_port}",
+                                 on_up=on_up, on_down=on_down)
 
     # ── 健康回调（由 BrutalPool 调）──────────────────────────────────────
     def _record_latency(self, ms: float) -> None:
@@ -198,7 +203,8 @@ class PyrealiyOutbound(Outbound):
 
 # ── 共用 relay ────────────────────────────────────────────────────────────────
 
-async def _bidi_tunnel_relay(local_reader, local_writer, tunnel, server_writer, label: str = ""):
+async def _bidi_tunnel_relay(local_reader, local_writer, tunnel, server_writer,
+                             label: str = "", on_up=None, on_down=None):
     """
     本地 ↔ 加密隧道 双向中继。从 client.py _dispatch 原 PROXY 分支提取。
 
@@ -220,6 +226,8 @@ async def _bidi_tunnel_relay(local_reader, local_writer, tunnel, server_writer, 
                 if not data:
                     break
                 await tunnel.send(data)
+                if on_up:
+                    on_up(len(data))
         except Exception as e:
             logger.debug("relay %s local→tunnel ended: %s: %s",
                          label or "?", type(e).__name__, e)
@@ -231,6 +239,8 @@ async def _bidi_tunnel_relay(local_reader, local_writer, tunnel, server_writer, 
             while True:
                 data = await tunnel.recv()  # server 发 close_notify 时抛 EOFError
                 local_writer.write(data)
+                if on_down:
+                    on_down(len(data))
                 if local_writer.transport.get_write_buffer_size() > get_drain_threshold():
                     await local_writer.drain()
         except Exception as e:

@@ -15,18 +15,18 @@ DNS 转发器
 from __future__ import annotations
 
 import asyncio
-import struct
 from typing import Optional
 
 from .outbound import Outbound, PyrealiyOutbound
-from .utils import get_logger, pack_address
+from .utils import get_logger
+from .dns import make_upstream
+from .dns.upstream import Upstream
 
 logger = get_logger("dns")
 
 _CN_DNS_DEFAULT     = "223.5.5.5"
 _REMOTE_DNS_DEFAULT = "8.8.8.8"
 _UDP_TIMEOUT        = 5.0
-_TUNNEL_TIMEOUT     = 8.0
 
 
 # ── DNS 报文工具 ───────────────────────────────────────────────────────────────
@@ -118,153 +118,8 @@ async def _udp_query(data: bytes, host: str, port: int = 53) -> bytes:
         transport.close()
 
 
-class _DnsTunnel:
-    """
-    长寿命 DNS-over-TCP 隧道 + 并发 query pipeline。
-
-    设计要点：
-      - **单条** outbound 池连接持有；该 outbound 的所有 DNS 查询经它发出
-      - 查询用我们自己的内部 tx_id（递增计数器）替换客户端原始 ID，保证唯一性，
-        响应回来时再还原成客户端期望的 ID
-      - 后台 reader 任务从隧道连续读 DNS-over-TCP 帧，按 tx_id 派发到 pending future
-      - 并发上限 = MAX_INFLIGHT，超出时排队等待 slot（防止单 client 滥用拖垮 server）
-      - 隧道掉线：reader 异常退出 → 所有 pending future 收到 OSError → 下次 query
-        重试时惰性重建隧道；in-flight 查询都失败（端到端 resolver 会按其 timeout 重发）
-
-    多 outbound 场景：每个 PyrealiyOutbound 单独持有一个 _DnsTunnel 实例。
-    """
-
-    MAX_INFLIGHT = 64
-
-    def __init__(self, outbound: PyrealiyOutbound, remote_dns: str):
-        self._outbound    = outbound
-        self._remote_dns  = remote_dns
-        self._ready       = None
-        self._reader_task = None
-        self._setup_lock  = asyncio.Lock()        # 只串行化"建立隧道"，不串行化 query
-        self._inflight    = asyncio.Semaphore(self.MAX_INFLIGHT)
-        # 内部 tx_id → (Future, 客户端原始 tx_id bytes)
-        self._pending     = {}
-        self._next_tx     = 1                     # 0 留给"未初始化"
-
-    async def query(self, data: bytes) -> bytes:
-        if len(data) < 2:
-            raise ValueError("DNS query too short")
-
-        async with self._inflight:
-            for attempt in (0, 1):
-                try:
-                    await self._ensure_ready()
-                    return await self._send_recv(data)
-                except Exception:
-                    self._drop_tunnel()
-                    if attempt == 1:
-                        raise
-
-    async def _ensure_ready(self) -> None:
-        if self._ready is not None and self._reader_task and not self._reader_task.done():
-            return
-        async with self._setup_lock:
-            # 双重检查（其它 coroutine 可能在我们等锁期间已经建好）
-            if self._ready is not None and self._reader_task and not self._reader_task.done():
-                return
-            ready = await self._outbound.acquire_tunnel()
-            if ready is None:
-                raise OSError(f"no tunnel available for DNS via '{self._outbound.tag}'")
-            # tunnel.send 失败时必须主动 close 这条 tunnel —— 否则 ready 被丢弃但
-            # 底层 server_writer 留着，池里少一条 tunnel 长期不补，外加资源泄漏
-            try:
-                await ready.tunnel.send(pack_address(self._remote_dns, 53))
-            except Exception:
-                try:
-                    ready.close()
-                except Exception:
-                    pass
-                raise
-            self._ready       = ready
-            self._reader_task = asyncio.create_task(self._reader_loop())
-
-    def _allocate_tx(self) -> int:
-        """
-        分配一个不与 _pending 冲突的 tx_id（轮转 16-bit 空间，跳过 0）。
-
-        MAX_INFLIGHT 信号量保证 _pending 远不会塞满 65535 id 空间，
-        所以这个循环正常情况下第一次就返回。bounded loop 防御性：
-        若将来 MAX_INFLIGHT 提升、或某次 finally 异常未清理，至少不会无声覆盖
-        旧的 future 导致响应错配 —— 实在塞满就 raise 而不是死循环。
-        """
-        for _ in range(0x10000):
-            tx_id = self._next_tx
-            self._next_tx = (self._next_tx + 1) & 0xFFFF
-            if self._next_tx == 0:
-                self._next_tx = 1                   # 跳过 0
-            if tx_id not in self._pending:
-                return tx_id
-        raise OSError("DNS pipeline tx_id space exhausted (pending overflow)")
-
-    async def _send_recv(self, data: bytes) -> bytes:
-        # 用内部 tx_id 替换客户端 ID，保证唯一（客户端 ID 可能重复或可预测）
-        original_id = data[:2]
-        tx_id       = self._allocate_tx()
-
-        rewritten = tx_id.to_bytes(2, "big") + data[2:]
-        loop = asyncio.get_event_loop()
-        fut  = loop.create_future()
-        self._pending[tx_id] = (fut, original_id)
-        try:
-            await self._ready.tunnel.send(struct.pack("!H", len(rewritten)) + rewritten)
-            resp = await asyncio.wait_for(fut, timeout=_TUNNEL_TIMEOUT)
-            # 还原客户端原始 tx_id
-            return original_id + resp[2:]
-        finally:
-            self._pending.pop(tx_id, None)
-
-    async def _reader_loop(self) -> None:
-        """
-        持续从隧道读 DNS-over-TCP 帧（2 字节长度 + DNS 报文），
-        按内部 tx_id 派发给对应 future。
-        隧道结束 / 任何异常 → 唤醒所有 pending future 并退出。
-        """
-        buf = bytearray()
-        try:
-            while True:
-                chunk = await self._ready.tunnel.recv()
-                if not chunk:
-                    raise OSError("DNS tunnel EOF")
-                buf.extend(chunk)
-                # 可能一次 recv 拿到多帧，全部处理掉
-                while len(buf) >= 2:
-                    frame_len = struct.unpack("!H", bytes(buf[:2]))[0]
-                    if len(buf) < 2 + frame_len:
-                        break
-                    if frame_len < 2:
-                        del buf[:2 + frame_len]
-                        continue
-                    resp     = bytes(buf[2: 2 + frame_len])
-                    del buf[:2 + frame_len]
-                    resp_tx  = int.from_bytes(resp[:2], "big")
-                    entry    = self._pending.get(resp_tx)
-                    if entry is not None and not entry[0].done():
-                        entry[0].set_result(resp)
-        except Exception as e:
-            err = e if isinstance(e, Exception) else OSError(str(e))
-            for fut, _ in self._pending.values():
-                if not fut.done():
-                    fut.set_exception(err)
-
-    def _drop_tunnel(self) -> None:
-        if self._reader_task and not self._reader_task.done():
-            self._reader_task.cancel()
-        self._reader_task = None
-        if self._ready is not None:
-            try:
-                self._ready.close()
-            except Exception:
-                pass
-            self._ready = None
-
-    def close(self) -> None:
-        self._drop_tunnel()
+# _DnsTunnel 已迁移到 core/dns/upstream.py（UdpUpstream / DotUpstream / DohUpstream）。
+# 通过 make_upstream(outbound, address) 工厂选 scheme。
 
 
 # ── asyncio 协议层 ─────────────────────────────────────────────────────────────
@@ -289,7 +144,8 @@ class _DNSProtocol(asyncio.DatagramProtocol):
 # ── 公共接口 ───────────────────────────────────────────────────────────────────
 
 class DNSForwarder:
-    def __init__(self, cfg: dict, router, outbounds: dict[str, Outbound]):
+    def __init__(self, cfg: dict, router, outbounds: dict[str, Outbound],
+                 routing_cache=None, dns_cache=None):
         self._host       = cfg.get("dns_listen_host", "127.0.0.1")
         self._port       = int(cfg.get("dns_listen_port", 5353))
         self._cn_dns     = cfg.get("cn_dns", _CN_DNS_DEFAULT)
@@ -297,8 +153,12 @@ class DNSForwarder:
         self._router     = router
         self._outbounds  = outbounds
         self._transport  = None
-        # 每个 pyrealiy 叶子独占一条 DoT pipeline，懒建
-        self._tunnels: dict[str, _DnsTunnel] = {}
+        # 每个 pyrealiy 叶子独占一条上游 pipeline，懒建。
+        # 实际类型由 remote_dns 的 scheme 决定（UDP / DoT / DoH，见 make_upstream）。
+        self._tunnels: dict[str, Upstream] = {}
+        # 决策缓存（路由 + DNS 响应），None 时不做缓存
+        self._routing_cache = routing_cache
+        self._dns_cache = dns_cache
 
     async def start(self) -> None:
         loop = asyncio.get_event_loop()
@@ -318,10 +178,26 @@ class DNSForwarder:
             t.close()
         self._tunnels.clear()
 
-    def _tunnel_for(self, leaf: PyrealiyOutbound) -> _DnsTunnel:
+    def reload(self, new_cfg: dict) -> None:
+        """
+        热加载：换 cn_dns / remote_dns；drop 所有现有 upstream 让下一次查询时按新地址重建。
+        本地监听 host/port 改了不重 bind（schema 文档已说明）。
+        """
+        new_cn = new_cfg.get("cn_dns", _CN_DNS_DEFAULT)
+        new_remote = new_cfg.get("remote_dns", _REMOTE_DNS_DEFAULT)
+        if new_cn != self._cn_dns or new_remote != self._remote_dns:
+            logger.info("dns reload: cn_dns %s -> %s, remote %s -> %s",
+                        self._cn_dns, new_cn, self._remote_dns, new_remote)
+            self._cn_dns = new_cn
+            self._remote_dns = new_remote
+            for t in self._tunnels.values():
+                t.close()
+            self._tunnels.clear()
+
+    def _tunnel_for(self, leaf: PyrealiyOutbound) -> Upstream:
         t = self._tunnels.get(leaf.tag)
         if t is None:
-            t = _DnsTunnel(leaf, self._remote_dns)
+            t = make_upstream(leaf, self._remote_dns)
             self._tunnels[leaf.tag] = t
         return t
 
@@ -330,7 +206,30 @@ class DNSForwarder:
         if domain is None:
             return None
 
-        action, source = self._router.match(domain)
+        # ── DNS 响应缓存：命中直接回，跳过路由 + 上游 ─────────────────────
+        qtype = None
+        if self._dns_cache is not None:
+            from .decision_cache import extract_qtype
+            qtype = extract_qtype(data)
+            if qtype is not None:
+                cached = self._dns_cache.get(domain, qtype)
+                if cached is not None:
+                    # 把缓存响应里的 tx_id 换成本次查询的
+                    return data[:2] + cached[2:]
+
+        # ── 路由决策（先看缓存，miss 再算）───────────────────────────────
+        action = None
+        source = ""
+        if self._routing_cache is not None:
+            cached_tag = self._routing_cache.get(domain)
+            if cached_tag is not None:
+                action = cached_tag
+                source = "cached"
+        if action is None:
+            action, source = self._router.match(domain)
+            if self._routing_cache is not None:
+                self._routing_cache.put(domain, action)
+
         outbound = self._outbounds.get(action)
         if outbound is None:
             logger.warning("DNS router returned unknown outbound '%s' for %s [%s]",
@@ -345,16 +244,21 @@ class DNSForwarder:
                 return _nxdomain(data)
             if leaf.type == "direct":
                 logger.debug("DNS direct  %s -> %s  [%s]", domain, self._cn_dns, source)
-                return await _udp_query(data, self._cn_dns)
-            if isinstance(leaf, PyrealiyOutbound):
+                resp = await _udp_query(data, self._cn_dns)
+            elif isinstance(leaf, PyrealiyOutbound):
                 logger.debug("DNS via %-12s %s -> %s  [%s]",
                              leaf.tag, domain, self._remote_dns, source)
-                return await self._tunnel_for(leaf).query(data)
-            # leaf 是组本身（所有 child 均 unhealthy 时 resolve_leaf 返回 self）
-            # 或者未来扩展的未知 leaf 类型 —— 都视作"无可路由出口"，NXDOMAIN
-            logger.warning("DNS '%s' [%s]: outbound '%s' has no healthy leaf, NXDOMAIN",
-                           domain, source, outbound.tag)
-            return _nxdomain(data)
+                resp = await self._tunnel_for(leaf).query(data)
+            else:
+                # leaf 是组本身（所有 child 均 unhealthy）/未来未知类型 → NXDOMAIN
+                logger.warning("DNS '%s' [%s]: outbound '%s' has no healthy leaf, NXDOMAIN",
+                               domain, source, outbound.tag)
+                return _nxdomain(data)
         except Exception as e:
             logger.warning("DNS query failed for %s via %s: %s", domain, leaf.tag, e)
             return _nxdomain(data)
+
+        # 写缓存（成功的 answer 才缓存）
+        if self._dns_cache is not None and qtype is not None and resp is not None:
+            self._dns_cache.put(domain, qtype, resp)
+        return resp

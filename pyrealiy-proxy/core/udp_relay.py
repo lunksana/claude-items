@@ -260,13 +260,17 @@ class UDPRelay:
                  tunnel,                 # core.tunnel.EncryptedTunnel 或 None
                  server_writer,          # tunnel 的底层 writer（用于清理）
                  bind_host: str,
-                 idle_timeout: float = _UDP_IDLE_TIMEOUT) -> None:
+                 idle_timeout: float = _UDP_IDLE_TIMEOUT,
+                 on_up=None,
+                 on_down=None) -> None:
         self._ctrl_r       = control_reader
         self._ctrl_w       = control_writer
         self._tunnel       = tunnel
         self._server_w     = server_writer
         self._bind_host    = bind_host
         self._idle_timeout = idle_timeout
+        self._on_up        = on_up
+        self._on_down      = on_down
 
         # 本地 SOCKS5 入口的 transport（接 SOCKS5 client 的 UDP）
         self._local_transport: Optional[asyncio.DatagramTransport] = None
@@ -372,6 +376,8 @@ class UDPRelay:
         if self._tunnel is not None:
             try:
                 await self._tunnel.send(pack_udp_frame(target_host, target_port, payload))
+                if self._on_up:
+                    self._on_up(len(payload))
             except Exception as e:
                 logger.debug("tunnel send failed: %s", e)
                 self._stop.set()
@@ -390,6 +396,8 @@ class UDPRelay:
                     payload,
                     _normalize_addr_for_dualstack(target_host, target_port),
                 )
+                if self._on_up:
+                    self._on_up(len(payload))
             except Exception as e:
                 logger.debug("direct sendto %s:%d failed: %s",
                              target_host, target_port, e)
@@ -426,6 +434,8 @@ class UDPRelay:
                 build_socks5_udp_header(src_host, src_port) + payload,
                 self._socks_client_addr,
             )
+            if self._on_down:
+                self._on_down(len(payload))
         except Exception as e:
             logger.debug("local sendto SOCKS5 client failed: %s", e)
 
