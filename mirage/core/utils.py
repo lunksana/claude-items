@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime as _dt
 import json as _json
 import logging
+import logging.handlers  # noqa: F401 (used at module level by _CompressedRotatingFileHandler)
 
 import socket
 
@@ -67,24 +68,134 @@ class JsonFormatter(logging.Formatter):
 
 def apply_log_format(cfg: dict) -> None:
     """
-    根据 cfg["log"]["format"] 切换日志格式：
-      "text" / 缺省  → basicConfig 的原格式（向后兼容）
-      "json"         → JsonFormatter（每行一个 JSON）
+    根据 cfg["log"] 设置 root logger 的 formatter + 可选文件 handler。
 
-    替换所有 root logger 已挂的 handler 的 formatter。需要在任何业务日志前调。
+    支持字段：
+      format        "text"（默认）或 "json"
+      file          绝对路径；设了 → 进程内写文件 + 轮转；未设 → 走 stderr
+      max_bytes     单文件最大字节数（达到即轮转）；默认 100 MB
+      backup_count  历史文件数；默认 7
+      compress      bool，轮转后 gzip 历史；默认 true
     """
     log_cfg = (cfg.get("log") or {})
+
+    # 1) 格式
     fmt = str(log_cfg.get("format", "text")).lower()
     if fmt not in ("text", "json"):
         logging.getLogger("utils").warning(
             "log.format must be 'text' or 'json', got %r; using text", fmt
         )
-        return
-    if fmt == "text":
-        return  # basicConfig 已是 text
-    json_fmt = JsonFormatter()
+        fmt = "text"
+    formatter: logging.Formatter
+    if fmt == "json":
+        formatter = JsonFormatter()
+    else:
+        formatter = logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        )
+
+    # 2) 文件 handler（可选）
+    file_path = log_cfg.get("file")
+    if file_path:
+        try:
+            handler = _build_rotating_file_handler(log_cfg)
+            handler.setFormatter(formatter)
+            # 移除 basicConfig 装的 StreamHandler，避免 stderr + 文件双写
+            root = logging.getLogger()
+            for h in list(root.handlers):
+                if isinstance(h, logging.StreamHandler) and not isinstance(
+                    h, logging.FileHandler
+                ):
+                    root.removeHandler(h)
+            root.addHandler(handler)
+        except Exception as e:
+            logging.getLogger("utils").error(
+                "failed to attach file handler at %s: %s; falling back to stderr",
+                file_path, e,
+            )
+
+    # 3) 把 formatter 套到所有现存 handler 上（stderr 也好，文件也好）
     for h in logging.getLogger().handlers:
-        h.setFormatter(json_fmt)
+        h.setFormatter(formatter)
+
+
+def _build_rotating_file_handler(log_cfg: dict) -> logging.Handler:
+    """
+    构造按 size 轮转 + 可选 gzip 历史的 file handler。
+
+    `compress=True` 时轮转后立即 gzip 历史文件，节省磁盘。
+    """
+    import os
+    from logging.handlers import RotatingFileHandler
+
+    path = str(log_cfg["file"])
+    max_bytes = int(log_cfg.get("max_bytes", 100 * 1024 * 1024))
+    backups = int(log_cfg.get("backup_count", 7))
+    compress = bool(log_cfg.get("compress", True))
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+    if not compress:
+        return RotatingFileHandler(path, maxBytes=max_bytes, backupCount=backups,
+                                   delay=True, encoding="utf-8")
+    return _CompressedRotatingFileHandler(
+        path, maxBytes=max_bytes, backupCount=backups,
+        delay=True, encoding="utf-8",
+    )
+
+
+class _CompressedRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """
+    标准 RotatingFileHandler 不认 .gz 扩展，会在多次 rollover 时把 .gz 文件搞丢。
+    这里完全接管 doRollover：
+
+      step 1: 关 stream
+      step 2: 把 .N.gz 链向后移：.(backupCount-1).gz → .backupCount.gz 然后向上...
+              超过 backupCount 的删掉
+      step 3: 当前文件 → .1，立即 gzip 成 .1.gz（删原 .1）
+      step 4: 重新打开（delay=True 则交给下一次 emit）
+    """
+
+    def doRollover(self) -> None:  # noqa: N802 (stdlib API name)
+        import gzip
+        import os
+        import shutil
+
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+
+        # .N.gz → .(N+1).gz，倒序避免覆盖
+        for i in range(self.backupCount - 1, 0, -1):
+            src = f"{self.baseFilename}.{i}.gz"
+            dst = f"{self.baseFilename}.{i + 1}.gz"
+            if os.path.exists(src):
+                if os.path.exists(dst):
+                    os.remove(dst)
+                os.rename(src, dst)
+        # 删超出 backupCount 的最老一份（如果有）
+        too_old = f"{self.baseFilename}.{self.backupCount + 1}.gz"
+        if os.path.exists(too_old):
+            os.remove(too_old)
+
+        # 当前 → .1，gzip 成 .1.gz
+        if os.path.exists(self.baseFilename):
+            rotated = f"{self.baseFilename}.1"
+            if os.path.exists(rotated):
+                os.remove(rotated)
+            os.rename(self.baseFilename, rotated)
+            try:
+                gz_path = rotated + ".gz"
+                with open(rotated, "rb") as src, gzip.open(gz_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                os.remove(rotated)
+            except Exception:
+                # 压缩失败不致命：保留未压缩的 .1
+                pass
+
+        # delay=True 时下次 emit 自动打开；False 时立即打开
+        if not self.delay:
+            self.stream = self._open()
 
 
 def get_logger(name: str) -> logging.Logger:

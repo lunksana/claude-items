@@ -17,6 +17,208 @@
 
 ---
 
+## [0.4.38] - 2026-06-13
+
+### 改动 / 日志轮转换成进程内管理（替代 logrotate）
+
+0.4.37 用 logrotate + `/etc/logrotate.d/mirage-*` 做轮转。本版本改为 Mirage 进程
+自己用 Python `RotatingFileHandler` + gzip 做。
+
+**为什么换**：
+
+| 维度 | logrotate | 进程内 |
+|---|---|---|
+| 配置位置 | `/etc/logrotate.d/mirage-*` 单独文件 | `cfg.log.*` 单一来源 |
+| 跨 init | 依赖 logrotate cron | 与 init 无关 |
+| copytruncate hack | 必须（systemd append fd） | 不需要——进程自己管 fd |
+| 触发时机 | 每日 cron 检查 | 每次写日志精确检查 size |
+| 卸载 | 要清 /etc/logrotate.d/ | 删 cfg 即停 |
+
+### 新 cfg.log schema
+
+```json
+"log": {
+  "format":       "text",                          // text | json
+  "file":         "/var/log/mirage/server.log",    // 缺省走 stderr
+  "max_bytes":    104857600,                       // 100 MB
+  "backup_count": 7,                               // 历史份数
+  "compress":     true                             // gzip 历史
+}
+```
+
+- `file` 缺省 → 走 stderr / systemd journal
+- `file` 设了 → Mirage 自己写文件 + 按 size 轮转 + gzip 历史
+
+### 实现
+
+**`core/utils.py`**：
+
+- `apply_log_format(cfg)` 扩展：识别 `cfg.log.file`，挂 `RotatingFileHandler`，
+  移除 basicConfig 的 stderr handler 避免双写
+- 新类 `_CompressedRotatingFileHandler`：完全接管 `doRollover` —— 标准
+  `RotatingFileHandler` 不认 `.gz` 扩展，多次轮转会丢历史；这里：
+  1. 关 stream
+  2. `.N.gz → .(N+1).gz` 倒序链式重命名，超 backup_count 的删
+  3. 当前文件 → `.1`，立即 gzip 成 `.1.gz`
+  4. 重新打开
+
+### init unit 模板自适应
+
+| init | `cfg.log.file` 设了 | 未设 |
+|---|---|---|
+| systemd | `StandardOutput=journal` `StandardError=journal`（兜底捕获 early/crash） | `append:LOG`（旧行为） |
+| OpenRC | `output_log="/dev/null"` | `output_log=LOG` |
+| SysV | `nohup ... > /dev/null 2>&1 &` | `>> $LOGFILE 2>&1` |
+
+### install.sh 交互
+
+`ask_log_config` 改：
+
+```
+日志格式：[1] text / [2] json
+启用进程内文件日志 + 自动轮转？（推荐）(Y/n)
+  单文件最大体积（K/M/G 后缀）：[100M]
+  保留几份历史：[7]
+  压缩历史日志（gzip）？(Y/n)
+```
+
+`_to_bytes` helper 把 "100M" 转成 104857600 等整数（cfg 用字节）。
+
+### 不再生成的
+
+- ✗ `/etc/logrotate.d/mirage-*` 不再写（旧版残余 install.sh 卸载时仍清）
+
+### 实测
+
+```
+maxBytes=200, backup_count=3, 30 条 80B 消息：
+  test.log       142  (current)
+  test.log.1.gz   99  (msg 26-27, 最新)
+  test.log.2.gz   99  (msg 24-25)
+  test.log.3.gz   99  (msg 22-23, 最旧)
+```
+
+gzip 解压可还原内容；超过 backup_count 的最老一份会被丢掉。
+
+```
+server cfg log → {"format":"json","file":"/var/log/.../server.log",
+                  "max_bytes":104857600,"backup_count":7,"compress":true}
+client cfg log → 同上 (client.log)
+```
+
+JSON 全合法。
+
+### 向后兼容
+
+旧 cfg（仅 `"log": {"format": "text"}`）行为不变——走 stderr，无文件轮转。
+
+---
+
+## [0.4.37] - 2026-06-12
+
+### 新增 / install.sh 日志配置交互 + 客户端默认 mixed
+
+**日志配置在向导里集成**——之前服务端 / 客户端的 `cfg.log.format` 硬编码 `"text"`，
+logrotate 完全没配，日志文件无限增长。本版本加 `ask_log_config()` 步骤：
+
+| 询问项 | 默认 | 说明 |
+|---|---|---|
+| 日志格式 | `text` | `text`（人类可读）或 `json`（Loki/ELK/jq） |
+| 启用 logrotate | `Yes`（system 模式） | inplace 模式不配（用户自管） |
+| 单文件最大体积 | `100M` | 支持 K/M/G 后缀 |
+| 保留历史份数 | `7`（一周） | 达到上限丢最老的 |
+| 压缩历史日志 | `Yes` | gzip + delaycompress |
+
+生成的 logrotate 配置 `/etc/logrotate.d/mirage-{server,client}`：
+
+```
+/var/log/mirage/server.log {
+    daily
+    rotate 7
+    maxsize 100M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+```
+
+**关键点 `copytruncate`**：systemd 的 `StandardOutput=append:LOG` 持续打开文件，
+logrotate 默认 rename + 通知进程 reopen 那套不适用；`copytruncate` 拷贝后原地清空
+，与 always-open fd 兼容。
+
+### 客户端模板默认 inbound 改 `mixed`
+
+服务端尾声打印的快速客户端配置模板之前是 `socks5`：
+
+```diff
+- "inbounds": [{"type": "socks5", "listen": "127.0.0.1:1080"}]
++ "inbounds": [{"type": "mixed",  "listen": "127.0.0.1:7890"}]
+```
+
+`mixed` 一口同时支持 SOCKS5 + HTTP/CONNECT + HTTP forward，Chrome 系统代理无脑
+设这一个端口就能用。
+
+### uninstall 同步
+
+`/etc/logrotate.d/mirage-*` 在卸载流程里一并清理（含 legacy `pyrealiy-*` 残余）。
+
+### 验证
+
+| 检查 | 结果 |
+|---|---|
+| `bash -n install.sh` | ✓ |
+| logrotate 模板渲染 | ✓ daily / rotate N / maxsize / compress 全正确 |
+| cfg.log.format 用 `$LOG_FORMAT` 替换 | ✓ server + client 两处 |
+| 服务端打印的客户端模板用 mixed | ✓ |
+
+### 联动
+
+- `ask_log_config` 在两端流程里插在 `install_system_files` 之前（先问完所有交互
+  再开始动文件系统）
+- inplace 模式跳过 logrotate（日志在 `$WORK_DIR`，开发用，无需轮转）
+
+---
+
+## [0.4.36] - 2026-06-12
+
+### 修复 / install.sh 两个 bug
+
+**B1：服务端尾声打印的客户端配置模板里 `camouflage_host` 字段被探测消息污染**
+
+现象：
+```
+"camouflage_host": "[*] 探测 speedtest.net:443 TLS 1.3 支持...
+[✓] speedtest.net 支持 TLS 1.3，握手成功
+speedtest.net"
+```
+
+根因：`ask_camouflage_host` 内部调 `probe_camouflage`，后者用 `info` / `ok`
+打的状态消息走 stdout，被外层 `camouflage=$(ask_camouflage_host ...)` 一并捕获。
+
+修：`info` / `ok` / `warn` / `title` 全部改写 stderr。所有信息消息仍可见但不
+污染 `$(funcname)` 捕获的数据。
+
+**B2：Brutal 选"装"分支没真装**
+
+现象：用户回答"需要为本机安装 Brutal" → 只打了文档链接 + 让用户手动装。
+
+修：实际跑官方一键脚本 `curl -fsSL https://tcp.hy2.sh/ | bash`，跑完后
+`brutal_loaded` 校验内核模块是否真就绪。失败 / 内核不匹配时给具体排查命令
+（`modinfo brutal`、`dmesg | tail`、`sysctl net.ipv4.tcp_available_congestion_control`）。
+没装 curl 自动按 PKG_MGR 装。
+
+### 验证
+
+| 场景 | 结果 |
+|---|---|
+| `result=$(ask_camouflage_host "speedtest.net")` | result = `speedtest.net`（纯净，无探测文本） |
+| `bash -n install.sh` | ✓ |
+| Brutal install 路径检查 | curl 命令存在 + 跑完后调 `brutal_loaded` 重新校验 |
+
+---
+
 ## [0.4.35] - 2026-06-12
 
 ### 改动 / 项目改名 PyRealiy → Mirage
@@ -2126,7 +2328,10 @@ sniffer / router 等）。除上面 3 处，**未发现其它真问题**：
 
 更早的历史在 git log 里；从 `0.3.0` 起按本规范打 tag。
 
-[未发布]: https://github.com/<你的仓库>/compare/v0.4.35...HEAD
+[未发布]: https://github.com/<你的仓库>/compare/v0.4.38...HEAD
+[0.4.38]: https://github.com/<你的仓库>/releases/tag/v0.4.38
+[0.4.37]: https://github.com/<你的仓库>/releases/tag/v0.4.37
+[0.4.36]: https://github.com/<你的仓库>/releases/tag/v0.4.36
 [0.4.35]: https://github.com/<你的仓库>/releases/tag/v0.4.35
 [0.4.34]: https://github.com/<你的仓库>/releases/tag/v0.4.34
 [0.4.33]: https://github.com/<你的仓库>/releases/tag/v0.4.33

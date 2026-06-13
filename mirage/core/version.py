@@ -7,4 +7,4 @@
   - 仅在 client.py / server.py 启动 banner 与 admin panel header 使用
 """
 
-__version__ = "0.4.35"
+__version__ = "0.4.38"

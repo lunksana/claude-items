@@ -20,13 +20,14 @@ set -euo pipefail
 # ──────────────────────────────────────────────────────────────────────────────
 
 _c() { printf "\033[%sm%s\033[0m" "$1" "$2"; }
-info()  { echo "$(_c 36 "[*]") $*"; }
-ok()    { echo "$(_c 32 "[✓]") $*"; }
-warn()  { echo "$(_c 33 "[!]") $*"; }
+# 所有交互式提示 / 进度消息走 stderr，避免被 $(funcname) 捕获污染数据
+info()  { echo "$(_c 36 "[*]") $*" >&2; }
+ok()    { echo "$(_c 32 "[✓]") $*" >&2; }
+warn()  { echo "$(_c 33 "[!]") $*" >&2; }
 err()   { echo "$(_c 31 "[✗]") $*" >&2; exit 1; }
 title() {
     local line; line=$(printf '═%.0s' {1..56})
-    printf "\n\033[1;35m%s\n  %s\n%s\033[0m\n\n" "$line" "$*" "$line"
+    printf "\n\033[1;35m%s\n  %s\n%s\033[0m\n\n" "$line" "$*" "$line" >&2
 }
 
 ask() {                              # ask "提示" ["默认"]  → 输出
@@ -113,6 +114,13 @@ EFFECTIVE_LIB=""           # server.py / client.py 所在目录
 EFFECTIVE_ETC=""           # cfg 文件所在目录
 EFFECTIVE_LOG_DIR=""       # 日志目录
 EFFECTIVE_GEOSITE_DIR=""   # geo 缓存目录（写进 client cfg）
+
+# 由 ask_log_config 设置（cfg.log.format + logrotate 选项）
+LOG_FORMAT="text"
+LOGROTATE_ENABLED="no"
+LOGROTATE_MAXSIZE="100M"
+LOGROTATE_KEEP="7"
+LOGROTATE_COMPRESS="yes"
 
 PKG_MGR=""
 detect_pkg_mgr() {
@@ -209,13 +217,110 @@ handle_brutal_optional() {
         ok "已检测到 Brutal 内核模块"
         return 0
     fi
-    if ask_yn "未检测到 Brutal。需要为本机安装吗？（自建 VPS 推荐）" n; then
-        warn "Brutal 安装较复杂（需匹配内核版本），跳过细节"
-        warn "参考：https://github.com/apernet/tcp-brutal"
-        ask_yn "现在打开浏览器查文档（手动按文档装）后重试，还是继续不装？" n || true
-        return 1
+    ask_yn "未检测到 Brutal。需要为本机安装吗？（自建 VPS 推荐）" n || return 1
+
+    # 跑官方一键脚本（https://github.com/apernet/tcp-brutal）
+    info "下载并运行官方安装脚本：curl -fsSL https://tcp.hy2.sh/ | bash"
+    if ! command -v curl &>/dev/null; then
+        case $PKG_MGR in
+            apt) apt-get install -y curl ;;
+            dnf|yum) "$PKG_MGR" install -y curl ;;
+            apk) apk add --no-cache curl ;;
+            *) warn "需要 curl，请手装后重试"; return 1 ;;
+        esac
+    fi
+    # 真装。失败不致命（用户可能在不支持的内核上）
+    if curl -fsSL https://tcp.hy2.sh/ | bash >&2; then
+        info "安装脚本跑完，校验内核模块..."
+        # tcp.hy2.sh 跑 modprobe 后 brutal 应在 tcp_available_congestion_control 里
+        if brutal_loaded; then
+            ok "Brutal 内核模块装好并已加载"
+            return 0
+        fi
+        warn "安装脚本退出 0，但 modprobe 后 brutal 不在 tcp_available_congestion_control 里"
+        warn "可能：内核版本不匹配 / 重启后才生效 / 模块路径异常"
+        warn "排查：modinfo brutal、dmesg | tail、sysctl net.ipv4.tcp_available_congestion_control"
+        ask_yn "继续不启用 Brutal（推荐）？" y && return 1
+    else
+        warn "官方安装脚本失败（network / 内核不支持 / 编译错误）"
+        warn "参考：https://github.com/apernet/tcp-brutal#installation"
     fi
     return 1
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 日志配置（cfg.log.format + 可选 logrotate）
+# ──────────────────────────────────────────────────────────────────────────────
+
+ask_log_config() {
+    info "日志配置"
+    # 格式
+    local fmt_choice
+    fmt_choice=$(ask_choice "日志格式" \
+        "text — 人类可读（默认）" \
+        "json — 每行一个 JSON，方便 Loki / ELK / jq 解析")
+    case $fmt_choice in
+        1) LOG_FORMAT="text" ;;
+        2) LOG_FORMAT="json" ;;
+    esac
+    info "已选：${LOG_FORMAT}"
+
+    # 进程内文件日志 + 轮转：仅 system 模式默认开（inplace 让日志走 stderr/项目目录）
+    if [[ "$INSTALL_MODE" != "system" ]]; then
+        LOGROTATE_ENABLED="no"
+        info "inplace 模式：日志走 stderr / systemd append（开发用，无需轮转）"
+        return
+    fi
+
+    if ask_yn "启用进程内文件日志 + 自动轮转？（推荐）" y; then
+        LOGROTATE_ENABLED="yes"
+        LOGROTATE_MAXSIZE_HUMAN=$(ask "单文件最大体积（K / M / G 后缀）" "100M")
+        LOGROTATE_MAXSIZE=$(_to_bytes "$LOGROTATE_MAXSIZE_HUMAN")
+        LOGROTATE_KEEP=$(ask "保留几份历史（达到后丢最老的）" "7")
+        if ask_yn "压缩历史日志（gzip）？" y; then
+            LOGROTATE_COMPRESS="true"
+        else
+            LOGROTATE_COMPRESS="false"
+        fi
+        info "进程内轮转：超 ${LOGROTATE_MAXSIZE_HUMAN}（${LOGROTATE_MAXSIZE} B）即转，保留 ${LOGROTATE_KEEP} 份，压缩=${LOGROTATE_COMPRESS}"
+    else
+        LOGROTATE_ENABLED="no"
+        warn "未启用文件日志：日志走 stderr，systemd journal 捕获"
+    fi
+}
+
+# 生成 cfg.log JSON 片段：format + 可选 file/max_bytes/backup_count/compress
+_build_log_block() {
+    local kind=$1   # server 或 client
+    if [[ "$LOGROTATE_ENABLED" == "yes" ]]; then
+        local log_path="${EFFECTIVE_LOG_DIR}/${kind}.log"
+        cat <<JSON
+"log": {
+        "format":       "${LOG_FORMAT}",
+        "file":         "${log_path}",
+        "max_bytes":    ${LOGROTATE_MAXSIZE},
+        "backup_count": ${LOGROTATE_KEEP},
+        "compress":     ${LOGROTATE_COMPRESS}
+    }
+JSON
+    else
+        echo "\"log\": {\"format\": \"${LOG_FORMAT}\"}"
+    fi
+}
+
+# "100M" → 104857600 等。支持 K/M/G 后缀（不区分大小写），无后缀 = 直接字节
+_to_bytes() {
+    local s=$1
+    local n unit
+    n=$(echo "$s" | grep -oE "^[0-9]+")
+    unit=$(echo "${s:${#n}}" | tr '[:lower:]' '[:upper:]')
+    case "$unit" in
+        ""|B)   echo "$n" ;;
+        K|KB)   echo $(( n * 1024 )) ;;
+        M|MB)   echo $(( n * 1024 * 1024 )) ;;
+        G|GB)   echo $(( n * 1024 * 1024 * 1024 )) ;;
+        *)      echo "$n" ;;  # 不识别就当字节
+    esac
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -317,6 +422,8 @@ write_server_config() {
     # 服务端的 schema_v1 化是未来工作，schema_v0 → v1 自动识别仍由 _LEGACY_TOP_KEYS 覆盖。
     mkdir -p "$EFFECTIVE_ETC"
     local path="$EFFECTIVE_ETC/config_server.json"
+    local log_block
+    log_block=$(_build_log_block "server")
     cat > "$path" <<EOF
 {
     "listen_host": "${listen_host}",
@@ -324,7 +431,7 @@ write_server_config() {
     "password": "${password}",
     "camouflage_host": "${camouflage}",
     "brutal_rate_bps": ${brutal_rate_bps},
-    "log": {"format": "text"}
+    ${log_block}
 }
 EOF
     chmod 600 "$path"
@@ -412,7 +519,7 @@ write_client_config() {
         {"tag": "block",  "type": "block"}
     ],
     "route": ${routing_json},
-    "log": {"format": "text"}${dns_extra}${api_extra}${geosite_extra}
+    $(_build_log_block "client")${dns_extra}${api_extra}${geosite_extra}
 }
 EOF
     chmod 600 "$path"
@@ -474,8 +581,14 @@ ExecStart=/usr/bin/python3 ${EFFECTIVE_LIB}/${kind}.py ${cfg_path}
 ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=3
-StandardOutput=append:${log_path}
-StandardError=append:${log_path}
+$( if [[ "$LOGROTATE_ENABLED" == "yes" ]]; then
+    # 进程内写文件，systemd 只兜底捕获 early/crash 到 journal
+    echo "StandardOutput=journal"
+    echo "StandardError=journal"
+else
+    echo "StandardOutput=append:${log_path}"
+    echo "StandardError=append:${log_path}"
+fi )
 LimitNOFILE=65536
 
 [Install]
@@ -517,8 +630,13 @@ command="/usr/bin/python3"
 command_args="${EFFECTIVE_LIB}/${kind}.py ${cfg_path}"
 command_background=true
 pidfile="/run/mirage-${kind}.pid"
-output_log="${log_path}"
-error_log="${log_path}"
+$( if [[ "$LOGROTATE_ENABLED" == "yes" ]]; then
+    echo "output_log=\"/dev/null\""
+    echo "error_log=\"/dev/null\""
+else
+    echo "output_log=\"${log_path}\""
+    echo "error_log=\"${log_path}\""
+fi )
 directory="${EFFECTIVE_LIB}"
 
 # 提高 fd limit（与 systemd LimitNOFILE=65536 对齐）
@@ -594,7 +712,11 @@ case "\$1" in
         fi
         echo -n "Starting \$NAME... "
         cd "\$WORKDIR"
-        nohup \$DAEMON \$DAEMON_ARGS >> "\$LOGFILE" 2>&1 &
+$( if [[ "$LOGROTATE_ENABLED" == "yes" ]]; then
+    echo "        nohup \$DAEMON \$DAEMON_ARGS > /dev/null 2>&1 &"
+else
+    echo "        nohup \$DAEMON \$DAEMON_ARGS >> \"\$LOGFILE\" 2>&1 &"
+fi )
         echo \$! > "\$PIDFILE"
         sleep 1
         if is_running; then
@@ -706,6 +828,8 @@ install_server() {
         info "Brutal 速率：${rate_mbps} Mbps / connection"
     fi
 
+    ask_log_config
+
     install_system_files
     install_shim_scripts "server"
     write_server_config "$listen_host" "$listen_port" "$password" "$camouflage" "$brutal_rate_bps"
@@ -727,7 +851,7 @@ $(_c 36 "或者直接把下面的 config_client.json 模板拷到客户端（最
 
 {
     "schema_version": 1,
-    "inbounds": [{"type": "socks5", "listen": "127.0.0.1:1080"}],
+    "inbounds": [{"type": "mixed", "listen": "127.0.0.1:7890"}],
     "outbounds": [
         {
             "tag": "proxy", "type": "mirage",
@@ -811,6 +935,8 @@ install_client() {
         info "API secret 已生成：$api_secret"
         info "Yacd 登录信息：host=127.0.0.1  port=9090  secret=$api_secret"
     fi
+
+    ask_log_config
 
     install_system_files
     install_shim_scripts "client"
@@ -921,6 +1047,17 @@ uninstall() {
         fi
     done
     [[ "$removed_shim" == "yes" ]] && ok "removed shim scripts in $BIN_DIR"
+
+    # logrotate 配置
+    local removed_lr=no
+    for f in /etc/logrotate.d/mirage-server /etc/logrotate.d/mirage-client \
+             /etc/logrotate.d/pyrealiy-server /etc/logrotate.d/pyrealiy-client; do
+        if [[ -f "$f" ]]; then
+            rm -f "$f"
+            removed_lr=yes
+        fi
+    done
+    [[ "$removed_lr" == "yes" ]] && ok "removed logrotate configs"
 
     # program tree（现有 + legacy）
     for dir in "$INSTALL_PREFIX" "$LEGACY_INSTALL_PREFIX"; do
