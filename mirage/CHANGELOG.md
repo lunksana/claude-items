@@ -17,6 +17,154 @@
 
 ---
 
+## [0.4.40] - 2026-06-13
+
+### 改动 / 客户端 install 允许用户填入 cfg 路径
+
+0.4.39 的自动识别只看默认位置（system: `/etc/mirage/config_client.json`、
+inplace: `${WORK_DIR}/config_client.json`）。现实场景里用户更常 scp 到 `~/` 或
+`/root/`，导致检测不到。
+
+本版本改为**两种情况都让用户填路径**：
+
+**默认位置已存在**：
+
+```
+[*] 默认位置已有配置：/etc/mirage/config_client.json
+    config_client.json 路径（回车用默认；输 '-' 跳过；或输绝对路径用其他）：
+    [/etc/mirage/config_client.json]
+```
+
+- 回车 → 用默认
+- 输绝对路径（如 `/root/from-server.json`） → 用那个
+- 输 `-` → 跳过自动识别，全部字段从头问
+
+**默认位置不存在**：
+
+```
+[*] 默认位置无现有配置：/etc/mirage/config_client.json
+    已有 config_client.json 想导入？输绝对路径（留空跳过、自行填全部字段）：
+```
+
+- 空 → 跳过
+- 路径 → 导入
+
+### 错误处理
+
+| 情况 | 行为 |
+|---|---|
+| 路径不存在 | WARN + 跳过自动识别（继续走完整问询） |
+| 文件存在但 JSON 损坏 / 缺 mirage outbound | 同上 |
+| 解析成功 | 显示连接信息 + 路由 / DNS / API 摘要，问是否复用 |
+
+### 典型流程
+
+```bash
+# 服务端：bash install.sh → 控制台显示客户端 cfg
+# 用户：scp client.json user@client:~/
+# 客户端：bash install.sh → install_client
+#   询问 cfg 路径 → 输入 /root/client.json
+#   检测成功 → 显示摘要 → 复用连接信息
+#   只问路由 / DNS / API / 日志
+#   写出 cfg 到 /etc/mirage/ + 启动 systemd
+```
+
+### 验证
+
+任意路径的 cfg 都能被 `_load_existing_client_cfg` 正确解析：
+
+```
+parsed:
+  server: 203.0.113.45:443
+  pwd:    pwd-from-scp
+  sni:    www.bing.com
+  port:   8888
+```
+
+---
+
+## [0.4.39] - 2026-06-13
+
+### 改动 / 客户端安装：检测现有 cfg + 服务端模板带分流
+
+两件事联动解决"复制服务端打印的模板到客户端 → 缺分流"的痛点：
+
+#### A. 服务端尾声打印的客户端模板默认带分流 + DNS
+
+之前是最简版（`route.rules: []` 无分流，无 DNS）。改成 china_split 默认值：
+
+```diff
+- "route": {"default": "proxy", "rules": []}
++ "route": {
++     "default": "proxy",
++     "rules": [
++         {"ip_cidr": ["127.0.0.0/8", "10.0.0.0/8", ...], "outbound": "direct"},
++         {"geosite": ["loyalsoldier:cn"], "outbound": "direct"},
++         {"geoip":   ["loyalsoldier:cn"], "outbound": "direct"}
++     ]
++ },
++ "dns_listen_host": "127.0.0.1",
++ "dns_listen_port": 5353,
++ "cn_dns": "119.29.29.29",
++ "remote_dns": "1.1.1.1:53"
+```
+
+用户 scp 这个模板到客户端，开箱即用国内外分流。
+
+#### B. 客户端 install.sh 检测现有 config_client.json
+
+`install_client` 启动时先检查 `${EFFECTIVE_ETC}/config_client.json`，用
+`python3` 解析提取：
+
+| 字段 | 来源 |
+|---|---|
+| server_host / server_port | `outbounds[*].type=mirage` 节点 |
+| password / camouflage_host | 同上 |
+| socks5_port | `inbounds[0].listen` |
+| rules_count | `len(route.rules)` |
+| dns_listen / api_listen | 顶层 cfg 字段 |
+
+检测到后打印摘要 + 询问：
+
+```
+[*] 检测到现有客户端配置：/etc/mirage/config_client.json
+[*]   服务端：52.221.254.189:4433
+[*]   伪装 SNI：speedtest.net
+[*]   路由规则：0 条
+[*]   DNS 转发器：未启用
+[*]   Clash API：未启用
+    复用上面的连接信息，只补齐分流 / DNS / API / 日志？ (Y/n)
+```
+
+选 Y → 跳过 server_host / port / password / camouflage / socks5_port 的询问，
+直接进入路由模板 / DNS 方案 / API / 日志的问答。
+
+#### 兼容 legacy outbound type
+
+`type` 字段支持 `"mirage"`（新）和 `"pyrealiy"`（0.4.34 之前的命名）。
+
+### 实测
+
+```
+detected
+  server_host: 52.221.254.189
+  server_port: 4433
+  password:    test-pass-abc
+  camouflage:  speedtest.net
+  socks5_port: 7890
+  rules_count: 0 (空 → 提示补齐)
+  dns_listen:  '' (空 → 未启用)
+  api_listen:  '' (空 → 未启用)
+```
+
+### 用户体感
+
+服务端跑完安装 → 服务端控制台显示完整客户端 cfg →
+`scp config_client.json` 到客户端 → 客户端跑 `bash install.sh` →
+自动检测、跳过连接信息、专注问分流策略 → 写出完整 cfg + systemd unit。
+
+---
+
 ## [0.4.38] - 2026-06-13
 
 ### 改动 / 日志轮转换成进程内管理（替代 logrotate）
@@ -2328,7 +2476,9 @@ sniffer / router 等）。除上面 3 处，**未发现其它真问题**：
 
 更早的历史在 git log 里；从 `0.3.0` 起按本规范打 tag。
 
-[未发布]: https://github.com/<你的仓库>/compare/v0.4.38...HEAD
+[未发布]: https://github.com/<你的仓库>/compare/v0.4.40...HEAD
+[0.4.40]: https://github.com/<你的仓库>/releases/tag/v0.4.40
+[0.4.39]: https://github.com/<你的仓库>/releases/tag/v0.4.39
 [0.4.38]: https://github.com/<你的仓库>/releases/tag/v0.4.38
 [0.4.37]: https://github.com/<你的仓库>/releases/tag/v0.4.37
 [0.4.36]: https://github.com/<你的仓库>/releases/tag/v0.4.36

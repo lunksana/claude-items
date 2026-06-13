@@ -252,6 +252,55 @@ handle_brutal_optional() {
 # 日志配置（cfg.log.format + 可选 logrotate）
 # ──────────────────────────────────────────────────────────────────────────────
 
+# 读已有 config_client.json，提取连接信息 + 当前分流 / DNS / API 状态
+# 成功返回 0，并设置全局 EXISTING_* 变量
+_load_existing_client_cfg() {
+    local path=$1
+    [[ -f "$path" ]] || return 1
+    local data
+    data=$(python3 - "$path" <<'PY' 2>/dev/null
+import json, sys
+try:
+    c = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+# 找 mirage outbound（兼容 legacy "pyrealiy" type）
+mirage = next((o for o in c.get("outbounds", [])
+               if o.get("type") in ("mirage", "pyrealiy")), None)
+if not mirage:
+    sys.exit(1)
+print(mirage.get("server") or mirage.get("server_host", ""))
+print(mirage.get("server_port", 443))
+print(mirage.get("password", ""))
+print(mirage.get("sni") or mirage.get("camouflage_host", ""))
+# socks5 / mixed listen port
+ib = (c.get("inbounds") or [{}])[0]
+listen = ib.get("listen", "")
+port = listen.rsplit(":", 1)[-1] if ":" in listen else ""
+print(port)
+# 路由规则数
+rules = c.get("route", {}).get("rules") or []
+print(len(rules))
+# DNS / API 状态
+dns_listen = c.get("dns", {}).get("listen", "")
+if not dns_listen and c.get("dns_listen_port"):
+    dns_listen = f"{c.get('dns_listen_host', '127.0.0.1')}:{c['dns_listen_port']}"
+print(dns_listen)
+print((c.get("api") or {}).get("listen", ""))
+PY
+    ) || return 1
+    [[ -z "$data" ]] && return 1
+    EXISTING_SERVER_HOST=$(echo "$data" | sed -n '1p')
+    EXISTING_SERVER_PORT=$(echo "$data" | sed -n '2p')
+    EXISTING_PASSWORD=$(echo "$data" | sed -n '3p')
+    EXISTING_CAMOUFLAGE=$(echo "$data" | sed -n '4p')
+    EXISTING_SOCKS5_PORT=$(echo "$data" | sed -n '5p')
+    EXISTING_RULES_COUNT=$(echo "$data" | sed -n '6p')
+    EXISTING_DNS_LISTEN=$(echo "$data" | sed -n '7p')
+    EXISTING_API_LISTEN=$(echo "$data" | sed -n '8p')
+    [[ -n "$EXISTING_SERVER_HOST" ]]
+}
+
 ask_log_config() {
     info "日志配置"
     # 格式
@@ -847,7 +896,7 @@ $(_c 36 "请用下面的配置在客户端 install.sh 引导时输入对应字�
     密码        : $(_c 33 "$password")
     伪装 SNI    : $(_c 33 "$camouflage")
 
-$(_c 36 "或者直接把下面的 config_client.json 模板拷到客户端（最简版，无 DNS / 路由分流）：")
+$(_c 36 "或者直接把下面的 config_client.json 模板拷到客户端（含国内外分流 + DNS）：")
 
 {
     "schema_version": 1,
@@ -863,11 +912,25 @@ $(_c 36 "或者直接把下面的 config_client.json 模板拷到客户端（最
         {"tag": "direct", "type": "direct"},
         {"tag": "block",  "type": "block"}
     ],
-    "route": {"default": "proxy", "rules": []}
+    "route": {
+        "default": "proxy",
+        "rules": [
+            {"ip_cidr": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"], "outbound": "direct"},
+            {"geosite": ["loyalsoldier:cn"], "outbound": "direct"},
+            {"geoip":   ["loyalsoldier:cn"], "outbound": "direct"}
+        ]
+    },
+    "dns_listen_host": "127.0.0.1",
+    "dns_listen_port": 5353,
+    "cn_dns": "119.29.29.29",
+    "remote_dns": "1.1.1.1:53"
 }
 
 $(_c 36 "传到客户端建议用 scp（更安全），不要明文走 IM：")
     $(_c 33 "scp config_client.json user@<客户端机器>:~/")
+
+$(_c 36 "提示：客户端 install.sh 会自动识别上面这个文件，跳过连接信息询问；")
+$(_c 36 "       想换 DNS / 路由策略时直接重跑 install.sh 即可。")
 
 EOF
 }
@@ -880,13 +943,65 @@ install_client() {
     title "客户端安装"
 
     local server_host server_port password camouflage socks5_port
-    server_host=$(ask "服务端地址（IP 或域名）" "")
-    [[ -z "$server_host" ]] && err "服务端地址不能为空"
-    server_port=$(ask_port "服务端端口" "443")
-    password=$(ask "密码（与服务端一致）")
-    [[ -z "$password" ]] && err "密码不能为空"
-    camouflage=$(ask "伪装 SNI（与服务端一致）" "www.apple.com")
-    socks5_port=$(ask_port "本地 SOCKS5 监听端口" "1080")
+
+    # ── 识别已有 config_client.json：可能在默认位置（上次跑过 install.sh）
+    #    或用户自己 scp 到任意路径（推荐流程）。提取连接信息后跳过重复问询
+    local default_cfg_path
+    if [[ "$INSTALL_MODE" == "system" ]]; then
+        default_cfg_path="${ETC_DIR}/config_client.json"
+    else
+        default_cfg_path="${WORK_DIR}/config_client.json"
+    fi
+
+    local cfg_path_input
+    if [[ -f "$default_cfg_path" ]]; then
+        info "默认位置已有配置：$default_cfg_path"
+        cfg_path_input=$(ask "config_client.json 路径（回车用默认；输 '-' 跳过；或输绝对路径用其他）" "$default_cfg_path")
+    else
+        info "默认位置无现有配置：$default_cfg_path"
+        cfg_path_input=$(ask "已有 config_client.json 想导入？输绝对路径（留空跳过、自行填全部字段）" "")
+    fi
+
+    local existing_cfg_path=""
+    if [[ "$cfg_path_input" == "-" || -z "$cfg_path_input" ]]; then
+        :   # 用户主动跳过
+    elif [[ ! -f "$cfg_path_input" ]]; then
+        warn "$cfg_path_input 不存在，跳过自动识别"
+    elif _load_existing_client_cfg "$cfg_path_input"; then
+        existing_cfg_path="$cfg_path_input"
+    else
+        warn "$cfg_path_input 解析失败或缺 mirage outbound，跳过自动识别"
+    fi
+
+    local existing_loaded=no
+    if [[ -n "$existing_cfg_path" ]]; then
+        info "导入：$existing_cfg_path"
+        info "  服务端：${EXISTING_SERVER_HOST}:${EXISTING_SERVER_PORT}"
+        info "  伪装 SNI：${EXISTING_CAMOUFLAGE}"
+        info "  路由规则：${EXISTING_RULES_COUNT} 条"
+        info "  DNS 转发器：${EXISTING_DNS_LISTEN:-未启用}"
+        info "  Clash API：${EXISTING_API_LISTEN:-未启用}"
+        if ask_yn "复用以上连接信息，只补齐分流 / DNS / API / 日志？" y; then
+            server_host="$EXISTING_SERVER_HOST"
+            server_port="$EXISTING_SERVER_PORT"
+            password="$EXISTING_PASSWORD"
+            camouflage="$EXISTING_CAMOUFLAGE"
+            socks5_port="$EXISTING_SOCKS5_PORT"
+            [[ -z "$socks5_port" ]] && socks5_port=$(ask_port "本地监听端口（mixed）" "7890")
+            existing_loaded=yes
+            ok "已复用连接信息（$server_host:$server_port），跳过这几项询问"
+        fi
+    fi
+
+    if [[ "$existing_loaded" != "yes" ]]; then
+        server_host=$(ask "服务端地址（IP 或域名）" "")
+        [[ -z "$server_host" ]] && err "服务端地址不能为空"
+        server_port=$(ask_port "服务端端口" "443")
+        password=$(ask "密码（与服务端一致）")
+        [[ -z "$password" ]] && err "密码不能为空"
+        camouflage=$(ask "伪装 SNI（与服务端一致）" "www.apple.com")
+        socks5_port=$(ask_port "本地监听端口（mixed = SOCKS5 + HTTP 同口）" "7890")
+    fi
 
     # ── 路由模板 ──
     echo
