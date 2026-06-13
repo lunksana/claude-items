@@ -32,14 +32,24 @@ logger = logging.getLogger("config")
 SCHEMA_VERSION_CURRENT = 1
 
 _V1_TOP_KEYS = {
-    "schema_version", "log", "inbounds", "outbounds",
+    "schema_version", "log", "log_levels", "inbounds", "outbounds",
     "route", "dns", "api", "tuning",
+    # 系统级路径 / 端口配置：无好的子结构归属，runtime 直接读顶层
+    "geosite_dir", "tproxy_port",
+    # geosite/geoip 下载源（被 geosite_cache.ensure_all 读取）
+    "geosite_sources", "geoip_sources", "geosite_update_days",
 }
 
 _LEGACY_TOP_KEYS = {
     "server_host", "server_port", "password", "camouflage_host",
     "socks5_host", "socks5_port", "pool_size",
     "brutal_rate_bps", "brutal_pool_size",
+}
+
+# 0.4.40 及更早把这些放顶层；0.4.41+ 改放 cfg.dns.{listen, cn, remote}。runtime 仍
+# 读顶层（向后兼容），但提示用户迁移
+_DEPRECATED_DNS_TOP_KEYS = {
+    "cn_dns", "remote_dns", "dns_listen_host", "dns_listen_port",
 }
 
 _DNS_MATCH_PREFIXES = (
@@ -123,6 +133,14 @@ def _looks_like_legacy(raw: dict) -> bool:
 
 def _warn_unknown_top_keys(raw: dict) -> None:
     unknown = set(raw.keys()) - _V1_TOP_KEYS
+    deprecated = unknown & _DEPRECATED_DNS_TOP_KEYS
+    if deprecated:
+        logger.warning(
+            "config: deprecated top-level DNS keys %s — please move into cfg.dns "
+            "block (listen / cn / remote). Still honored for backward compat.",
+            sorted(deprecated),
+        )
+        unknown -= deprecated
     if unknown:
         logger.warning(
             "config: unknown top-level keys ignored: %s (schema_version=1 keys: %s)",
@@ -174,11 +192,19 @@ def _project_v1_to_legacy_keys(raw: dict) -> None:
         break
 
     # dns.listen → cfg['dns_listen_host'] / ['dns_listen_port']
-    dns_listen = (raw.get("dns") or {}).get("listen")
+    dns_block = raw.get("dns") or {}
+    dns_listen = dns_block.get("listen")
     if dns_listen and ":" in dns_listen:
         host, port_s = dns_listen.rsplit(":", 1)
         raw.setdefault("dns_listen_host", host)
         raw.setdefault("dns_listen_port", int(port_s))
+    # dns.cn / dns.remote → cfg['cn_dns'] / ['remote_dns']
+    # 这两个键是 dns_forwarder.py 的 "简易拆分 DNS" 模型；放在 dns 块里语义更
+    # 清晰，避免再污染顶层
+    if dns_block.get("cn"):
+        raw.setdefault("cn_dns", dns_block["cn"])
+    if dns_block.get("remote"):
+        raw.setdefault("remote_dns", dns_block["remote"])
 
 
 def _validate_dns(dns: Any) -> None:

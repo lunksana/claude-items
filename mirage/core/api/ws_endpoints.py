@@ -25,8 +25,10 @@ _LOG_QUEUE_MAX = 256
 
 
 def register(router: Router, ctx: APIContext) -> None:
-    router.add_ws("/traffic", _traffic)
-    router.add_ws("/logs",    _logs)
+    router.add_ws("/traffic",     _traffic)
+    router.add_ws("/logs",        _logs)
+    router.add_ws("/memory",      _memory)
+    router.add_ws("/connections", _connections_ws)
 
 
 async def _traffic(req: Request, ctx: APIContext, reader, writer) -> None:
@@ -102,6 +104,64 @@ async def _logs(req: Request, ctx: APIContext, reader, writer) -> None:
         await ws.close()
 
 
+async def _memory(req: Request, ctx: APIContext, reader, writer) -> None:
+    """
+    Clash Meta WS：1 Hz 推 `{"inuse": int, "oslimit": int}`，单位 bytes。
+    inuse  = 进程 RSS；oslimit = 0（系统总内存信息不上报，避免依赖 psutil）
+    """
+    ws = WSConnection(reader, writer)
+    try:
+        while not ws.closed:
+            try:
+                await ws.send_text(json.dumps({
+                    "inuse":   _rss_bytes(),
+                    "oslimit": 0,
+                }))
+            except Exception:
+                break
+            await asyncio.sleep(_TRAFFIC_INTERVAL_SEC)
+    finally:
+        await ws.close()
+
+
+async def _connections_ws(req: Request, ctx: APIContext, reader, writer) -> None:
+    """
+    Clash Meta WS：1 Hz 推全量连接快照，schema 与 REST /connections 完全一致：
+      {"downloadTotal": int, "uploadTotal": int, "memory": int, "connections": [...]}
+    """
+    ws = WSConnection(reader, writer)
+    try:
+        while not ws.closed:
+            if ctx.registry is None:
+                payload = {"downloadTotal": 0, "uploadTotal": 0, "memory": 0, "connections": []}
+            else:
+                meter = ctx.registry.meter
+                payload = {
+                    "downloadTotal": meter.down_total,
+                    "uploadTotal":   meter.up_total,
+                    "memory":        _rss_bytes(),
+                    "connections":   [c.to_clash() for c in ctx.registry.list_active()],
+                }
+            try:
+                await ws.send_text(json.dumps(payload))
+            except Exception:
+                break
+            await asyncio.sleep(_TRAFFIC_INTERVAL_SEC)
+    finally:
+        await ws.close()
+
+
+def _rss_bytes() -> int:
+    """读 /proc/self/statm 取 RSS（page * page_size）。失败返回 0，不依赖 psutil。"""
+    try:
+        with open("/proc/self/statm") as f:
+            pages = int(f.read().split()[1])
+        import resource
+        return pages * resource.getpagesize()
+    except Exception:
+        return 0
+
+
 # ============================================================
 # LogBroadcaster：logging handler → 多订阅广播
 # ============================================================
@@ -120,8 +180,10 @@ class LogBroadcaster(logging.Handler):
     队列满（订阅者消费慢）→ drop 老消息保留新的，避免无限堆。
     """
 
-    def __init__(self, level: int = logging.INFO):
-        super().__init__(level=level)
+    def __init__(self) -> None:
+        # 不在 handler 层过滤——交给 root logger 的 level 和 WS /logs 的
+        # ?level= 一起把控；否则用户调 root=DEBUG 也只能看到 INFO+
+        super().__init__(level=logging.DEBUG)
         self._queues: list[asyncio.Queue] = []
         self._formatter = logging.Formatter("[%(name)s] %(message)s")
         self.setFormatter(self._formatter)

@@ -17,6 +17,303 @@
 
 ---
 
+## [0.4.41] - 2026-06-13
+
+### 自审纰漏（同版本内修）
+
+- **`GLOBAL` Selector 包含 `block`**：yacd 用户误选 REJECT 会以为切到屏蔽
+  实际无变化（PUT 是 no-op）。`GLOBAL.all` 现在排除所有 `type=block` 的
+  outbound。
+- **`/configs` 的 `log-level` 读不到顶层 `log_levels.default`**：UI 永远显示
+  `info`。`_derive_log_level` 优先级补成 `top.log_levels.default →
+  tuning.log_levels.root → log.level → info`。
+- **SIGHUP 改 `log.file` 路径会泄漏老 FileHandler**：B1 的幂等只处理同路径
+  重复，异路径切换没回收。补：apply_log_format 遇到不同 baseFilename 的
+  FileHandler → close + removeHandler 后再 add 新的。验证：a.log → b.log
+  切换后 a 不再被写、b 只 1 个 handler。
+
+### 修复
+
+#### B1: 日志重复输出（每条记录两遍）
+
+```
+2026-06-13 11:02:29,025 [INFO] client: Mirage client v0.4.40
+2026-06-13 11:02:29,025 [INFO] client: Mirage client v0.4.40   ← 重复
+```
+
+**根因**：`apply_log_format` 在 `load_config()` 内和 `client.py main()` 各调用一次。
+0.4.38 引入文件日志后，**两次调用都往 root logger 加一个 FileHandler**，导致
+每条记录被写两遍。
+
+**修法**：`apply_log_format` 现在幂等——先扫描 root.handlers，若已存在指向同
+一个 `baseFilename` 的 FileHandler，只更新 formatter 并跳过 add。重复调三次
+也只有一个 FileHandler。`tests`：调 3 次 `apply_log_format` 后 root 只有 1 个
+RotatingFileHandler，一条日志只写 1 行。
+
+#### B2: `log_levels` 顶层键被 schema 警告
+
+```
+[WARNING] config: unknown top-level keys ignored: ['log_levels', ...]
+```
+
+**根因**：`apply_log_levels` 读 `cfg["log_levels"]`，但 `_V1_TOP_KEYS` 白名单
+没把它加进去。
+
+**修法**：`log_levels` 加入 schema v1 白名单。
+
+#### B5: yacd 接入后多处不识别（节点 / 流量 / 内存 / 日志级别）
+
+实测 yacd 接入 mirage 后：
+1. 上下行流量 / 活动连接 / 内存使用都显示 0 或空
+2. Proxies Tab 不显示节点
+3. Rules 显示部分，geo 相关缺失
+4. 日志窗口拉不到内容
+
+**根因**：
+
+- 缺 `WS /memory`：yacd 用 WS 实时推内存（`{"inuse", "oslimit"}`），mirage 完
+  全没实现，REST `/connections` 里 memory 也写死 0。
+- 缺 `WS /connections`：yacd 用 WS 流式拉活动连接，mirage 只有 REST 端点，
+  yacd 收不到推送 → 列表常空。
+- 缺合成 `GLOBAL` Selector：yacd "Proxies" Tab 主面板靠 Selector 渲染叶
+  子，没这一组就空白。
+- 缺 `PUT /proxies/{name}` + `GET /proxies/{name}/delay`：yacd 点节点 /
+  测延迟会调，返回 404 引发面板报错。
+- LogBroadcaster 构造时硬过滤 `level=INFO`，用户即便把 root logger 调
+  DEBUG 也只能收 INFO+，UI 选 debug 也没用。
+- Geo 规则缺失实际是 [B4](#b4) 的现象。
+
+**修法**：
+
+新增 WS 端点：
+
+```
+WS /memory       1Hz {"inuse": rss_bytes, "oslimit": 0}
+WS /connections  1Hz {"downloadTotal", "uploadTotal", "memory", "connections": [...]}
+```
+
+`_rss_bytes()` 读 `/proc/self/statm`（不依赖 psutil），失败返 0。
+
+`/proxies` 响应额外加 3 个合成项：
+
+```json
+"GLOBAL": {"type": "Selector", "all": [...所有 outbound...], "now": "proxy", ...}
+"DIRECT": {...direct 别名...}
+"REJECT": {...block 别名...}
+```
+
+新增 REST：
+
+```
+PUT /proxies/{name}             → 204（mirage 没 Selector 语义，仅让 yacd 不报错）
+GET /proxies/{name}/delay       → {"delay": int, "meanDelay": int}
+                                  直读 outbound.latency_ms，不触发 yacd 反复测速
+```
+
+LogBroadcaster：
+
+```diff
+- def __init__(self, level: int = logging.INFO):
+-     super().__init__(level=level)
++ def __init__(self) -> None:
++     # 不在 handler 层过滤——交给 root logger 的 level 和 WS /logs 的
++     # ?level= 一起把控
++     super().__init__(level=logging.DEBUG)
+```
+
+REST `/connections` 的 `memory` 字段也补上（共用 `_rss_bytes()`）。
+
+#### B4: 分流规则字段名错 + geo 源未声明 → geosite 规则全部失效
+
+实测现象：
+
+```
+[WARNING] router: rule has no criterion field, skipped: {'geosite': ['loyalsoldier:cn'], ...}
+[WARNING] router: geoip source 'loyalsoldier' not available
+[INFO] router: Router built: 5 rules total | _CidrRule=5 | default=proxy   ← 只有 IP CIDR 生效
+```
+
+**根因（两个独立 bug 叠加）**：
+
+1. install.sh 写 `{"geosite": [...]}`，但 router 用 sing-box 风格字段名
+   `rule_set`（`_STRUCT_FIELDS` 里 `rule_set → GEOSITE`）。`geosite` 不在白名单
+   → "no criterion field" 跳过。
+
+2. install.sh 没在 cfg 里声明 `geosite_sources` / `geoip_sources`，
+   `geosite_cache.ensure_all()` 没有源可下→返回空 dict→router 收到
+   `available_site={}, available_ip={}`→所有 rule_set / geoip 规则都报
+   "source 'loyalsoldier' not available"。
+
+**修法**：
+
+1. `_ask_rule` 把 `geosite` 翻译成 `rule_set`；`china_split` 模板里的 geosite
+   规则也改 `rule_set`。
+2. `write_client_config` 在 cfg 末尾追加 loyalsoldier 的 `geosite_sources` +
+   `geoip_sources`（同一个 release 同时提供 site + ip）：
+
+   ```json
+   "geosite_sources": [
+       {"name": "loyalsoldier",
+        "url": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"}
+   ],
+   "geoip_sources": [
+       {"name": "loyalsoldier",
+        "url": "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"}
+   ]
+   ```
+
+3. `geosite_sources` / `geoip_sources` / `geosite_update_days` 进 schema v1
+   白名单。
+
+**验证**：fake loyalsoldier 路径下 build_router 不再报 "no criterion field" /
+"source not available"，规则全部识别。生产环境下 ensure_all 会从 GitHub
+Release 拉到 `/var/lib/mirage/geosite/{site,ip}-loyalsoldier.dat`，规则即时
+生效。
+
+#### B3: DNS 字段污染顶层
+
+0.4.40 client cfg 模板在顶层写 `cn_dns / remote_dns / dns_listen_host /
+dns_listen_port`，每次启动都被 schema 警告。
+
+**修法**：
+
+1. install.sh 现在把 DNS 字段写进 `cfg.dns` 块：
+   ```json
+   "dns": {
+       "listen": "127.0.0.1:5353",
+       "cn":     "119.29.29.29",
+       "remote": "tls://1.1.1.1:853"
+   }
+   ```
+2. config.py `_project_legacy_keys` 扩展：`dns.cn → cfg.cn_dns`、
+   `dns.remote → cfg.remote_dns`（和已有的 `dns.listen → dns_listen_host/port`
+   一致），runtime 读取路径不变。
+3. `geosite_dir` 和 `tproxy_port` 加入 schema v1 白名单（runtime 直读顶层，
+   没有更好的子结构归属）。
+4. 老 cfg（0.4.40 顶层 DNS 键）仍能跑——警告改为更友好的
+   `deprecated top-level DNS keys ... please move into cfg.dns block. Still
+   honored for backward compat.`，老 install 不需要立刻重跑。
+
+### 新增 / 日志级别选项
+
+`ask_log_config` 现在多问一项：
+
+```
+最小日志级别（低于此级别的日志被丢弃）：
+  1) INFO     — 关键事件 + 警告 + 错误（推荐）
+  2) DEBUG    — 包含调试细节（量大；排查问题时用）
+  3) WARNING  — 仅警告 + 错误
+  4) ERROR    — 仅错误
+```
+
+写入 cfg：`"log_levels": {"default": "INFO"}`。运行时由 `apply_log_levels`
+作用到 root logger。
+
+### 新增 / 客户端安装四件套增强
+
+#### 1. 监听地址默认 0.0.0.0（LAN 共用）
+
+之前硬编码 `127.0.0.1:7890`。现在默认 `0.0.0.0:7890`，并提示用户可改回
+`127.0.0.1`（仅本机）。同时末尾安装信息按实际监听地址显示。
+
+#### 2. 端口占用检测
+
+`ask_port` 加 `proto` 参数（tcp / udp / both），用 `ss -ltn / -lun` 检查
+绑定状态：
+
+```
+本地监听端口（mixed = SOCKS5 + HTTP 同口） [7890]: 7890
+[!] 端口 7890 已被占用（TCP）：users:(("nginx",pid=1234,fd=6))
+    仍要用这个端口（启动可能失败）？ (y/N):
+```
+
+四处 ask_port 都用了：服务端监听、SOCKS5 监听、DNS 监听（udp）、TProxy 监听。
+
+#### 3. 高级路由：逐项 geo tag 选择
+
+新增第 3 种路由模板"自定义高级"，对 13 个常用 geo tag 逐项问：
+
+```
+高级路由：逐项配置常用 geo tag
+每项 4 选 1：0=跳过 / 1=direct（直连）/ 2=proxy / 3=block
+（内网 / 保留地址已固定 direct，不可关）
+  广告 (category-ads-all)               [3]:
+  国内域名 (geosite:cn)                  [1]:
+  国内 IP (geoip:cn)                     [1]:
+  Apple 中国 (apple-cn)                  [1]:
+  Google 中国 (google-cn)                [1]:
+  Microsoft 中国 (microsoft-cn)          [1]:
+  GFW 黑名单 (geosite:gfw)               [2]:
+  海外位置 (geolocation-!cn)             [2]:
+  Netflix                                [0]:
+  Disney+                                [0]:
+  YouTube                                [0]:
+  OpenAI / ChatGPT                       [0]:
+  Telegram                               [0]:
+
+默认出口（未命中规则时；1=direct / 2=proxy） [2]:
+```
+
+每项默认值贴合典型用法（广告 block、国内 direct、GFW proxy、流媒体 skip）。
+跳过的项不进 rules。
+
+路由模板菜单现 4 项：
+
+```
+1) 国内外分流（推荐）
+2) 全代理
+3) 自定义高级：逐项配置 geo tag
+4) 空规则：default=proxy + 空 rules
+```
+
+#### 4. DNS 详配 + TProxy
+
+DNS 选了 `china_split` / `full_proxy` 后追加：
+
+```
+DNS 转发器详细配置
+  DNS 监听地址（0.0.0.0 = 允许 LAN 设备查询） [127.0.0.1]:
+  DNS 监听端口（5353 无需 root；53 需 root） [5353]:
+  自定义上游 DNS 服务器（否则用预设...）？ (y/N):
+    国内域名上游（命中 direct 出口时用，纯 UDP） [119.29.29.29]:
+    国外域名上游（host:port / tls://host:853 / https://1.1.1.1/dns-query） [1.1.1.1:53]:
+```
+
+TProxy（新加）：
+
+```
+TProxy 透明代理（可选；需要额外 iptables 配置，详见 README）
+  启用 TProxy？ (y/N): y
+  TProxy 监听端口（TCP） [1081]:
+[!] 需手配 iptables TPROXY 规则。模板见 README『TProxy 防火墙规则』一节
+```
+
+生成的 cfg 自动写入 `tproxy_port` 字段。
+
+### 实测（advanced 路由 + 自定义 DNS + TProxy）
+
+```
+inbounds: [{'type': 'mixed', 'listen': '0.0.0.0:7890'}]
+route.default: proxy
+rules: 5 条
+  {ip_cidr: [...], outbound: direct}
+  {geosite: [loyalsoldier:category-ads-all], outbound: block}
+  {geosite: [loyalsoldier:cn], outbound: direct}
+  {geoip:   [loyalsoldier:cn], outbound: direct}
+  {geosite: [loyalsoldier:gfw], outbound: proxy}
+dns_listen: 0.0.0.0:53   cn_dns: 119.29.29.29   remote_dns: tls://1.1.1.1:853
+tproxy_port: 1081
+api listen: 127.0.0.1:9090
+```
+
+### 兼容性
+
+- API 仍默认 `127.0.0.1:9090`（Bearer token 在 LAN 暴露不够安全；用户要 LAN 共享建议配防火墙限 IP）
+- DNS 监听 host 默认 `127.0.0.1`（防 LAN 滥用），用户可改 `0.0.0.0`
+- Existing config 自动识别路径（0.4.39 / 0.4.40）继续生效，不受影响
+
+---
+
 ## [0.4.40] - 2026-06-13
 
 ### 改动 / 客户端 install 允许用户填入 cfg 路径
@@ -2476,7 +2773,8 @@ sniffer / router 等）。除上面 3 处，**未发现其它真问题**：
 
 更早的历史在 git log 里；从 `0.3.0` 起按本规范打 tag。
 
-[未发布]: https://github.com/<你的仓库>/compare/v0.4.40...HEAD
+[未发布]: https://github.com/<你的仓库>/compare/v0.4.41...HEAD
+[0.4.41]: https://github.com/<你的仓库>/releases/tag/v0.4.41
 [0.4.40]: https://github.com/<你的仓库>/releases/tag/v0.4.40
 [0.4.39]: https://github.com/<你的仓库>/releases/tag/v0.4.39
 [0.4.38]: https://github.com/<你的仓库>/releases/tag/v0.4.38

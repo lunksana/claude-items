@@ -27,6 +27,8 @@ def register(router: Router, ctx: APIContext) -> None:
     router.add("GET", "/connections", _connections)
     router.add("GET", "/proxies", _proxies)
     router.add("GET", "/proxies/{name}", _proxy_one)
+    router.add("PUT", "/proxies/{name}", _proxy_select)
+    router.add("GET", "/proxies/{name}/delay", _proxy_delay)
     router.add("GET", "/rules", _rules)
 
 
@@ -68,18 +70,97 @@ async def _configs(req: Request, ctx: APIContext) -> Response:
 
 
 async def _proxies(req: Request, ctx: APIContext) -> Response:
-    """Clash 格式 dict: { name → proxy_object }"""
+    """
+    Clash 格式 dict: { name → proxy_object }，外加：
+      - GLOBAL    合成 Selector，包含全部 outbound——yacd "Proxies" Tab
+                  主面板靠 Selector 渲染叶子，没这一项面板会是空的
+      - DIRECT / REJECT  Clash 内置 alias，多个 dashboard 硬编码读取
+    """
     out: dict = {}
     if ctx.outbounds:
         for tag, o in ctx.outbounds.items():
             out[tag] = _outbound_to_clash(tag, o)
+
+        # GLOBAL.all 排除 block：让用户在 yacd 上误选 REJECT（mirage 没真
+        # Selector 语义，PUT 是 no-op，实际仍走 router），看似"切到屏蔽"实
+        # 际什么都没变，迷惑性强
+        selectable = [t for t, o in ctx.outbounds.items()
+                      if getattr(o, "type", "") != "block"]
+        primary = next(
+            (t for t, o in ctx.outbounds.items()
+             if getattr(o, "type", "") not in ("direct", "block")),
+            selectable[0] if selectable else "DIRECT",
+        )
+        out["GLOBAL"] = {
+            "type":    "Selector",
+            "name":    "GLOBAL",
+            "all":     selectable,
+            "now":     primary,
+            "udp":     True,
+            "history": [],
+            "extra":   {},
+        }
+        # Clash 内置 alias（许多 dashboard 硬编码读 DIRECT/REJECT）
+        if "direct" in ctx.outbounds and "DIRECT" not in out:
+            out["DIRECT"] = {**out["direct"], "name": "DIRECT"}
+        if "block" in ctx.outbounds and "REJECT" not in out:
+            out["REJECT"] = {**out["block"], "name": "REJECT"}
     return json_response({"proxies": out})
 
 
 async def _proxy_one(req: Request, ctx: APIContext, name: str) -> Response:
-    if not ctx.outbounds or name not in ctx.outbounds:
+    if not ctx.outbounds:
+        return json_response({"code": 404, "message": "proxy not found"}, status=404)
+    # 处理合成节点
+    if name == "GLOBAL":
+        selectable = [t for t, o in ctx.outbounds.items()
+                      if getattr(o, "type", "") != "block"]
+        primary = next(
+            (t for t, o in ctx.outbounds.items()
+             if getattr(o, "type", "") not in ("direct", "block")),
+            selectable[0] if selectable else "DIRECT",
+        )
+        return json_response({
+            "type": "Selector", "name": "GLOBAL",
+            "all": selectable, "now": primary, "udp": True,
+            "history": [], "extra": {},
+        })
+    if name == "DIRECT" and "direct" in ctx.outbounds:
+        return json_response({**_outbound_to_clash("direct", ctx.outbounds["direct"]), "name": "DIRECT"})
+    if name == "REJECT" and "block" in ctx.outbounds:
+        return json_response({**_outbound_to_clash("block", ctx.outbounds["block"]), "name": "REJECT"})
+    if name not in ctx.outbounds:
         return json_response({"code": 404, "message": "proxy not found"}, status=404)
     return json_response(_outbound_to_clash(name, ctx.outbounds[name]))
+
+
+async def _proxy_select(req: Request, ctx: APIContext, name: str) -> Response:
+    """
+    PUT /proxies/{name}：yacd 点击节点切换调用。mirage 没有 Selector 语义
+    （组路由是自动的 urltest / fallback），所以这里只接受请求让 UI 不报错，
+    实际不切换。
+    """
+    if not ctx.outbounds:
+        return json_response({"code": 404, "message": "proxy not found"}, status=404)
+    if name not in ("GLOBAL",) and name not in ctx.outbounds:
+        return json_response({"code": 404, "message": "proxy not found"}, status=404)
+    return Response(status=204)
+
+
+async def _proxy_delay(req: Request, ctx: APIContext, name: str) -> Response:
+    """
+    GET /proxies/{name}/delay：yacd 测延迟用。返回 mirage 内部健康检查的
+    latency_ms。真实主动测速由 healthcheck.py 周期做，这里直读已有值，避免
+    yacd 反复触发外部请求。
+    """
+    if not ctx.outbounds or name not in ctx.outbounds:
+        return json_response({"code": 404, "message": "proxy not found"}, status=404)
+    o = ctx.outbounds[name]
+    lat = getattr(o, "latency_ms", None)
+    if lat is None or not getattr(o, "is_healthy", True):
+        return json_response({"code": 400, "message": "An error occurred in the delay test"}, status=400)
+    delay = int(round(lat))
+    return json_response({"delay": delay, "meanDelay": delay})
 
 
 async def _rules(req: Request, ctx: APIContext) -> Response:
@@ -127,18 +208,19 @@ async def _connections(req: Request, ctx: APIContext) -> Response:
         "connections":   [ ConnInfo.to_clash() ]
       }
     """
+    from .ws_endpoints import _rss_bytes
     if ctx.registry is None:
         return json_response({
             "downloadTotal": 0,
             "uploadTotal":   0,
-            "memory":        0,
+            "memory":        _rss_bytes(),
             "connections":   [],
         })
     meter = ctx.registry.meter
     return json_response({
         "downloadTotal": meter.down_total,
         "uploadTotal":   meter.up_total,
-        "memory":        0,
+        "memory":        _rss_bytes(),
         "connections":   [c.to_clash() for c in ctx.registry.list_active()],
     })
 
@@ -210,11 +292,17 @@ def _history_for(o) -> list[dict]:
 # ---------- 脱敏 ----------
 
 def _derive_log_level(cfg: dict) -> str:
-    """tuning.log_levels 优先；否则 log.level；都没有 → info"""
+    """优先级：顶层 log_levels.default → tuning.log_levels.root → log.level → info"""
+    # 顶层 log_levels（install.sh 0.4.41+ 用这个）
+    top = cfg.get("log_levels")
+    if isinstance(top, dict):
+        d = top.get("default")
+        if d:
+            return str(d).lower()
+    # tuning.log_levels（老接口）
     tuning = cfg.get("tuning") or {}
     log_levels = tuning.get("log_levels") if isinstance(tuning, dict) else None
     if isinstance(log_levels, dict):
-        # 取根 logger 级别
         root = log_levels.get("root")
         if root:
             return str(root).lower()

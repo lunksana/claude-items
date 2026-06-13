@@ -96,22 +96,43 @@ def apply_log_format(cfg: dict) -> None:
 
     # 2) 文件 handler（可选）
     file_path = log_cfg.get("file")
+    import os
+    root = logging.getLogger()
     if file_path:
         try:
-            handler = _build_rotating_file_handler(log_cfg)
-            handler.setFormatter(formatter)
-            # 移除 basicConfig 装的 StreamHandler，避免 stderr + 文件双写
-            root = logging.getLogger()
+            target_abs = os.path.abspath(file_path)
+            # 幂等：apply_log_format 在 load_config 里和 main() 里都会被调；
+            # SIGHUP reload 也会再调一次。
+            # 处理两种重复：
+            #   a) 同路径已挂 → 只刷 formatter 跳过 add（避免每次都加一个）
+            #   b) 异路径已挂（SIGHUP 改了 log.file） → 移除老的再 add 新的
+            need_add = True
             for h in list(root.handlers):
-                if isinstance(h, logging.StreamHandler) and not isinstance(
-                    h, logging.FileHandler
-                ):
-                    root.removeHandler(h)
-            root.addHandler(handler)
+                if isinstance(h, logging.FileHandler):
+                    if os.path.abspath(h.baseFilename) == target_abs:
+                        h.setFormatter(formatter)
+                        need_add = False
+                    else:
+                        # 不同路径：老 handler 不再适用，回收
+                        try:
+                            h.close()
+                        except Exception:
+                            pass
+                        root.removeHandler(h)
+            if need_add:
+                handler = _build_rotating_file_handler(log_cfg)
+                handler.setFormatter(formatter)
+                # 移除 basicConfig 装的 StreamHandler，避免 stderr + 文件双写
+                for h in list(root.handlers):
+                    if isinstance(h, logging.StreamHandler) and not isinstance(
+                        h, logging.FileHandler
+                    ):
+                        root.removeHandler(h)
+                root.addHandler(handler)
         except Exception as e:
             logging.getLogger("utils").error(
                 "failed to attach file handler at %s: %s; falling back to stderr",
-                file_path, e,
+                log_cfg.get("file"), e,
             )
 
     # 3) 把 formatter 套到所有现存 handler 上（stderr 也好，文件也好）

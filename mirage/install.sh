@@ -64,16 +64,47 @@ ask_choice() {                       # ask_choice "提示" "选项1" "选项2" .
     done
 }
 
-ask_port() {                         # ask_port "提示" "默认"
-    local prompt=$1 default=$2 val
+ask_port() {                         # ask_port "提示" "默认" [tcp|udp|both]
+    local prompt=$1 default=$2 proto=${3:-tcp} val
     while :; do
         val=$(ask "$prompt" "$default")
-        if [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 1 && val <= 65535 )); then
-            echo "$val"
-            return
+        if ! [[ "$val" =~ ^[0-9]+$ ]] || (( val < 1 || val > 65535 )); then
+            warn "端口须为 1-65535 整数。"
+            continue
         fi
-        warn "端口须为 1-65535 整数。"
+        # 占用检测
+        local in_use=""
+        case "$proto" in
+            tcp)  is_port_used "$val" tcp && in_use="TCP" ;;
+            udp)  is_port_used "$val" udp && in_use="UDP" ;;
+            both)
+                is_port_used "$val" tcp && in_use="TCP"
+                is_port_used "$val" udp && in_use="${in_use:+$in_use+}UDP"
+                ;;
+        esac
+        if [[ -n "$in_use" ]]; then
+            warn "端口 $val 已被占用（${in_use}）：$(ss -ltunp 2>/dev/null | awk -v p=":$val\$" '$5 ~ p {print $7; exit}')"
+            if ask_yn "仍要用这个端口（启动可能失败）？" n; then
+                echo "$val"
+                return
+            fi
+            continue
+        fi
+        echo "$val"
+        return
     done
+}
+
+# 检测端口是否被占用。$1=port, $2=tcp|udp
+is_port_used() {
+    local port=$1 proto=$2 flag
+    case "$proto" in
+        tcp) flag="-ltn" ;;
+        udp) flag="-lun" ;;
+        *)   return 1 ;;
+    esac
+    # ss 第 4 列是 Local Address:Port；匹配 [:.]port 结尾
+    ss $flag 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -117,6 +148,7 @@ EFFECTIVE_GEOSITE_DIR=""   # geo 缓存目录（写进 client cfg）
 
 # 由 ask_log_config 设置（cfg.log.format + logrotate 选项）
 LOG_FORMAT="text"
+LOG_LEVEL="INFO"          # 写入 cfg.log_levels.default
 LOGROTATE_ENABLED="no"
 LOGROTATE_MAXSIZE="100M"
 LOGROTATE_KEEP="7"
@@ -301,6 +333,77 @@ PY
     [[ -n "$EXISTING_SERVER_HOST" ]]
 }
 
+# DNS 详细配置：监听地址 / 端口 / 自定义上游
+ask_dns_details() {
+    info "DNS 转发器详细配置"
+    DNS_LISTEN_HOST=$(ask "DNS 监听地址（0.0.0.0 = 允许 LAN 设备查询）" "127.0.0.1")
+    DNS_LISTEN_PORT=$(ask_port "DNS 监听端口（5353 无需 root；53 需 root 或 cap_net_bind_service）" "5353" udp)
+    if ask_yn "自定义上游 DNS 服务器（否则用预设：cn=119.29.29.29 远端=1.1.1.1:53）？" n; then
+        case "$dns_preset" in
+            china_split)
+                DNS_CN=$(ask "国内域名上游（命中 direct 出口时用，纯 UDP）" "119.29.29.29")
+                DNS_REMOTE=$(ask "国外域名上游（host:port / tls://host:853 / https://1.1.1.1/dns-query）" "1.1.1.1:53")
+                ;;
+            full_proxy)
+                DNS_REMOTE=$(ask "上游 DNS（全代理；host:port / tls:// / https://）" "1.1.1.1:53")
+                DNS_CN="$DNS_REMOTE"
+                ;;
+        esac
+    fi
+}
+
+# 自定义高级路由：逐项配置 geo tag 归属
+ROUTE_ADV_RULES=()
+ROUTE_ADV_DEFAULT="proxy"
+ask_route_advanced() {
+    info "高级路由：逐项配置常用 geo tag"
+    info "每项 4 选 1：0=跳过 / 1=direct（直连）/ 2=proxy / 3=block"
+    ROUTE_ADV_RULES=()
+    # 内网总是 direct（必须）
+    ROUTE_ADV_RULES+=('{"ip_cidr": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"], "outbound": "direct"}')
+    info "（内网 / 保留地址已固定 direct，不可关）"
+
+    _ask_rule "广告 (category-ads-all)"          "geosite" "loyalsoldier:category-ads-all"   "3"
+    _ask_rule "国内域名 (geosite:cn)"            "geosite" "loyalsoldier:cn"                  "1"
+    _ask_rule "国内 IP (geoip:cn)"               "geoip"   "loyalsoldier:cn"                  "1"
+    _ask_rule "Apple 中国 (apple-cn)"            "geosite" "loyalsoldier:apple-cn"            "1"
+    _ask_rule "Google 中国 (google-cn)"          "geosite" "loyalsoldier:google-cn"           "1"
+    _ask_rule "Microsoft 中国 (microsoft-cn)"    "geosite" "loyalsoldier:microsoft-cn"        "1"
+    _ask_rule "GFW 黑名单 (geosite:gfw)"         "geosite" "loyalsoldier:gfw"                 "2"
+    _ask_rule "海外位置 (geolocation-!cn)"       "geosite" "loyalsoldier:geolocation-!cn"     "2"
+    _ask_rule "Netflix"                           "geosite" "loyalsoldier:netflix"             "0"
+    _ask_rule "Disney+"                           "geosite" "loyalsoldier:disney"              "0"
+    _ask_rule "YouTube"                           "geosite" "loyalsoldier:youtube"             "0"
+    _ask_rule "OpenAI / ChatGPT"                  "geosite" "loyalsoldier:openai"              "0"
+    _ask_rule "Telegram"                          "geosite" "loyalsoldier:telegram"            "0"
+
+    echo
+    local d
+    d=$(ask "默认出口（未命中规则时；1=direct / 2=proxy）" "2")
+    case "$d" in
+        1) ROUTE_ADV_DEFAULT="direct" ;;
+        *) ROUTE_ADV_DEFAULT="proxy" ;;
+    esac
+    info "已配 $(( ${#ROUTE_ADV_RULES[@]} )) 条规则，默认出口：$ROUTE_ADV_DEFAULT"
+}
+
+# _ask_rule "显示名" "geosite|geoip" "tag" "默认 0-3"
+_ask_rule() {
+    local label=$1 type=$2 tag=$3 default=$4
+    # router 用 sing-box 风格的字段名：rule_set（不是 geosite）
+    local field=$type
+    [[ "$field" == "geosite" ]] && field="rule_set"
+    local v
+    v=$(ask "  ${label}" "$default")
+    case "$v" in
+        0|"") ;;
+        1) ROUTE_ADV_RULES+=("{\"${field}\": [\"${tag}\"], \"outbound\": \"direct\"}") ;;
+        2) ROUTE_ADV_RULES+=("{\"${field}\": [\"${tag}\"], \"outbound\": \"proxy\"}") ;;
+        3) ROUTE_ADV_RULES+=("{\"${field}\": [\"${tag}\"], \"outbound\": \"block\"}") ;;
+        *) warn "无效输入 '$v'，跳过 $label"; ;;
+    esac
+}
+
 ask_log_config() {
     info "日志配置"
     # 格式
@@ -313,6 +416,21 @@ ask_log_config() {
         2) LOG_FORMAT="json" ;;
     esac
     info "已选：${LOG_FORMAT}"
+
+    # 最小级别
+    local lvl_choice
+    lvl_choice=$(ask_choice "最小日志级别（低于此级别的日志被丢弃）" \
+        "INFO     — 关键事件 + 警告 + 错误（推荐）" \
+        "DEBUG    — 包含调试细节（量大；排查问题时用）" \
+        "WARNING  — 仅警告 + 错误" \
+        "ERROR    — 仅错误")
+    case $lvl_choice in
+        1) LOG_LEVEL="INFO" ;;
+        2) LOG_LEVEL="DEBUG" ;;
+        3) LOG_LEVEL="WARNING" ;;
+        4) LOG_LEVEL="ERROR" ;;
+    esac
+    info "已选：${LOG_LEVEL}"
 
     # 进程内文件日志 + 轮转：仅 system 模式默认开（inplace 让日志走 stderr/项目目录）
     if [[ "$INSTALL_MODE" != "system" ]]; then
@@ -350,10 +468,11 @@ _build_log_block() {
         "max_bytes":    ${LOGROTATE_MAXSIZE},
         "backup_count": ${LOGROTATE_KEEP},
         "compress":     ${LOGROTATE_COMPRESS}
-    }
+    },
+    "log_levels": {"default": "${LOG_LEVEL}"}
 JSON
     else
-        echo "\"log\": {\"format\": \"${LOG_FORMAT}\"}"
+        echo "\"log\": {\"format\": \"${LOG_FORMAT}\"}, \"log_levels\": {\"default\": \"${LOG_LEVEL}\"}"
     fi
 }
 
@@ -489,8 +608,9 @@ EOF
 
 write_client_config() {
     local server_host=$1 server_port=$2 password=$3 camouflage=$4
-    local socks5_port=$5 routing_preset=$6 dns_preset=$7 enable_api=$8 api_secret=$9
-    local routing_json dns_extra api_extra
+    local listen_host=$5 socks5_port=$6 routing_preset=$7 dns_preset=$8
+    local tproxy_port=$9 enable_api=${10} api_secret=${11}
+    local routing_json dns_extra api_extra tproxy_extra
 
     case $routing_preset in
         transparent) routing_json='{"default": "proxy", "rules": []}' ;;
@@ -499,32 +619,51 @@ write_client_config() {
             "default": "proxy",
             "rules": [
                 {"ip_cidr": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"], "outbound": "direct"},
-                {"geosite": ["loyalsoldier:cn"], "outbound": "direct"},
-                {"geoip":   ["loyalsoldier:cn"], "outbound": "direct"}
+                {"rule_set": ["loyalsoldier:cn"], "outbound": "direct"},
+                {"geoip":    ["loyalsoldier:cn"], "outbound": "direct"}
             ]
         }'
+            ;;
+        advanced)
+            # 把 ROUTE_ADV_RULES 数组拼成 JSON 数组
+            local rules_inner=""
+            local r
+            for r in "${ROUTE_ADV_RULES[@]}"; do
+                rules_inner+="
+                ${r},"
+            done
+            rules_inner="${rules_inner%,}"   # 去尾逗号
+            routing_json="{
+            \"default\": \"${ROUTE_ADV_DEFAULT}\",
+            \"rules\": [${rules_inner}
+            ]
+        }"
             ;;
         custom) routing_json='{"default": "proxy", "rules": []}' ;;
     esac
 
-    # DNS section（写在顶层老格式字段，与现有 dns_forwarder.py 兼容）
+    # DNS section：使用 ask_dns_details 的值（带兜底默认）
     case $dns_preset in
         off)
             dns_extra=""
             ;;
-        china_split)
+        china_split|full_proxy)
+            local cn_val remote_val
+            if [[ "$dns_preset" == "full_proxy" ]]; then
+                cn_val="${DNS_REMOTE:-1.1.1.1:53}"
+                remote_val="${DNS_REMOTE:-1.1.1.1:53}"
+            else
+                cn_val="${DNS_CN:-119.29.29.29}"
+                remote_val="${DNS_REMOTE:-1.1.1.1:53}"
+            fi
+            # 0.4.41+：所有 DNS 字段挪进 cfg.dns 块（schema_v1 合规）；
+            # listen / cn / remote 由 config.py 自动投射到顶层旧 key
             dns_extra=',
-    "dns_listen_host": "127.0.0.1",
-    "dns_listen_port": 5353,
-    "cn_dns": "119.29.29.29",
-    "remote_dns": "1.1.1.1:53"'
-            ;;
-        full_proxy)
-            dns_extra=',
-    "dns_listen_host": "127.0.0.1",
-    "dns_listen_port": 5353,
-    "cn_dns": "1.1.1.1:53",
-    "remote_dns": "1.1.1.1:53"'
+    "dns": {
+        "listen": "'"${DNS_LISTEN_HOST:-127.0.0.1}"':'"${DNS_LISTEN_PORT:-5353}"'",
+        "cn":     "'"${cn_val}"'",
+        "remote": "'"${remote_val}"'"
+    }'
             ;;
     esac
 
@@ -539,6 +678,13 @@ write_client_config() {
         api_extra=""
     fi
 
+    if (( tproxy_port > 0 )); then
+        tproxy_extra=',
+    "tproxy_port": '"$tproxy_port"
+    else
+        tproxy_extra=""
+    fi
+
     # geosite 缓存目录：system 模式写绝对路径 /var/lib/mirage/geosite；
     # inplace 模式留相对 ".geosite"（相对 systemd WorkingDirectory）
     local geosite_extra=""
@@ -547,13 +693,25 @@ write_client_config() {
     \"geosite_dir\": \"${EFFECTIVE_GEOSITE_DIR}\""
     fi
 
+    # geosite/geoip 下载源：没有这两个字段 ensure_all() 就不会下任何文件，
+    # rule_set / geoip 规则会被 router skip。loyalsoldier 同时提供 site + ip
+    local geo_sources_extra=',
+    "geosite_sources": [
+        {"name": "loyalsoldier",
+         "url":  "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"}
+    ],
+    "geoip_sources": [
+        {"name": "loyalsoldier",
+         "url":  "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"}
+    ]'
+
     mkdir -p "$EFFECTIVE_ETC"
     local path="$EFFECTIVE_ETC/config_client.json"
     cat > "$path" <<EOF
 {
     "schema_version": 1,
     "inbounds": [
-        {"type": "mixed", "listen": "127.0.0.1:${socks5_port}"}
+        {"type": "mixed", "listen": "${listen_host}:${socks5_port}"}
     ],
     "outbounds": [
         {
@@ -568,7 +726,7 @@ write_client_config() {
         {"tag": "block",  "type": "block"}
     ],
     "route": ${routing_json},
-    $(_build_log_block "client")${dns_extra}${api_extra}${geosite_extra}
+    $(_build_log_block "client")${dns_extra}${api_extra}${tproxy_extra}${geosite_extra}${geo_sources_extra}
 }
 EOF
     chmod 600 "$path"
@@ -916,14 +1074,23 @@ $(_c 36 "或者直接把下面的 config_client.json 模板拷到客户端（含
         "default": "proxy",
         "rules": [
             {"ip_cidr": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"], "outbound": "direct"},
-            {"geosite": ["loyalsoldier:cn"], "outbound": "direct"},
-            {"geoip":   ["loyalsoldier:cn"], "outbound": "direct"}
+            {"rule_set": ["loyalsoldier:cn"], "outbound": "direct"},
+            {"geoip":    ["loyalsoldier:cn"], "outbound": "direct"}
         ]
     },
-    "dns_listen_host": "127.0.0.1",
-    "dns_listen_port": 5353,
-    "cn_dns": "119.29.29.29",
-    "remote_dns": "1.1.1.1:53"
+    "dns": {
+        "listen": "127.0.0.1:5353",
+        "cn":     "119.29.29.29",
+        "remote": "1.1.1.1:53"
+    },
+    "geosite_sources": [
+        {"name": "loyalsoldier",
+         "url":  "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"}
+    ],
+    "geoip_sources": [
+        {"name": "loyalsoldier",
+         "url":  "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"}
+    ]
 }
 
 $(_c 36 "传到客户端建议用 scp（更安全），不要明文走 IM：")
@@ -993,6 +1160,7 @@ install_client() {
         fi
     fi
 
+    local local_listen_host="0.0.0.0"     # 默认 LAN 共用；用户可改 127.0.0.1
     if [[ "$existing_loaded" != "yes" ]]; then
         server_host=$(ask "服务端地址（IP 或域名）" "")
         [[ -z "$server_host" ]] && err "服务端地址不能为空"
@@ -1000,7 +1168,8 @@ install_client() {
         password=$(ask "密码（与服务端一致）")
         [[ -z "$password" ]] && err "密码不能为空"
         camouflage=$(ask "伪装 SNI（与服务端一致）" "www.apple.com")
-        socks5_port=$(ask_port "本地监听端口（mixed = SOCKS5 + HTTP 同口）" "7890")
+        local_listen_host=$(ask "本地监听地址（0.0.0.0 = LAN 设备共用；127.0.0.1 = 仅本机）" "0.0.0.0")
+        socks5_port=$(ask_port "本地监听端口（mixed = SOCKS5 + HTTP 同口）" "7890" tcp)
     fi
 
     # ── 路由模板 ──
@@ -1010,11 +1179,13 @@ install_client() {
     choice=$(ask_choice "选择" \
         "国内外分流（推荐）：geosite:cn / 内网 → 直连，其余走代理" \
         "全代理：所有流量走 proxy 出口" \
-        "自定义：生成空 rules 数组，安装后自己编辑")
+        "自定义高级：逐项配置 geo tag（广告/CN/GFW/流媒体等）" \
+        "空规则：default=proxy + 空 rules，安装后自己编辑")
     case $choice in
         1) routing_preset="china_split" ;;
         2) routing_preset="transparent" ;;
-        3) routing_preset="custom" ;;
+        3) routing_preset="advanced"; ask_route_advanced ;;
+        4) routing_preset="custom" ;;
     esac
 
     # ── DNS 方案 ──
@@ -1023,7 +1194,6 @@ install_client() {
     info "  默认推荐：国内域名查 119.29.29.29 直连（快）；其余走 VPS 转发到 1.1.1.1（防污染）"
     local dns_preset
     if [[ "$routing_preset" == "transparent" ]]; then
-        # 全代理路由下 DNS 也无脑全代理（geosite 规则用不上）
         choice=$(ask_choice "选择" \
             "全代理：所有 DNS 走 proxy 隧道到 1.1.1.1（推荐）" \
             "不启用 DNS forwarder（系统继续用 /etc/resolv.conf）")
@@ -1038,6 +1208,23 @@ install_client() {
             2) dns_preset="full_proxy" ;;
             3) dns_preset="off" ;;
         esac
+    fi
+    # DNS 详细配置（监听地址 / 端口 / 自定义上游）
+    DNS_LISTEN_HOST="127.0.0.1"
+    DNS_LISTEN_PORT="5353"
+    DNS_CN="119.29.29.29"
+    DNS_REMOTE="1.1.1.1:53"
+    if [[ "$dns_preset" != "off" ]]; then
+        ask_dns_details
+    fi
+
+    # ── TProxy 透明代理 ──
+    echo
+    info "TProxy 透明代理（可选；需要额外 iptables 配置，详见 README）"
+    local tproxy_port=0
+    if ask_yn "启用 TProxy？" n; then
+        tproxy_port=$(ask_port "TProxy 监听端口（TCP）" "1081" tcp)
+        warn "需手配 iptables TPROXY 规则。模板见 README『TProxy 防火墙规则』一节"
     fi
 
     # ── Clash API ──
@@ -1056,19 +1243,22 @@ install_client() {
     install_system_files
     install_shim_scripts "client"
     write_client_config "$server_host" "$server_port" "$password" "$camouflage" \
-                        "$socks5_port" "$routing_preset" "$dns_preset" \
-                        "$enable_api" "$api_secret"
+                        "$local_listen_host" "$socks5_port" "$routing_preset" "$dns_preset" \
+                        "$tproxy_port" "$enable_api" "$api_secret"
 
     install_service_unit "client"
 
     # 末尾提示
     title "客户端安装完成"
     cat <<EOF
-$(_c 32 "✓ Mixed") 已监听 127.0.0.1:${socks5_port}（SOCKS5 + HTTP 同口）
+$(_c 32 "✓ Mixed") 已监听 ${local_listen_host}:${socks5_port}（SOCKS5 + HTTP 同口）
 EOF
     if [[ "$dns_preset" != "off" ]]; then
-        echo "$(_c 32 "✓ DNS")    forwarder 监听 127.0.0.1:5353"
-        echo "    将系统 DNS 改成 127.0.0.1（或用 iptables 重定向 53→5353）"
+        echo "$(_c 32 "✓ DNS")    forwarder 监听 ${DNS_LISTEN_HOST}:${DNS_LISTEN_PORT}"
+        echo "    将系统 DNS 改成 ${DNS_LISTEN_HOST}（或用 iptables 重定向 53→${DNS_LISTEN_PORT}）"
+    fi
+    if (( tproxy_port > 0 )); then
+        echo "$(_c 32 "✓ TProxy") 监听 0.0.0.0:${tproxy_port}（需手配 iptables TPROXY 规则）"
     fi
     if [[ "$enable_api" == "yes" ]]; then
         echo "$(_c 32 "✓ Clash API") 监听 127.0.0.1:9090"
