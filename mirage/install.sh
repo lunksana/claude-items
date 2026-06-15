@@ -8,9 +8,14 @@
 #   - 选择安装类型（服务端 / 客户端 / 两端）
 #   - 服务端：监听端口、密码、伪装 SNI、Brutal 内核模块、systemd unit；
 #            末尾自动打印对应客户端配置模板
-#   - 客户端：服务端地址、密码、SNI、SOCKS5 端口、
+#   - 客户端：服务端地址、密码、SNI、SOCKS5/mixed 端口、监听地址（LAN 共用）、
 #            **DNS 方案**（默认国内 119.29.29.29 直连，国外走 VPS 转发 1.1.1.1）、
-#            **路由模板**（默认国内外分流）、Clash API、systemd unit
+#            **路由模板**（国内外分流 / 全代理 / 逐项 geo tag 高级 / 空规则）、
+#            可选 TProxy、Clash API、systemd/OpenRC/SysV unit
+#
+# 本向导生成**单节点**客户端配置（一个 mirage 出口）。多节点 + urltest /
+# fallback / selector 选路组、多字段 AND 规则等高级用法需手动编辑配置，
+# 详见 README.md「多节点与自适应选路」「分流规则」两节与 config_client.example.jsonc。
 #
 # 单一安装入口；旧 setup.py 已淘汰。
 set -euo pipefail
@@ -1291,6 +1296,13 @@ CLI shim（在 PATH 里）：
   mirage-client /path/to/other.json        # 指定 cfg
 EOF
     fi
+    cat <<EOF
+
+进阶（手动编辑 ${EFFECTIVE_ETC}/config_client.json，改完热加载即可）：
+  - 多节点 + urltest / fallback / selector 选路组
+  - 多字段 AND 规则（"mode": "and"）
+  详见 README.md「多节点与自适应选路」「分流规则」与 config_client.example.jsonc
+EOF
 }
 
 # ──────────────────────────────────────────────────────────────────────────────

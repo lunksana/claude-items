@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import resource
 from typing import Optional
 
 from .http_proto import Request
@@ -156,7 +157,6 @@ def _rss_bytes() -> int:
     try:
         with open("/proc/self/statm") as f:
             pages = int(f.read().split()[1])
-        import resource
         return pages * resource.getpagesize()
     except Exception:
         return 0

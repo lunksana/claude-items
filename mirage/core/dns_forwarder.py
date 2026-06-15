@@ -92,6 +92,52 @@ def _nxdomain(query: bytes) -> bytes:
 
 # ── 查询后端 ───────────────────────────────────────────────────────────────────
 
+def _parse_udp_addr(s: str, default_port: int = 53) -> tuple[str, int]:
+    """
+    解析 cn_dns 这种 "纯 UDP 上游" 地址，返回 (host, port)。
+
+    支持：
+      "223.5.5.5"            → ("223.5.5.5", 53)
+      "223.5.5.5:5353"       → ("223.5.5.5", 5353)
+      "[2400:3200::1]:53"    → ("2400:3200::1", 53)
+      "2400:3200::1"         → ("2400:3200::1", 53)   裸 v6（无端口）
+
+    防御：full_proxy preset 会把 cn 设成 remote 值，可能带 scheme（tls:// /
+    https://）。cn 路径只做明文 UDP，遇到 scheme 就剥掉只取 host[:port]，避免把
+    "tls://1.1.1.1:853" 整串当主机名解析失败。
+    """
+    s = s.strip()
+    for scheme in ("tls://", "https://", "udp://", "tcp://"):
+        if s.startswith(scheme):
+            s = s[len(scheme):]
+            # https:// 可能带 path（/dns-query），UDP 用不上，切掉
+            s = s.split("/", 1)[0]
+            break
+    # [v6]:port
+    if s.startswith("["):
+        end = s.find("]")
+        if end != -1:
+            host = s[1:end]
+            rest = s[end + 1:]
+            if rest.startswith(":"):
+                try:
+                    return host, int(rest[1:])
+                except ValueError:
+                    pass
+            return host, default_port
+    # 裸 v6（多个冒号且无方括号）→ 无端口
+    if s.count(":") >= 2:
+        return s, default_port
+    # host[:port]
+    if ":" in s:
+        host, _, port_s = s.rpartition(":")
+        try:
+            return host, int(port_s)
+        except ValueError:
+            return s, default_port
+    return s, default_port
+
+
 async def _udp_query(data: bytes, host: str, port: int = 53) -> bytes:
     """向国内 DNS 发送 UDP 查询"""
     loop = asyncio.get_event_loop()
@@ -243,8 +289,9 @@ class DNSForwarder:
                 logger.debug("DNS block   %s  [%s]", domain, source)
                 return _nxdomain(data)
             if leaf.type == "direct":
-                logger.debug("DNS direct  %s -> %s  [%s]", domain, self._cn_dns, source)
-                resp = await _udp_query(data, self._cn_dns)
+                cn_host, cn_port = _parse_udp_addr(self._cn_dns)
+                logger.debug("DNS direct  %s -> %s:%d  [%s]", domain, cn_host, cn_port, source)
+                resp = await _udp_query(data, cn_host, cn_port)
             elif isinstance(leaf, MirageOutbound):
                 logger.debug("DNS via %-12s %s -> %s  [%s]",
                              leaf.tag, domain, self._remote_dns, source)

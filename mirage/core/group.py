@@ -104,3 +104,56 @@ class FallbackGroup(_GroupBase):
                 return c.resolve_leaf()
         # 全部 unhealthy：回退到首个（避免无路可走，让端到端层报真实错误）
         return self._children[0].resolve_leaf() if self._children else self
+
+
+class SelectorGroup(_GroupBase):
+    """
+    手动选节点组（Clash Selector 语义）。
+
+    与 urltest/fallback 的自动选路不同：用户通过 Clash API `PUT /proxies/{tag}`
+    显式指定走哪个 child，选择保持不变直到下次手动切换。常见用法：把组设为
+    route.default，UI 上一键在节点间切换。
+
+    - select(tag)：切到指定 child（必须是直接 child），返回是否成功。
+    - is_healthy：反映**当前选中** child 的健康（而非任一）——手动选了某节点就
+      认它，不因别的节点健康而"假装可用"。
+    - 选择是内存态：配置热加载会重建组、选择回到 default（与 Clash 持久化到
+      文件不同；POC 阶段从简）。
+
+    selected 失效（reload 删了该 child）时 resolve 回退首个 child。
+    """
+    type = "selector"
+
+    def __init__(self, tag: str, children: list[Outbound], default: Optional[str] = None):
+        super().__init__(tag, children)
+        child_tags = [c.tag for c in children]
+        if default is not None and default in child_tags:
+            self._selected = default
+        else:
+            self._selected = child_tags[0] if child_tags else None
+
+    @property
+    def selected(self) -> Optional[str]:
+        return self._selected
+
+    def select(self, tag: str) -> bool:
+        if any(c.tag == tag for c in self._children):
+            if tag != self._selected:
+                logger.info("[%s] selector switch %s -> %s", self.tag, self._selected, tag)
+            self._selected = tag
+            return True
+        return False
+
+    @property
+    def is_healthy(self) -> bool:
+        for c in self._children:
+            if c.tag == self._selected:
+                return c.is_healthy
+        return super().is_healthy
+
+    def resolve_leaf(self) -> Outbound:
+        for c in self._children:
+            if c.tag == self._selected:
+                return c.resolve_leaf()
+        # selected 失效（reload 删了该 child）→ 回退首个
+        return self._children[0].resolve_leaf() if self._children else self

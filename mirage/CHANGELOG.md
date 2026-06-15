@@ -17,6 +17,298 @@
 
 ---
 
+## [0.4.44] - 2026-06-15
+
+### 新增 / Selector 手动选节点
+
+新增 `selector` 出口组类型（Clash Selector 语义），与自动选路的 urltest /
+fallback 并列：
+
+```json
+{"tag": "pick", "type": "selector",
+ "outbounds": ["auto", "node-jp-1", "node-us-1"], "default": "auto"}
+```
+
+- 通过 Clash API `PUT /proxies/pick`（body `{"name": "node-us-1"}`）手动切换，
+  保持到下次手动切。非成员返回 400。`PUT /proxies/{name}` 不再是纯 no-op——
+  目标是 selector 时真正切换，其它组仍 no-op。
+- child 可以是叶子，也可以是组（把 `auto`(urltest) 列进来 → 在"自动选最快"
+  和"手动指定"之间一键切）。`default` 指定初始选择（缺省首个 child）。
+- `is_healthy` 跟随**当前选中** child（手动选了就认它，不因别的节点健康而假装
+  可用）；selected 失效（reload 删了 child）时 resolve 回退首个。
+- `/proxies` 把 selector 报成 Clash `Selector` 类型，`now` = 当前选中。
+- **选择是内存态**：热加载重建组后回到 default（不持久化到文件；POC 从简）。
+
+实现：`SelectorGroup`（core/group.py）+ build_outbounds 接线 + Clash API
+`_proxy_select` / `_outbound_to_clash`。
+
+### 新增 / 路由规则多字段匹配：默认 OR + 显式 AND
+
+之前多字段会被当非法跳过。现在支持，且语义为：
+
+- **多 criterion 默认 = OR**：任一字段命中即命中（等价于拆成多条指向同一
+  outbound 的独立规则）。某字段空 geo 展开为空 → 该字段跳过，其余仍生效。
+  ```json
+  // 属 geosite:google 或 解析 IP 属 geoip:us，任一满足走 us-node
+  {"rule_set": ["geosite:google"], "geoip": ["us"], "outbound": "us-node"}
+  ```
+- **显式 `"mode": "and"` → AND 复合**：全部字段都满足才命中（字段内仍 OR、字段
+  间 AND）。某字段空 geo 展开为空 → 整条 AND 跳过（不半命中）。缺省 `mode="or"`，
+  非法值告警并退回 `or`。
+  ```json
+  {"rule_set": ["geosite:google"], "geoip": ["us"], "mode": "and", "outbound": "us-node"}
+  ```
+
+> 与 sing-box 不同：sing-box 多字段默认 AND；Mirage 默认 OR 更贴近"把相关条件
+> 并到一条规则"的直觉，需要 AND 时显式 `"mode": "and"`。
+
+实现：`_apply_structured_rules` 按 `entry.get("mode")` 分流——默认 / `"or"` 把每个
+字段独立展开成规则；`"and"` 时合成 `_AndRule` 复合规则（`_groups[i]` 是第 i 个
+字段的 OR 子组，全部 group 至少一条命中才算命中，复合层统一处理 invert）。
+
+### 测试
+
+新增 Selector + 多字段匹配覆盖：
+
+```
+tests/test_selector.py       10 项  SelectorGroup 默认/切换/健康跟随/失效回退/
+                                    build_outbounds/嵌套组
+tests/test_router.py         +多字段 默认 OR、mode=and 复合、非法 mode 退回 or、
+                                    空 geo 行为
+tests/test_api_endpoints.py  +PUT   selector 真切换/非法 child 400/非 selector no-op/
+                                    /proxies 报 Selector 类型
+```
+
+**测试总数 167**（`python3 -m unittest discover -s tests` 的权威计数；按模块：
+router 24 / config 11 / udp_relay 17 / api_endpoints 30 / ws_endpoints 9 /
+dns_forwarder 23 / install_config 8 / hello_auth 23 / tunnel 12 / selector 10）。
+
+---
+
+## [0.4.43] - 2026-06-14
+
+### 修复（自审第二轮）
+
+#### B9: 服务端 schema 验证脱节——admin / egress / runtime tunables 被误报"unknown ignored"
+
+**根因**：`_V1_TOP_KEYS` 白名单当初只为 client 设计，从未与 server.py 实际读
+取的 16 个顶层键对齐。后果：
+
+```
+config: unknown top-level keys ignored: ['admin_host', 'admin_port', 'admin_token',
+        'egress_rules', 'egresses', 'access_log', 'idle_timeout_sec', ...]
+```
+
+文案与真相相反——server.py 下一秒就读它们。误导用户以为 admin 没生效。
+
+**修法**：把白名单拆成命名上区分的两组，合并使用：
+
+```python
+_V1_CLIENT_TOP_KEYS = { schema_version, log, inbounds, outbounds, route, dns,
+                        api, tuning, geosite_dir, tproxy_port, geosite_sources,
+                        geoip_sources, geosite_update_days, rules, default,
+                        final, geo_refresh_check_sec, ... }
+_V1_SERVER_TOP_KEYS = { listen_host, listen_port, password, camouflage_host,
+                        camouflage_port, admin_host, admin_port, admin_token,
+                        egresses, egress_rules, access_log, idle_timeout_sec,
+                        max_conns_per_ip, tcp_keepalive, drain_threshold }
+_V1_TOP_KEYS = _V1_CLIENT_TOP_KEYS | _V1_SERVER_TOP_KEYS
+```
+
+设计取舍：load_config 不知道当前在 client 还是 server 进程，合并白名单代价
+是 client 写 server 字段不告警（typo 防护被弱化），收益是消除虚假告警。typo
+防护本来就靠 `_validate_*` 而非白名单，可接受。
+
+#### 顺手暴露的:顶层 rules 模式
+
+router.py 第 884 行 `cfg.get("default") or cfg.get("final")` 是顶层 rules
+模式（罕见，主要给 server 的 egress_rules 复用 build_router），但
+`rules`/`default`/`final` 这三个顶层键也从未在白名单。同步补上。
+
+### 新增 / 测试基础设施
+
+#### 单元测试套件（stdlib unittest，无第三方依赖）
+
+新增 **37 个测试**，覆盖会话内修过的回归点 + 元测试：
+
+```
+tests/test_router.py       14 项  路由解析、default/final/legacy 优先级、
+                                  空 geo 存活、rule_set→GEOSITE 映射、Clash 视图
+tests/test_config.py       11 项  schema 白名单、dns 投影、deprecation 提示、
+                                  server schema (B9)、schema-代码契约元测试
+tests/test_udp_relay.py    17 项  UDP 帧编解码 round-trip、SOCKS5 UDP 头
+                                  v4/v6/domain、畸形输入安全、IP helper
+tests/smoke_e2e.py         端到端冒烟（联网时跑：真起 server+client+隧道）
+```
+
+入口脚本 `tests/run_tests.sh`（`--smoke` 跑 e2e）。
+
+补充（同版本继续补 API / WS 覆盖）：
+
+```
+tests/test_api_endpoints.py  25 项  /proxies GLOBAL 合成(排除 block)、
+                                    DIRECT/REJECT alias、/delay、PUT no-op、
+                                    /connections memory、/configs log-level、
+                                    /rules FINAL、密码脱敏、CORS(B8 回显 Origin+Vary)
+tests/test_ws_endpoints.py    9 项  LogBroadcaster level=DEBUG(B5)、广播
+                                    subscribe/emit/unsubscribe、队列满丢老、
+                                    _rss_bytes 非负
+```
+
+API/WS handler 直接以 mock Request + APIContext 调用断言 Response，不起真
+TCP server——快、稳、无端口冲突。
+
+DNS 转发器（处理不可信网络输入，最易藏 bug）：
+
+```
+tests/test_dns_forwarder.py  23 项  _extract_domain(QNAME 提取/畸形/截断/
+                                    指针压缩防御)、_question_end、_nxdomain
+                                    (QR/RCODE/计数清零/剥尾)、_parse_udp_addr
+```
+
+install.sh 配置生成自动校验（1000+ 行 bash 过去只人工抽查，踩过多次字段名回归）：
+
+```
+tests/test_install_config.py  8 项  source install.sh 的 write_client_config /
+                                    write_server_config，各种 routing×dns×tproxy×api
+                                    组合 → load_config 验证产物干净加载（无
+                                    ConfigError / 无 unknown 告警）。含 B4(rule_set
+                                    非 geosite)、B3(dns 块)、route.default 指向真实
+                                    outbound 的断言 + 3×3 路由/DNS 矩阵
+```
+
+机制：strip install.sh 末行 `main "$@"` → source 出生成函数 → 设好 EFFECTIVE_*/
+DNS_*/ROUTE_ADV_* 环境 → 调 writer → Python 侧 load_config 校验。**mutation 测试
+验证有效**：把 install.sh 的 `rule_set` 改回 `geosite`（B4 回归），守护测试精确
+失败在 `assertIn("rule_set")`。
+
+**测试总数 101**。
+
+隧道核心（协议正确性 + 安全性最关键、回归后果最严重）：
+
+```
+tests/test_hello_auth.py  23 项  握手认证 + 防重放：token round-trip、错密码/
+                                 过期/篡改/短 token 全拒、anti-fingerprint(同秒
+                                 token+tag 不同)、TokenReplayCache 首次/重放、
+                                 临界 2T 重放窗口必中(3-bucket 修复回归)、
+                                 ClientHello 解析。用 set_time_provider 注入可控
+                                 时钟做确定性时间测试
+tests/test_tunnel.py      12 项  EncryptedTunnel 真 ChaCha20-Poly1305 往返
+                                 (socketpair 本地连接对)：单向/双向、>16KB 跨
+                                 record 重组、方向独立密钥、错密码 AEAD 失败、
+                                 close_notify→EOFError、HKDF 派生确定性
+```
+
+**测试总数 136**，覆盖 router/config/udp_relay/api/ws/dns/install.sh/hello_auth/
+tunnel 九大模块 + 数据路径冒烟 + schema-代码契约元测试。
+
+#### B10: cn_dns 的 direct 路径不解析端口（DNS 上游地址不对称）
+
+`direct` 出口的 DNS 走 `_udp_query(data, self._cn_dns)`，写死 port 53，**不解析
+`cn_dns` 里的端口**。但 remote 侧（`make_upstream`）支持 host:port / tls:// /
+https://。更具体：install.sh `full_proxy` preset 里 `DNS_CN="$DNS_REMOTE"`，
+cn 会继承到 `1.1.1.1:53` 甚至 `tls://1.1.1.1:853`——一旦 direct 路径被命中，
+`create_datagram_endpoint(remote_addr=("1.1.1.1:53", 53))` 直接失败。
+
+**修法**：新增 `_parse_udp_addr(s, default_port=53)`，direct 路径先解析再查。
+支持裸 v4/v6、`host:port`、`[v6]:port`；防御性剥离 scheme（cn 路径只做明文
+UDP，遇 `tls://`/`https://` 剥掉只取 host[:port]）。23 个解析测试覆盖含 scheme
+剥离。
+
+#### 元测试: schema-代码契约自动检查
+
+`TestSchemaCodeContract` 扫 server.py / client.py 等真实读的 `cfg.get("foo")`
+字面量，与白名单做差集——**任何人加新顶层字段而忘了声明，下次跑测试就报**。
+B9 这类回归从此被堵死。
+
+#### 修 run_test.sh / run_test_v2.sh 失效 grep
+
+两脚本一直 grep `"SOCKS5 listening"` 等待 client 就绪。我们早改成 mixed 入口
+（日志 `"MIXED listening"`），脚本超时 15s 然后盲目继续。改成
+`grep -qiE "MIXED listening|SOCKS5 listening|listening on"`。
+
+#### 测试间串扰修复
+
+写测试本身又抓到 bug：`test_router.py` 早期用 `logging.disable(WARNING)` 静
+音 router 构建告警，但这是**进程级全局开关**——合跑时串掉了 `test_config.py`
+的告警捕获。改成 `logging.getLogger("router").setLevel(ERROR)` 局部抑制。
+单跑/合跑/反序/discover 四种调用方式全过。
+
+---
+
+## [0.4.42] - 2026-06-13
+
+### 修复（代码审计发现）
+
+#### B6: `route.default` 被完全忽略（严重）
+
+`build_router` 只读 `route.final`，但 install.sh、示例配置、文档**全部**用
+`route.default`。这个键从路由引擎角度是死键：既不被读取，也不被 config 校验。
+
+实际后果分级：
+
+- install.sh "自定义高级"路由用户选「默认出口 = direct」→ **被忽略**，未命中
+  规则的流量实际走 `proxy`（`_legacy_action_map` 恒把 PROXY 映射成 `"proxy"`，
+  `initial_default` 永远是 `"proxy"`）。
+- 示例配置 `"default": "auto"`（无 `proxy` tag）→ 忽略后 fallback 到 `"proxy"`，
+  而该 tag 不存在 → 校验告警 + **所有未命中流量被 dispatch 拒绝**。
+- yacd `/rules` 末尾的 Match 行显示的也是错的默认出口。
+
+**修法**：`build_router` 兜底出口键优先读 `default`（公开 API），回退 `final`
+（sing-box 别名），都没填才用 `initial_default`。route-block 和顶层 rules 两条
+路径都修。`reload.py` 注释早就声称支持 `route.default / route.final`，这次把读
+取真正补上。
+
+验证：
+
+```
+default=direct (legacy_map 有 proxy 映射) → router.default = direct   (修复前: proxy)
+default=auto   (示例配置, 无 proxy tag)   → router.default = auto     (修复前: proxy→全拒)
+仅 final=direct                            → router.default = direct
+都没填                                      → router.default = proxy    (回退 legacy)
+```
+
+#### B7: 首次运行 geo 下载阻塞入站监听 + 失败不可恢复（高）
+
+旧流程在入站监听器启动**之前** `await geo_ensure_all(...)`，且 reload 不重下
+geo。后果：
+
+- 首次运行时 SOCKS5/mixed 端口在 geo（数 MB 的两个 .dat，慢网最长 180s）下载
+  完成前根本不 listen，浏览器连不上，看着像卡死。
+- 首次下载失败（服务端没起/GitHub 不可达）→ 所有 `rule_set`/`geoip` 规则永久
+  skip，SIGHUP 和 `PUT /configs` 都救不回来，只能整进程重启。
+
+**修法**：
+
+1. router 先用空 geo 立即构建 → 入站监听不再等下载，`domain`/`ip_cidr` 规则
+   首启即生效。
+2. geo 下载丢后台任务，完成后用现成的 `RouterRef.replace()` 原子换 router，
+   并清决策缓存（`routing_cache` / `dns_cache` invalidate）。`rule_set`/`geoip`
+   规则在 geo 到位后自动补上。
+3. 同一后台任务带**周期刷新**（默认 48h 复查，可用 `geo_refresh_check_sec`
+   覆盖）：解决旧设计「只在启动下一次、长跑进程 geo 永远停在首次快照」。
+   `ensure_all` 内部按 `geosite_update_days` 决定是否真重下，缓存新鲜时只
+   stat + 返回旧路径，刷新 tick 开销极小。
+4. 空下载结果不覆盖现有 router（避免一次失败把已有规则清掉）。
+5. `reloader.available_site/ip` 在每次成功刷新后同步，SIGHUP 重建也能用上新
+   geo。
+
+#### B8: CORS `Allow-Origin: *` + `Allow-Credentials: true` 违反规范（中）
+
+Fetch 规范禁止这组合，浏览器会拒掉响应。install.sh 默认就写 `cors:["*"]`。
+Clash 面板多数用 Bearer header（不带 cookie）所以常不触发，但任何用
+`credentials:'include'` 的面板会静默失败。
+
+**修法**：`_inject_cors` 始终回显具体请求 Origin（而非字面 `*`），配
+`Vary: Origin` 防缓存串味——这样 `Allow-Credentials: true` 才合规。
+`_cors_allow_for`（返回 `*`/origin）简化为 `_cors_allows`（返回 bool）。
+
+#### 小优化
+
+- `_rss_bytes` 的 `import resource` 提到模块顶（原来每次 1Hz 调用都 import）。
+
+---
+
 ## [0.4.41] - 2026-06-13
 
 ### 自审纰漏（同版本内修）
@@ -2773,7 +3065,10 @@ sniffer / router 等）。除上面 3 处，**未发现其它真问题**：
 
 更早的历史在 git log 里；从 `0.3.0` 起按本规范打 tag。
 
-[未发布]: https://github.com/<你的仓库>/compare/v0.4.41...HEAD
+[未发布]: https://github.com/<你的仓库>/compare/v0.4.44...HEAD
+[0.4.44]: https://github.com/<你的仓库>/releases/tag/v0.4.44
+[0.4.43]: https://github.com/<你的仓库>/releases/tag/v0.4.43
+[0.4.42]: https://github.com/<你的仓库>/releases/tag/v0.4.42
 [0.4.41]: https://github.com/<你的仓库>/releases/tag/v0.4.41
 [0.4.40]: https://github.com/<你的仓库>/releases/tag/v0.4.40
 [0.4.39]: https://github.com/<你的仓库>/releases/tag/v0.4.39

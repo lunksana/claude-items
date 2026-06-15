@@ -358,7 +358,7 @@ def build_outbounds(cfg: dict) -> dict[str, Outbound]:
     组节点的拓扑通过 fixpoint 循环解析，循环引用会停留在 pending 集合
     被显式 raise（无需额外的环检测代码）。
     """
-    from .group import UrlTestGroup, FallbackGroup
+    from .group import UrlTestGroup, FallbackGroup, SelectorGroup
 
     raw_list = cfg.get("outbounds")
     if not raw_list:
@@ -396,7 +396,7 @@ def build_outbounds(cfg: dict) -> dict[str, Outbound]:
             out[tag] = DirectOutbound(tag)
         elif otype == "block":
             out[tag] = BlockOutbound(tag)
-        elif otype in ("urltest", "fallback"):
+        elif otype in ("urltest", "fallback", "selector"):
             deferred.append(item)
         else:
             raise ValueError(f"unknown outbound type '{otype}' for tag '{tag}'")
@@ -428,6 +428,8 @@ def build_outbounds(cfg: dict) -> dict[str, Outbound]:
             if otype == "urltest":
                 tolerance = int(item.get("tolerance", 50))
                 out[tag] = UrlTestGroup(tag, children, tolerance_ms=tolerance)
+            elif otype == "selector":
+                out[tag] = SelectorGroup(tag, children, default=item.get("default"))
             else:
                 out[tag] = FallbackGroup(tag, children)
             logger.info("Group '%s' (%s) → %s", tag, otype, child_tags)

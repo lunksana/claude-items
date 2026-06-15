@@ -75,22 +75,44 @@
             "sni":         "www.apple.com"
         },
 
-        // urltest 组：在 children 里选 median latency 最低的
-        // tolerance 防抖：current vs best 差 < 50ms 时保持 current，避免频繁切换
+        // urltest 组：自动在 outbounds 列表里选 median latency 最低的叶子
+        //   - tolerance（毫秒）防抖：current 与 best 差 < tolerance 时保持
+        //     current 不切换，避免 TCP 长连接被频繁打断。默认 50。
+        //   - 延迟样本由全局 healthcheck（core/healthcheck.py，默认 60s 一
+        //     轮，stale=300s）采集；组本身没有独立 interval / url 字段，配
+        //     置写了也会被忽略。
+        //   - is_healthy 是 OR：任一 child 可用 → 组可用。
         {
             "tag":       "auto",
             "type":      "urltest",
             "outbounds": ["node-jp-1", "node-us-1"],
-            "interval":  "60s",
             "tolerance": 50
         },
 
-        // fallback 组：按声明顺序选第一个 healthy（手动指定优先级）
+        // fallback 组：按声明顺序选第一个 is_healthy=True 的叶子（手动指定
+        // 优先级）。全部 unhealthy 时回退到首个让端到端层报真实错误，避免
+        // 无路可走默默 block。
         {
             "tag":       "us-only",
             "type":      "fallback",
             "outbounds": ["node-us-1"]
         },
+
+        // selector 组：手动选节点。通过 Clash API PUT /proxies/pick（body
+        // {"name":"node-us-1"}）切换，保持到下次手动切。child 可以是叶子也可以
+        // 是组——把 "auto"(urltest) 也列进来，就能在"自动选最快"和"手动指定节点"
+        // 之间一键切。default 指定初始选择（缺省首个 child）。
+        //   注意：选择是内存态，热加载后回到 default（不持久化）。
+        {
+            "tag":       "pick",
+            "type":      "selector",
+            "outbounds": ["auto", "node-jp-1", "node-us-1"],
+            "default":   "auto"
+        },
+
+        // 组节点可嵌套：children 写另一个组的 tag，resolve_leaf() 自动递归
+        // 展开到真叶子。比如：urltest(jp+us) → fallback(auto, backup-singapore)
+        // 让 auto 不可用时整体切到新加坡备用。
 
         // direct / block 即使不显式声明也会自动补全，这里写出来便于规则引用
         {"tag": "direct", "type": "direct"},
@@ -126,7 +148,17 @@
                           "loyalsoldier:disney",
                           "loyalsoldier:openai"],            "outbound": "us-only"}
 
-            // ── rules 还支持的字段（每条 rule 只允许一种 criterion，禁多字段 AND）：
+            // ── 多字段默认 = OR（任一命中即命中，等价拆成多条独立规则）：
+            //   // 属 geosite:google 或 解析 IP 属 geoip:us，任一满足走 us-only
+            //   {"rule_set": ["loyalsoldier:google"], "geoip": ["loyalsoldier:us"],
+            //    "outbound": "us-only"}
+            //
+            // ── 显式 "mode": "and" → 全部字段都满足才命中（字段内仍 OR）：
+            //   {"rule_set": ["loyalsoldier:google"], "geoip": ["loyalsoldier:us"],
+            //    "mode": "and", "outbound": "us-only"}
+            //   缺省 mode = "or"；AND 下某字段空 geo 展开为空 → 整条跳过（不半命中）。
+            //
+            // ── rules 还支持的字段（单 criterion 数组 = OR）：
             //
             // 精确域名：
             //   {"domain": ["example.com", "www.example.com"], "outbound": "..."}

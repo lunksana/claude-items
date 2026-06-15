@@ -136,14 +136,36 @@ async def _proxy_one(req: Request, ctx: APIContext, name: str) -> Response:
 
 async def _proxy_select(req: Request, ctx: APIContext, name: str) -> Response:
     """
-    PUT /proxies/{name}：yacd 点击节点切换调用。mirage 没有 Selector 语义
-    （组路由是自动的 urltest / fallback），所以这里只接受请求让 UI 不报错，
-    实际不切换。
+    PUT /proxies/{name}：Clash UI 点击节点切换。body = {"name": "<child-tag>"}。
+
+    - 目标是 selector 组 → 真正切换选中 child（child 必须是该组直接成员），
+      成功 204，child 非法 400。
+    - 目标是 urltest / fallback / GLOBAL 等自动选路组 → 无 Selector 语义，
+      no-op 返回 204（让 UI 不报错，但实际不改选路）。
     """
     if not ctx.outbounds:
         return json_response({"code": 404, "message": "proxy not found"}, status=404)
-    if name not in ("GLOBAL",) and name not in ctx.outbounds:
+    if name != "GLOBAL" and name not in ctx.outbounds:
         return json_response({"code": 404, "message": "proxy not found"}, status=404)
+
+    o = ctx.outbounds.get(name)
+    if o is not None and getattr(o, "type", "") == "selector":
+        # 解析 body 里的目标 child
+        try:
+            import json as _json
+            payload = _json.loads(req.body.decode() or "{}")
+            target = payload.get("name")
+        except Exception:
+            return json_response({"code": 400, "message": "invalid body"}, status=400)
+        if not target or not isinstance(target, str):
+            return json_response({"code": 400, "message": "'name' required"}, status=400)
+        if o.select(target):
+            return Response(status=204)
+        return json_response(
+            {"code": 400, "message": f"'{target}' is not a member of selector '{name}'"},
+            status=400)
+
+    # 非 selector：no-op
     return Response(status=204)
 
 
@@ -235,6 +257,7 @@ _TYPE_MAP = {
     "block":    "Reject",
     "urltest":  "URLTest",
     "fallback": "Fallback",
+    "selector": "Selector",
 }
 
 
@@ -257,14 +280,16 @@ def _outbound_to_clash(tag: str, o) -> dict:
         except Exception:
             pass
     # 组节点：补 all / now
-    if clash_type in ("URLTest", "Fallback"):
+    if clash_type in ("URLTest", "Fallback", "Selector"):
         children = getattr(o, "_children", []) or []
         base["all"] = [c.tag for c in children]
-        # urltest 暴露 current 选择；fallback 取 resolve_leaf 的结果
         if clash_type == "URLTest":
             cur = getattr(o, "_current", None)
             base["now"] = cur.tag if cur else (children[0].tag if children else "")
-        else:
+        elif clash_type == "Selector":
+            # selector 暴露用户当前手动选择
+            base["now"] = getattr(o, "selected", None) or (children[0].tag if children else "")
+        else:  # Fallback：取 resolve_leaf 结果
             try:
                 leaf = o.resolve_leaf()
                 base["now"] = leaf.tag if leaf is not o else (children[0].tag if children else "")

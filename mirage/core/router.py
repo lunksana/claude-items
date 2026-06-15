@@ -694,6 +694,48 @@ _STRUCT_FIELDS = {
 }
 
 
+class _AndRule(_Rule):
+    """
+    多 criterion AND 复合规则（sing-box 语义）。
+
+    一条 rule 写多个 criterion 字段 → 全部满足才命中。每个字段内部仍是 OR
+    （数组语义），字段之间是 AND：
+
+        {"rule_set": ["geosite:google"], "geoip": ["us"], "outbound": "us-node"}
+        ⇒ 域名属 geosite:google **且** 解析 IP 属 geoip:us 才走 us-node
+
+    _groups[i] 是第 i 个字段展开出的子规则 OR 列表；全部 group 都至少一条子
+    规则命中，本规则才命中。子规则的 action 不参与（动作在复合层），子规则
+    invert 关闭——整条 AND 的取反由复合层 self.invert 统一处理。
+    """
+    __slots__ = ("_groups",)
+
+    def __init__(self, groups: list[list["_Rule"]], action: str, desc: str, invert: bool = False):
+        super().__init__(action, desc, invert)
+        self._groups = groups
+
+    def _inner(self, host, addr):
+        for group in self._groups:
+            if not any(r.matches(host, addr) for r in group):
+                return False
+        return True
+
+
+def _expand_field(field: str, raw_values, action: str, cache: _GeoDataCache,
+                  invert: bool) -> list["_Rule"]:
+    """把一个 criterion 字段的值（标量或数组）展开成子规则列表（OR 语义）。"""
+    values = raw_values if isinstance(raw_values, list) else [raw_values]
+    out: list[_Rule] = []
+    for v in values:
+        v = str(v).strip()
+        if not v:
+            continue
+        r = _make_rule(field, v, action, cache, invert)
+        if r is not None:
+            out.append(r)
+    return out
+
+
 def _apply_structured_rules(
     router: Router,
     rules: list,
@@ -714,28 +756,44 @@ def _apply_structured_rules(
             continue
         invert = bool(entry.get("invert", False))
 
-        # 找出本 rule 用的 criterion 字段（只允许一个）
         crit_fields = [k for k in _STRUCT_FIELDS if k in entry]
         if not crit_fields:
             logger.warning("rule has no criterion field, skipped: %r", entry)
             continue
-        if len(crit_fields) > 1:
-            logger.warning("rule has multiple criteria (only one supported), skipped: %r", entry)
+
+        # 多 criterion 的语义由 "mode" 决定：默认 "or"（每个字段各自展开成独立
+        # 规则，任一命中即命中），"and" 才做复合匹配（全部字段都满足才命中）。
+        mode = str(entry.get("mode", "or")).strip().lower()
+        if mode not in ("or", "and"):
+            logger.warning("rule 'mode'=%r invalid (expect 'or'/'and'), 按 'or' 处理: %r",
+                           entry.get("mode"), entry)
+            mode = "or"
+        use_and = (mode == "and")
+
+        if len(crit_fields) == 1 or not use_and:
+            # 单 criterion，或多 criterion 默认 OR：每个字段每个值都展开成独立 _Rule
+            # （数组语义 = OR，字段之间也 = OR），全部指向同一 outbound。
+            for field in crit_fields:
+                for rule in _expand_field(field, entry[field], action, cache, invert):
+                    router.add(rule)
             continue
 
-        field = crit_fields[0]
-        values = entry[field]
-        if not isinstance(values, list):
-            values = [values]
-
-        # 数组语义 = OR：把每个 value 展开成一条独立 _Rule
-        for v in values:
-            v = str(v).strip()
-            if not v:
-                continue
-            rule = _make_rule(field, v, action, cache, invert)
-            if rule is not None:
-                router.add(rule)
+        # 多 criterion 且 mode="and" → AND 复合：字段内 OR、字段间 AND
+        groups: list[list[_Rule]] = []
+        usable = True
+        for field in crit_fields:
+            # 子规则 invert 关闭（复合层统一取反）；action 仅用于子规则日志
+            sub = _expand_field(field, entry[field], action, cache, invert=False)
+            if not sub:
+                logger.warning("AND rule field '%s' expanded to nothing, rule skipped: %r",
+                               field, entry)
+                usable = False
+                break
+            groups.append(sub)
+        if usable and groups:
+            desc = "AND(" + ",".join(_STRUCT_FIELDS[f] for f in crit_fields) + ")"
+            logger.info("Rule: %-46s -> %s%s", desc, action, ", invert" if invert else "")
+            router.add(_AndRule(groups, action, desc, invert))
 
 
 def _make_rule(field: str, value: str, action: str, cache: _GeoDataCache, invert: bool):
@@ -850,13 +908,13 @@ def build_router(
     自动判别 cfg 的 rules 格式：
 
       1. cfg["route"]["rules"] 存在 → 结构化模式
-         （final 取 cfg["route"]["final"]）
+         （兜底出口取 cfg["route"]["default"]，回退 cfg["route"]["final"]）
       2. cfg["rules"] 是 list 且首元素是 dict → 结构化模式（顶层 rules）
-         （final 取顶层 cfg["final"]）
+         （兜底出口取顶层 cfg["default"]，回退 cfg["final"]）
       3. cfg["rules"] 是 list 且首元素是 str → CSV 模式
          （final 取 CSV 行 "FINAL,X"）
 
-    未指定 final 时：
+    未指定兜底出口时：
       legacy_action_map 提供则取其中的 PROXY → tag 映射，否则取 "direct"。
 
     server 端的 egress_rules 字段总是 CSV（无 route 嵌套），传 rules_field 指定。
@@ -871,15 +929,17 @@ def build_router(
     route_block = cfg.get("route") if rules_field == "rules" else None
     if isinstance(route_block, dict) and "rules" in route_block:
         rules_list = route_block.get("rules", []) or []
-        final_action = route_block.get("final")
+        # 兜底出口键：优先 "default"（install.sh / 示例配置都用这个，是公开 API），
+        # 回退 "final"（sing-box 风格别名）。两者都没填才用 initial_default。
+        final_action = route_block.get("default") or route_block.get("final")
         if final_action:
             router.set_default(str(final_action))
         _apply_structured_rules(router, rules_list, cache, valid_actions)
     else:
         rules_list = cfg.get(rules_field, []) or []
         if rules_list and isinstance(rules_list[0], dict):
-            # 顶层结构化 rules + 可选顶层 final
-            final_action = cfg.get("final")
+            # 顶层结构化 rules + 可选顶层 default / final
+            final_action = cfg.get("default") or cfg.get("final")
             if final_action:
                 router.set_default(str(final_action))
             _apply_structured_rules(router, rules_list, cache, valid_actions)

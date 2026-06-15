@@ -8,11 +8,11 @@
 - **加密信道**：ChaCha20-Poly1305 + HKDF 会话密钥；双向使用独立密钥（c2s / s2c），消除 nonce 复用攻击面；密钥从 ClientHello 的 `client_random` 派生，无需额外传输 salt
 - **防重放**：token 内含 8 字节随机 nonce，服务端维护时间桶缓存，60 秒窗口内的重放 ClientHello 一律走伪装路径
 - **TCP Brutal**：服务端可选的固定速率拥塞控制，在高丢包跨境链路上维持稳定吞吐；仅需在服务端（Linux VPS）安装内核模块，客户端无需任何额外配置
-- **多节点与自适应选路（sing-box 风格）**：客户端可配置多组服务端节点 + `urltest` / `fallback` 组。`urltest` 自动选当前 median 握手延迟最低的节点（带 tolerance 防抖避免抖动期频繁切换），`fallback` 按声明顺序在前者不健康时切到后备。分流规则可把动作直接指向节点或组的 tag，实现"流媒体走美国节点、国内直连、其余自动"这种粒度。
+- **多节点与自适应选路（sing-box 风格）**：客户端可配置多组服务端节点 + `urltest` / `fallback` / `selector` 组。`urltest` 自动选当前 median 握手延迟最低的节点（带 tolerance 防抖避免抖动期频繁切换），`fallback` 按声明顺序在前者不健康时切到后备，`selector` 则由用户通过 Clash API 手动指定节点。分流规则可把动作直接指向节点或组的 tag，实现"流媒体走美国节点、国内直连、其余自动"这种粒度。
 - **每节点独立连接池 + 被动延迟采集**：每个 `mirage` 节点独占一份预建隧道池。每次 build 的真实握手耗时作为延迟样本回灌到滚动窗口（median 抗抖），urltest 组的决策始终基于近期实测数据，无需独立 ping 探测；长时间无流量时由后台 `HealthCheck` 主动 probe 兜底。SOCKS5 请求到达时从相应池零等待取用。
 - **内置 DNS 转发器**：本地监听 UDP，按分流规则决定每条 DNS 查询的出口；命中 `direct` 出口走 UDP 直查国内 DNS（默认 223.5.5.5），命中具体 `mirage` 节点（或经组解析到的节点）走该节点独占的 DNS-over-TCP pipeline 查询境外 DNS（默认 8.8.8.8），命中 `block` 出口返回 NXDOMAIN。与流量规则复用同一份路由表，将系统 DNS 指向本地端口即可消除 DNS 泄漏。
 - **TProxy 域名嗅探**：透明代理模式下读取连接初始字节，提取 TLS SNI 或 HTTP Host 字段，将原始目标 IP 升级为域名后再做路由匹配，使 GEOSITE / DOMAIN-SUFFIX 等规则在 TProxy 模式下同样生效
-- **域名 + IP 分流**：规则内嵌配置，支持精确/后缀/关键词/正则/CIDR/GeoSite/GeoIP，正则匹配使用字面量预筛跳过无关主机名
+- **域名 + IP 分流**：规则内嵌配置，支持精确/后缀/关键词/正则/CIDR/GeoSite/GeoIP，正则匹配使用字面量预筛跳过无关主机名。一条规则写多个条件字段时默认 OR（任一命中），显式 `"mode": "and"` 则全部满足才命中。
 - **Web 管理面板**：服务端内嵌 HTTP 面板，实时展示活跃连接（客户端 IP、目标、时长、上下行流量）、域名转发分布，支持单独断开连接或封锁 IP（立即终止已有连接并拒绝后续连接）
 
 ---
@@ -254,13 +254,19 @@ ssh -L 8080:127.0.0.1:8080 user@your-vps
 }
 ```
 
-> **关于 cn_dns / remote_dns 的顶层位置**：`dns.resolvers` + `dns.rules` schema 已在 0.4.16 落地但 dns_forwarder 还没消费（计划在迁移期把它整体接入）。当前阶段：
-> - `dns.listen` 字段已生效（schema_v1 投射到老顶层 `dns_listen_host` / `dns_listen_port`）
-> - `cn_dns` / `remote_dns` 仍写在**顶层**；启动时会有一条 `unknown top-level keys ignored` WARN，**功能正常**
+> **DNS 上游配置位置（0.4.41+）**：拆分 DNS 的 `listen` / `cn` / `remote` 现在统一写在 `dns` 块里，启动时由 config 自动投射到运行时老顶层键，无告警：
+> ```json
+> "dns": {"listen": "127.0.0.1:5353", "cn": "119.29.29.29", "remote": "tls://1.1.1.1:853"}
+> ```
+> - `dns.listen` → `dns_listen_host` / `dns_listen_port`
+> - `dns.cn` → `cn_dns`（命中 `direct` 出口时用，纯 UDP，支持 `host:port`）
+> - `dns.remote` → `remote_dns`（经隧道查境外，支持 `host:port` / `tls://` / `https://`）
+> - 0.4.40 及更早把这些写在**顶层**的老配置仍可工作，但会收到一条 deprecation 提示，建议迁移到 `dns` 块。
+> - `dns.resolvers` + `dns.rules`（多解析器 schema）已在 0.4.16 落地但 dns_forwarder 尚未消费，当前用上面的简易拆分模型。
 
 | 顶层字段 | 说明 |
 |---|---|
-| `schema_version` | 固定为 `1`。**合约：1 期间不再加第 9 个顶层 key**（详见下方"schema_version=1 合约"） |
+| `schema_version` | 固定为 `1`。**合约：1 期间不再加第 9 个结构化 section**（扁平运维标量键可并存，详见下方"schema_version=1 合约"） |
 | `log` | `{"format": "text" | "json"}`，默认 text。json 模式每行一个 JSON 行（见"结构化日志"） |
 | `inbounds[*]` | 入站监听。支持 `socks5` / `http` / `mixed` 三种类型（见 **入站类型**） |
 | `outbounds[*]` | 出口节点 + 组定义，见 **多节点与自适应选路** |
@@ -405,10 +411,28 @@ peek 第一字节：
 | `mirage` | 叶子节点 | 一个具体的服务端，独占一个 BrutalPool |
 | `direct` | 叶子节点 | 系统直连，不经过任何代理 |
 | `block` | 叶子节点 | 立即关闭本地连接（用于广告 / 屏蔽场景）|
-| `urltest` | 组 | 选 children 中 median 握手延迟最低的 |
-| `fallback` | 组 | 按声明顺序选第一个 `is_healthy=True` 的 |
+| `urltest` | 组 | 选 children 中 median 握手延迟最低的（自动）|
+| `fallback` | 组 | 按声明顺序选第一个 `is_healthy=True` 的（自动）|
+| `selector` | 组 | **手动选节点**：通过 Clash API `PUT /proxies/{tag}` 切换，保持到下次手动切换 |
 
 组的 `outbounds` 字段也可以引用**另一个组**，启动期通过 fixpoint 求解依赖（循环引用会立即报错退出）。
+
+### selector：手动选节点
+
+```json
+{
+    "tag":       "pick",
+    "type":      "selector",
+    "outbounds": ["node-jp-1", "node-us-1", "auto"],
+    "default":   "auto"
+}
+```
+
+把它设为 `route.default`（或绑到规则），就能在 Yacd / metacubexd 上一键切换走哪个节点。`default` 指定初始选择（缺省取首个 child）。child 可以是叶子节点，也可以是 `urltest` / `fallback` 组（"手动在'自动选'和'指定节点'之间切换"）。
+
+- `PUT /proxies/pick`，body `{"name": "node-us-1"}` → 切到 us 节点，成功 204；非成员返回 400。
+- selector 的 `is_healthy` 跟随**当前选中** child（手动选了就认它，不因别的节点健康而假装可用）。
+- **选择是内存态**：配置热加载会重建组、选择回到 `default`（与 Clash 持久化到文件不同；POC 阶段从简）。
 
 ### urltest：自动选最快
 
@@ -660,9 +684,25 @@ echo 1 > /proc/sys/net/ipv4/ip_forward
 | `invert` | bool | `true` 时整条规则的命中/未命中取反（典型场景：`{"geoip":["cn"],"invert":true}` = 非 CN IP）|
 | `outbound` | string | 命中后路由到的 outbound tag（必填）|
 
-**约束**：单条 rule 对象只允许出现**一个 criterion 字段**（多字段在 sing-box 是 AND 语义，本实现不支持，需要 AND 时拆成多条规则）。其余 sing-box 字段（`protocol` / `process_name` 等）当前不解析，写了也不报错、不生效。
+**多 criterion 默认 = OR**：一条 rule 写多个 criterion 字段时，**任一字段命中即命中**（等价于把它们拆成多条指向同一 outbound 的独立规则）：
 
-**数组语义 = OR**：`{"domain_suffix":["a.com","b.com"]}` 等价于"a.com 或 b.com 后缀匹配"，启动期会展开成两条独立规则。
+```jsonc
+// 域名属 geosite:google 或 解析 IP 属 geoip:us，任一满足就走 us-node
+{"rule_set": ["geosite:google"], "geoip": ["us"], "outbound": "us-node"}
+```
+
+**显式 `"mode": "and"` → AND 复合**：需要"全部字段都满足才命中"时，加 `"mode": "and"`（缺省 `"or"`）：
+
+```jsonc
+// 域名属 geosite:google 且 解析 IP 属 geoip:us 才走 us-node
+{"rule_set": ["geosite:google"], "geoip": ["us"], "mode": "and", "outbound": "us-node"}
+```
+
+AND 模式下字段内仍是 OR、字段间是 AND；某字段在空 geo / 解析失败下展开为空时，整条 AND 跳过（不半命中）。默认 OR 模式下，空字段被跳过但其余字段仍生效。`mode` 非法值（非 `or`/`and`）会告警并退回 `or`。其余 sing-box 字段（`protocol` / `process_name` 等）当前不解析，写了也不报错、不生效。
+
+> 注意：这与 sing-box 不同——sing-box 多字段默认 AND。Mirage 默认 OR 更贴近"把相关条件并到一条规则"的直觉，需要 AND 时显式 `"mode": "and"`。
+
+**数组语义 = OR**：`{"domain_suffix":["a.com","b.com"]}` 等价于"a.com 或 b.com 后缀匹配"。
 
 ### CSV rules（老格式 / 向后兼容）
 
@@ -767,8 +807,8 @@ CSV 的 action 部分对老关键字 `PROXY` / `DIRECT` / `REJECT` 自动映射�
 
 `schema_version` 字段是配置文件的**契约**：
 
-- **顶层 8 个 key 锁定**：`schema_version` / `log` / `inbounds` / `outbounds` / `route` / `dns` / `api` / `tuning`。`schema_version=1` 期间永不新增第 9 个顶层 key
-- **新功能进入已有 section 的 nested key**，不污染顶层
+- **8 个结构化 section 锁定**：`schema_version` / `log` / `inbounds` / `outbounds` / `route` / `dns` / `api` / `tuning`。`schema_version=1` 期间不新增第 9 个**结构化 section**——新功能进入已有 section 的 nested key，不另起顶层 section
+- **少量扁平的运维 / 路径标量键**可在顶层并存（不算"section"）：`log_levels`、`geosite_dir` / `geosite_sources` / `geoip_sources` / `geosite_update_days`、`tproxy_port`、`geo_refresh_check_sec`，以及服务端的 `listen_*` / `camouflage_*` / `admin_*` / `egress*` / 运行时调优项。这些都在 `core/config._V1_TOP_KEYS` 白名单内，schema 校验认得、不报 unknown
 - **类型特定字段塞进 outbound 的 `params` 子对象**，新增协议变种 = 新 `type`，schema 不动
 - **复杂调优用命名预设**，不开放裸参数（如 `transport: "brutal-default"`）
 
@@ -795,19 +835,23 @@ CSV 的 action 部分对老关键字 `PROXY` / `DIRECT` / `REJECT` 自动映射�
 
 启用 `api.listen` + `api.secret` 后，客户端启动一个 HTTP/1.1 + WebSocket 服务器，与 Yacd / metacubexd 等 Clash UI 100% 兼容。零外部依赖（仅 stdlib + asyncio）。
 
-### 端点清单（11 个）
+### 端点清单（17 个）
 
 | 路径 | 方法 | 用途 |
 |---|---|---|
 | `/version` | GET | `{"version":"...","meta":true}`；UI 检测心跳 |
 | `/configs` | GET | 当前 cfg（脱敏）+ Clash 标准字段（socks-port / mode 等） |
 | `/configs` | **PUT** | **触发配置热加载**（与 SIGHUP 等效） |
-| `/proxies` | GET | 所有 outbound + 组（mirage 映射成 Clash `Trojan` 类型） |
-| `/proxies/{name}` | GET | 单个 outbound |
+| `/proxies` | GET | 所有 outbound + 合成 `GLOBAL` Selector + `DIRECT`/`REJECT` 别名 |
+| `/proxies/{name}` | GET | 单个 outbound（含合成 `GLOBAL`） |
+| `/proxies/{name}` | **PUT** | 切节点（body `{"name":"<child>"}`）。目标是 `selector` 组 → 真正切换（非成员 400）；urltest / fallback / GLOBAL 等自动组 → no-op 204 |
+| `/proxies/{name}/delay` | GET | 直读该节点 `latency_ms`（健康检查已采集，不触发额外 probe） |
 | `/rules` | GET | 路由规则（Clash CamelCase 类型，末尾自动追加 `Match`） |
-| `/connections` | GET | 活跃 + 5s linger 的关闭连接，含 up/down/chains/rule |
+| `/connections` | GET | 活跃 + 5s linger 的关闭连接，含 up/down/chains/rule/memory |
 | `/traffic` | **WS** | 1Hz 推 `{"up": B/s, "down": B/s}` |
 | `/logs?level=info` | **WS** | 实时日志流（按 level 过滤） |
+| `/memory` | **WS** | 1Hz 推 `{"inuse": RSS, "oslimit": 0}`（读 `/proc/self/statm`） |
+| `/connections` | **WS** | 1Hz 推全量连接快照（schema 同 REST `/connections`） |
 | `/mirage/pool` | GET | BrutalPool 实时（ready / building / cursor / latency / healthy） |
 | `/mirage/timesync` | GET | offset / last_source / last_sync_epoch |
 | `/mirage/geo` | GET | meta.json 视图（cache_dir / update_days / sources[]） |
@@ -824,9 +868,17 @@ CSV 的 action 部分对老关键字 `PROXY` / `DIRECT` / `REJECT` 自动映射�
 host=127.0.0.1  port=9090  secret=<api.secret>
 ```
 
-### 不实现（控制类，按设计）
+### 控制类端点说明
 
-`POST /proxies/{group}` 切节点、`GET /proxies/{name}/delay` 触发 probe、`DELETE /connections/{id}` 杀连接。Clash API v1 范围是纯查询。
+- `PUT /proxies/{name}` 切节点（body `{"name": "<child-tag>"}`）：
+  - 目标是 **`selector` 组** → **真正切换**选中 child，保持到下次手动切（非成员
+    返回 400）。在 Yacd / metacubexd 上点选即时生效。
+  - 目标是 **urltest / fallback / 合成 GLOBAL** 等自动选路组 → 没有 Selector 语义，
+    **no-op 204**（点选"成功"但实际不改变自动选路，仅防 UI 报错）。
+- `GET /proxies/{name}/delay`：直接返回健康检查已采集的 `latency_ms`，**不触发
+  独立 probe**（避免 UI 反复点击引发外部测速）。无延迟样本的节点返回 400。
+- `DELETE /connections/{id}` 杀连接：**不实现**。Clash API 的连接控制类按设计不做
+  （服务端 Web 管理面板提供断开 / 封 IP）。
 
 ---
 
@@ -1216,6 +1268,34 @@ ss -tin dst <客户端IP> | grep brutal
 ---
 
 ## 开发与测试
+
+### 单元测试套件
+
+纯 stdlib `unittest`，零第三方依赖，秒级跑完：
+
+```bash
+bash tests/run_tests.sh           # 单元测试（无网络依赖，CI 友好）
+bash tests/run_tests.sh --smoke   # 额外跑端到端冒烟（需联网抓 camouflage TLS）
+# 或直接：
+python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+覆盖九大模块的回归点 + schema-代码契约元测试：
+
+| 测试文件 | 覆盖 |
+|---|---|
+| `test_router.py` | 路由解析、`route.default`/`final` 优先级、`rule_set`→GEOSITE 映射、多字段 OR/AND（`mode`）、空 geo 存活 |
+| `test_config.py` | schema 白名单、dns 块投影、deprecation 提示、server 端键、**schema-代码契约元测试**（扫 server.py/client.py 真读的 cfg 键，未声明即报） |
+| `test_selector.py` | SelectorGroup 选择 / 健康跟随 / 嵌套组 |
+| `test_udp_relay.py` | UDP 帧 + SOCKS5 头编解码、畸形输入安全 |
+| `test_dns_forwarder.py` | DNS 报文解析、`_nxdomain`、cn_dns 地址解析 |
+| `test_hello_auth.py` | token 认证 / 防重放 / anti-fingerprint（可控时钟） |
+| `test_tunnel.py` | ChaCha20-Poly1305 加密往返（socketpair）、方向密钥、close_notify |
+| `test_api_endpoints.py` | Clash 端点、CORS、selector 切换、密码脱敏 |
+| `test_ws_endpoints.py` | LogBroadcaster、`_rss_bytes` |
+| `test_install_config.py` | **install.sh 生成的 cfg** 用 `load_config` 校验（字段名 / schema 回归） |
+
+`smoke_e2e.py` 真起 server + client，经 mixed 入口走加密隧道访问本地 target，验证完整数据路径（需出网抓 `camouflage_host` 的 TLS 会话）。
 
 ### 多版本 Python 兼容性测试
 

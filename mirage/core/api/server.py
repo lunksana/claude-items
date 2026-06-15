@@ -202,20 +202,21 @@ class APIServer:
         origin = req.header("origin")
         if not origin:
             return
-        allow = self._cors_allow_for(origin)
-        if not allow:
+        if not self._cors_allows(origin):
             return
-        resp.extra_headers.append(("Access-Control-Allow-Origin", allow))
+        # 始终回显具体 Origin（而非字面 "*"）：Fetch 规范禁止
+        # `Allow-Origin: *` 与 `Allow-Credentials: true` 同时出现，浏览器会拒掉
+        # 响应。回显具体 Origin 才能在带凭证场景下合法。配 Vary: Origin 防缓存串味。
+        resp.extra_headers.append(("Access-Control-Allow-Origin", origin))
+        resp.extra_headers.append(("Vary", "Origin"))
         resp.extra_headers.append(("Access-Control-Allow-Credentials", "true"))
         if req.method == "OPTIONS":
             resp.extra_headers.append(("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS"))
             resp.extra_headers.append(("Access-Control-Allow-Headers", "Content-Type, Authorization"))
             resp.extra_headers.append(("Access-Control-Max-Age", "86400"))
 
-    def _cors_allow_for(self, origin: str) -> str | None:
-        if "*" in self._cors:
-            return "*"
-        return origin if origin in self._cors else None
+    def _cors_allows(self, origin: str) -> bool:
+        return "*" in self._cors or origin in self._cors
 
     @staticmethod
     def _should_keep_alive(req: Request, resp: Response) -> bool:

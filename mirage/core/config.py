@@ -31,14 +31,40 @@ logger = logging.getLogger("config")
 
 SCHEMA_VERSION_CURRENT = 1
 
-_V1_TOP_KEYS = {
+_V1_CLIENT_TOP_KEYS = {
     "schema_version", "log", "log_levels", "inbounds", "outbounds",
     "route", "dns", "api", "tuning",
     # 系统级路径 / 端口配置：无好的子结构归属，runtime 直接读顶层
     "geosite_dir", "tproxy_port",
     # geosite/geoip 下载源（被 geosite_cache.ensure_all 读取）
     "geosite_sources", "geoip_sources", "geosite_update_days",
+    # 顶层 rules 模式（罕见，主要给 server 的 egress_rules 复用 build_router）
+    "rules", "default", "final",
+    # geo 后台刷新调谐项（client.py _geo_background 用）
+    "geo_refresh_check_sec",
 }
+
+# server.py 直接读的顶层键。运行时**真**会用这些字段，但 0.4.42 前白名单只为
+# client 设计 → 服务端启动每次都告警 "unknown top-level keys ignored"，文案与
+# 真相相反（实际并未 ignore，server 下一秒就读它们）。补齐后告警消失。
+_V1_SERVER_TOP_KEYS = {
+    # 核心监听 + 伪装
+    "listen_host", "listen_port", "password",
+    "camouflage_host", "camouflage_port",
+    # admin 面板（可选启用，cfg.admin_port > 0 时才起）
+    "admin_host", "admin_port", "admin_token",
+    # 出口节点 + 路由
+    "egresses", "egress_rules",
+    # 运行时可调（语义上应归 tuning 块，但代码现状是顶层读；保留兼容）
+    "access_log", "idle_timeout_sec", "max_conns_per_ip", "tcp_keepalive",
+    "drain_threshold",
+}
+
+# 校验时用的合集：单进程内 client/server 二选一，但 load_config 不知道当前在
+# 哪一侧（同一函数被两端调用）。合并白名单的代价是 client 写了 server 字段
+# 也不告警（typo 防护被弱化）；收益是消除 server 启动的虚假 unknown 告警。
+# typo 防护本来就不靠 schema 白名单（关键字段各自有 _validate_*），可接受。
+_V1_TOP_KEYS = _V1_CLIENT_TOP_KEYS | _V1_SERVER_TOP_KEYS
 
 _LEGACY_TOP_KEYS = {
     "server_host", "server_port", "password", "camouflage_host",

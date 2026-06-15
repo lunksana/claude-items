@@ -19,7 +19,7 @@ python3 -u client.py config_client.json > client.log 2>&1 &
 CLIENT_PID=$!
 
 for i in {1..15}; do
-    if grep -q "SOCKS5 listening on" client.log; then break; fi
+    if grep -qiE "MIXED listening|SOCKS5 listening|listening on" client.log; then break; fi
     sleep 1
 done
 

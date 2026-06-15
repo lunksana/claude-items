@@ -378,26 +378,18 @@ async def main(config_path: str) -> None:
     if mirage_obs:
         await asyncio.gather(*[o.warmup() for o in mirage_obs], return_exceptions=True)
 
-    # ── geo 数据下载：复用第一个可用 mirage outbound 的 tunnel ─────────
-    # 弱网下走自家隧道比直连 GitHub 稳；该 outbound 池空时 geo 模块会自动 fallback 直连
-    geo_pool = None
-    for o in mirage_obs:
-        if o.pool.ready_count > 0:
-            geo_pool = o.pool
-            logger.info("geo download will tunnel through outbound '%s'", o.tag)
-            break
-    if geo_pool is None and mirage_obs:
-        logger.warning("All mirage outbound pools empty after warmup; geo download will go direct")
-
-    available_site, available_ip = await geo_ensure_all(cfg, pool=geo_pool)
-
-    # ── 构建 router ───────────────────────────────────────────────────────
+    # ── 构建 router：先用空 geo 立即建好，让入站监听不必等 geo 下载 ───────
+    # geo 数据（数 MB 的 .dat）下载可能很慢；放后台异步拉，完成后原子换 router。
+    # 这样首次运行 SOCKS5/mixed 端口立刻可用，domain/ip_cidr 规则即时生效，
+    # rule_set/geoip 规则在 geo 到位后自动补上。
+    available_site: dict = {}
+    available_ip: dict = {}
     router_inner = build_router(
         cfg, available_site, available_ip,
         valid_actions=set(outbounds.keys()),
         legacy_action_map=legacy_map,
     )
-    # 包一层 RouterRef 让热加载可以原子替换 inner
+    # 包一层 RouterRef 让热加载 / geo 后台任务可以原子替换 inner
     router = RouterRef(router_inner)
 
     # ── HealthCheck：长闲时主动 probe 兜底 ────────────────────────────────
@@ -541,6 +533,61 @@ async def main(config_path: str) -> None:
         api_ctx.reloader = reloader
         reloader.api_ctx = api_ctx   # B1：reload 后同步 api_ctx.cfg
 
+    # ── geo 后台任务：首次下载 + 周期刷新，完成后原子换 router ──────────────
+    # 解决两件事：
+    #   1) 入站监听不再被首次 geo 下载阻塞（见上方 router 用空 geo 立即构建）
+    #   2) 长跑进程也会按 geosite_update_days 周期复查刷新（旧设计只在启动下一次，
+    #      reload 也不重下，导致 geo 数据永远停在首次快照）
+    def _pick_geo_pool():
+        # 每轮重新挑：池可能在运行中重连/恢复
+        for o in mirage_obs:
+            if o.pool.ready_count > 0:
+                return o.pool, o.tag
+        return None, None
+
+    async def _geo_background() -> None:
+        # 默认 48h 复查一次；ensure_all 内部按 update_days 决定是否真的重下，
+        # 缓存新鲜时只是 stat + 返回旧路径，开销极小
+        refresh_sec = float(cfg.get("geo_refresh_check_sec", 48 * 3600))
+        first = True
+        while True:
+            try:
+                pool, tag = _pick_geo_pool()
+                if pool is not None:
+                    logger.info("geo download will tunnel through outbound '%s'", tag)
+                elif mirage_obs:
+                    logger.warning("All mirage pools empty; geo download will go direct")
+                site, ip = await geo_ensure_all(cfg, pool=pool)
+                if site or ip:
+                    new_inner = build_router(
+                        cfg, site, ip,
+                        valid_actions=set(outbounds.keys()),
+                        legacy_action_map=legacy_map,
+                    )
+                    router.replace(new_inner)
+                    reloader.available_site = site
+                    reloader.available_ip = ip
+                    # 路由规则变了：清决策缓存，避免旧决策粘住
+                    rc_n = routing_cache.invalidate() if routing_cache is not None else 0
+                    dc_n = dns_cache.invalidate() if dns_cache is not None else 0
+                    logger.info("geo router rebuilt: %d site src, %d ip src "
+                                "(routing_cache cleared %d, dns_cache cleared %d)",
+                                len(site), len(ip), rc_n, dc_n)
+                elif first:
+                    logger.warning("geo download produced no data; geo rules inactive "
+                                   "until next refresh (in %.0fh)", refresh_sec / 3600)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("geo background task error: %s", e)
+            first = False
+            try:
+                await asyncio.sleep(refresh_sec)
+            except asyncio.CancelledError:
+                raise
+
+    geo_task = asyncio.create_task(_geo_background())
+
     # SIGHUP → schedule reload as task
     import signal
     def _sighup_handler():
@@ -563,6 +610,11 @@ async def main(config_path: str) -> None:
                 await stack.enter_async_context(s)
             await asyncio.gather(*(s.serve_forever() for s in all_servers))
     finally:
+        geo_task.cancel()
+        try:
+            await geo_task
+        except (asyncio.CancelledError, Exception):
+            pass
         await time_sync.stop()
         await health.stop()
         if api_server:
