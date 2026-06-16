@@ -158,8 +158,13 @@ class TestSchemaCodeContract(unittest.TestCase):
     def _extract_top_keys(path: str) -> set[str]:
         import re
         src = open(path).read()
-        # cfg.get("foo", ...) 或 cfg["foo"]
-        pat = re.compile(r'cfg\.get\("([a-z_][a-z0-9_]*)"|cfg\["([a-z_][a-z0-9_]*)"\]')
+        # cfg.get("foo"/'foo', ...) 或 cfg["foo"]/cfg['foo']
+        # 单引号也要覆盖：client.py 里有 cfg.get('socks5_host', ...)，
+        # 只匹配双引号会漏，让契约检查出现盲点
+        pat = re.compile(
+            r'''cfg\.get\(\s*['"]([a-z_][a-z0-9_]*)['"]'''
+            r'''|cfg\[\s*['"]([a-z_][a-z0-9_]*)['"]\s*\]'''
+        )
         return {m.group(1) or m.group(2) for m in pat.finditer(src)}
 
     def test_server_keys_all_declared(self):

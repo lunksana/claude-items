@@ -102,7 +102,8 @@
         // {"name":"node-us-1"}）切换，保持到下次手动切。child 可以是叶子也可以
         // 是组——把 "auto"(urltest) 也列进来，就能在"自动选最快"和"手动指定节点"
         // 之间一键切。default 指定初始选择（缺省首个 child）。
-        //   注意：选择是内存态，热加载后回到 default（不持久化）。
+        //   注意：选择跨热加载存活（outbounds 是 locked field，reload 不重建组），
+        //   只有整进程重启才回到 default。
         {
             "tag":       "pick",
             "type":      "selector",

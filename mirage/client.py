@@ -578,8 +578,11 @@ async def main(config_path: str) -> None:
                                    "until next refresh (in %.0fh)", refresh_sec / 3600)
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
-                logger.warning("geo background task error: %s", e)
+            except Exception:
+                # geo_ensure_all 内部已吞掉网络/下载失败（返回空 dict），所以走到
+                # 这里多半是真 bug（如 build_router 内部异常）——保留 traceback，
+                # 否则 48h 间隔的后台任务里一行 warning 几乎不可能被发现
+                logger.exception("geo background task unexpected error")
             first = False
             try:
                 await asyncio.sleep(refresh_sec)

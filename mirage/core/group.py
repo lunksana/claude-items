@@ -117,8 +117,10 @@ class SelectorGroup(_GroupBase):
     - select(tag)：切到指定 child（必须是直接 child），返回是否成功。
     - is_healthy：反映**当前选中** child 的健康（而非任一）——手动选了某节点就
       认它，不因别的节点健康而"假装可用"。
-    - 选择是内存态：配置热加载会重建组、选择回到 default（与 Clash 持久化到
-      文件不同；POC 阶段从简）。
+    - 选择是内存态，但**跨热加载存活**：reload 把 outbounds 列为 locked field、
+      不重建组对象，所以 SIGHUP / PUT /configs 后当前选择保持不变；只有整进程
+      重启才回到 default（与 Clash 持久化到文件的效果接近，但机制不同——我们是
+      "组对象不被重建"而非"写文件读回"）。
 
     selected 失效（reload 删了该 child）时 resolve 回退首个 child。
     """

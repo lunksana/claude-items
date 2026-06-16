@@ -19,6 +19,38 @@
 
 ## [0.4.44] - 2026-06-15
 
+### 全项目深审（为后续完全体扫障）
+
+通读全部模块、梳理跨模块契约后，确认核心数据路径 / 安全契约干净（conn_pool 阶梯
+游标防 SYN-burst + MSG_PEEK 僵尸检测、camouflage 服务端 verify→replay 顺序正确 +
+constant-time、DnsCache 正确尊重 answer min-TTL + 负缓存、TCP/UDP 隧道 demux 首字节
+约定向后兼容、时钟源 client/server 两端都接入 TimeSync）。修正发现的问题：
+
+- **文档错误：selector 选择实际跨热加载存活**。`outbounds` 是 reload 的 locked
+  field，reload 只重建 router、**不重建 outbounds 组对象**，所以 SelectorGroup 的
+  选择 SIGHUP / PUT /configs 后保持不变，只有整进程重启才回 default。此前 4 处文档
+  （group.py / README / CHANGELOG / example）都写反成"热加载重建组回到 default"，已订正。
+- **geo 后台任务吞 traceback**。`except Exception as e: logger.warning(e)` 在 48h
+  间隔的后台任务里几乎不可能让人发现真 bug（geo_ensure_all 内部已吞掉网络失败，
+  走到这层多半是 build_router 等真异常）。改 `logger.exception` 保留 traceback。
+- **新增线路协议测试** `test_wire_protocol.py`（11 项）：锁死 `pack_address` /
+  `unpack_address` round-trip + TCP/UDP demux 首字节语义——这是 client↔server 最底层
+  契约，未来 Rust 完全体重写必须逐字节对齐，之前只被 udp_relay 间接覆盖。
+- **新增 ClientHello 字节构造测试** `test_tls_raw.py`（11 项）：内置严格 TLS
+  ClientHello 解析器，逐字段校验三档案（Chrome/Firefox/Safari）的**所有长度域自洽**
+  （任何 off-by-one 都会让真 TLS 解析器判 malformed、伪装破功），并与服务端用的
+  `hello_auth` 提取器做 token / client_random 跨模块 round-trip。这是 wire 契约里
+  最容易出字节级偏差的一块，至此**整条 client↔server 线路/加密契约全部有测试锁定**：
+  tls_raw(11) + hello_auth(23) + tunnel(12) + wire_protocol(11) + udp_relay(17)。
+- **新增入站解析测试** `test_http_inbound.py`（20 项）：`_parse_authority`（CONNECT
+  host:port，含 IPv6 字面量）+ HTTP 请求解析器对**不可信输入**的错误路径（畸形请求行
+  400 / 错版本 505 / 超大 header 431 / header 过多 431 / 缺冒号 400 / CONNECT 非法目标
+  400 / forward 非绝对 URL 400）+ mixed 首字节 demux（TLS 0x16 提示 / 未知字节关闭 /
+  EOF 关闭）。用真 StreamReader 喂字节 + FakeWriter 捕获响应，间接覆盖 sniffer 的
+  PrefixedReader。
+
+**测试总数 209。**
+
 ### 新增 / Selector 手动选节点
 
 新增 `selector` 出口组类型（Clash Selector 语义），与自动选路的 urltest /
@@ -37,7 +69,8 @@ fallback 并列：
 - `is_healthy` 跟随**当前选中** child（手动选了就认它，不因别的节点健康而假装
   可用）；selected 失效（reload 删了 child）时 resolve 回退首个。
 - `/proxies` 把 selector 报成 Clash `Selector` 类型，`now` = 当前选中。
-- **选择是内存态**：热加载重建组后回到 default（不持久化到文件；POC 从简）。
+- **选择跨热加载存活**：`outbounds` 是 locked field，reload 不重建组对象，选择
+  保持到整进程重启（机制上接近 Clash 持久化，但不写文件）。
 
 实现：`SelectorGroup`（core/group.py）+ build_outbounds 接线 + Clash API
 `_proxy_select` / `_outbound_to_clash`。
@@ -79,9 +112,10 @@ tests/test_api_endpoints.py  +PUT   selector 真切换/非法 child 400/非 sele
                                     /proxies 报 Selector 类型
 ```
 
-**测试总数 167**（`python3 -m unittest discover -s tests` 的权威计数；按模块：
-router 24 / config 11 / udp_relay 17 / api_endpoints 30 / ws_endpoints 9 /
-dns_forwarder 23 / install_config 8 / hello_auth 23 / tunnel 12 / selector 10）。
+按模块计数（`python3 -m unittest discover -s tests` 为权威）：router 24 / config 11 /
+udp_relay 17 / api_endpoints 30 / ws_endpoints 9 / dns_forwarder 23 / install_config 8 /
+hello_auth 23 / tunnel 12 / selector 10 / wire_protocol 11 / tls_raw 11 /
+http_inbound 20 = **209**（见本版顶部「深审」）。
 
 ---
 

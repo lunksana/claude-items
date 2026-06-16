@@ -432,7 +432,7 @@ peek 第一字节：
 
 - `PUT /proxies/pick`，body `{"name": "node-us-1"}` → 切到 us 节点，成功 204；非成员返回 400。
 - selector 的 `is_healthy` 跟随**当前选中** child（手动选了就认它，不因别的节点健康而假装可用）。
-- **选择是内存态**：配置热加载会重建组、选择回到 `default`（与 Clash 持久化到文件不同；POC 阶段从简）。
+- **选择跨热加载存活**：`outbounds` 是 locked field，reload（SIGHUP / PUT /configs）不重建组对象，当前选择保持不变；只有整进程重启才回到 `default`。
 
 ### urltest：自动选最快
 
