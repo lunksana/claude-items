@@ -26,18 +26,9 @@ from .hello_auth import (
     verify_session_token, TokenReplayCache,
 )
 from .handshake_cache import HandshakeCache
-from .utils import get_logger
+from .utils import get_logger, read_tls_record
 
 logger = get_logger("camouflage")
-
-
-async def _read_tls_record(reader: asyncio.StreamReader) -> tuple[int, bytes]:
-    header = await reader.readexactly(5)
-    length = int.from_bytes(header[3:5], "big")
-    if length > 16384 + 256:
-        raise ValueError(f"TLS record too large: {length}")
-    body = await reader.readexactly(length)
-    return header[0], header + body
 
 
 async def _read_client_tail(reader: asyncio.StreamReader) -> None:
@@ -48,7 +39,7 @@ async def _read_client_tail(reader: asyncio.StreamReader) -> None:
     async def _drain():
         saw_ccs = False
         while True:
-            ct, _ = await _read_tls_record(reader)
+            ct, _ = await read_tls_record(reader)
             if ct == 0x14:
                 saw_ccs = True
             elif ct == 0x17 and saw_ccs:
@@ -73,7 +64,7 @@ async def server_read_hello_and_decide(
     探测/非法/重放 → 从缓存回放握手，由本函数负责关闭连接，返回 (False, None)。
     """
     try:
-        _ct, hello_raw = await asyncio.wait_for(_read_tls_record(client_reader), timeout=8.0)
+        _ct, hello_raw = await asyncio.wait_for(read_tls_record(client_reader), timeout=8.0)
     except Exception as e:
         logger.debug("Failed to read ClientHello: %s", e)
         try:

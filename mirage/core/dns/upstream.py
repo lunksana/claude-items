@@ -22,13 +22,31 @@ import struct
 from typing import Optional
 from urllib.parse import urlparse
 
-from ..utils import pack_address, get_logger
+from ..utils import pack_address, get_logger, is_ip_literal
 from .tls_over_tunnel import TlsOverTunnel
 
 logger = get_logger("dns")
 
 _DNS_QUERY_TIMEOUT = 5.0       # DoT/DoH 单次查询超时（pipeline 内部 wait_for）
 _MAX_RESPONSE_BYTES = 64 * 1024
+
+
+# ── 共用 pipeline tx_id 分配 ───────────────────────────────────────────────────
+
+def _allocate_tx(next_tx: list[int], pending: dict, max_inflight: int) -> int:
+    """
+    从 pipeline 中分配一个未使用的 tx_id（0-65535）。
+    next_tx: 可变列表 [current_value]，原地修改避免类属性管理。
+    pending: 当前 in-flight 的 {tx_id: ...} 字典。
+    """
+    for _ in range(0x10000):
+        tx_id = next_tx[0]
+        next_tx[0] = (next_tx[0] + 1) & 0xFFFF
+        if next_tx[0] == 0:
+            next_tx[0] = 1
+        if tx_id not in pending:
+            return tx_id
+    raise OSError("DNS pipeline tx_id space exhausted")
 
 
 # ============================================================
@@ -68,7 +86,7 @@ class UdpUpstream(Upstream):
         self._setup_lock = asyncio.Lock()
         self._inflight = asyncio.Semaphore(self.MAX_INFLIGHT)
         self._pending: dict = {}
-        self._next_tx = 1
+        self._next_tx = [1]  # mutable list for shared _allocate_tx
 
     async def query(self, data: bytes) -> bytes:
         if len(data) < 2:
@@ -108,14 +126,7 @@ class UdpUpstream(Upstream):
             self._reader_task = asyncio.create_task(self._reader_loop())
 
     def _allocate_tx(self) -> int:
-        for _ in range(0x10000):
-            tx_id = self._next_tx
-            self._next_tx = (self._next_tx + 1) & 0xFFFF
-            if self._next_tx == 0:
-                self._next_tx = 1
-            if tx_id not in self._pending:
-                return tx_id
-        raise OSError("DNS pipeline tx_id space exhausted")
+        return _allocate_tx(self._next_tx, self._pending, self.MAX_INFLIGHT)
 
     async def _send_recv(self, data: bytes) -> bytes:
         original_id = data[:2]
@@ -200,7 +211,7 @@ class DotUpstream(Upstream):
         self._setup_lock = asyncio.Lock()
         self._inflight = asyncio.Semaphore(self.MAX_INFLIGHT)
         self._pending: dict = {}
-        self._next_tx = 1
+        self._next_tx = [1]  # mutable list for shared _allocate_tx
 
     async def query(self, data: bytes) -> bytes:
         if len(data) < 2:
@@ -243,14 +254,7 @@ class DotUpstream(Upstream):
             logger.debug("DoT %s:%d TLS handshake ok via %s", self._host, self._port, self._outbound.tag)
 
     def _allocate_tx(self) -> int:
-        for _ in range(0x10000):
-            tx_id = self._next_tx
-            self._next_tx = (self._next_tx + 1) & 0xFFFF
-            if self._next_tx == 0:
-                self._next_tx = 1
-            if tx_id not in self._pending:
-                return tx_id
-        raise OSError("DoT pipeline tx_id space exhausted")
+        return _allocate_tx(self._next_tx, self._pending, self.MAX_INFLIGHT)
 
     async def _send_recv(self, data: bytes) -> bytes:
         original_id = data[:2]
@@ -456,7 +460,7 @@ def make_upstream(outbound, address: str) -> Upstream:
         u = urlparse(addr)
         if not u.hostname:
             raise ValueError(f"DoH URL missing host: {address}")
-        if not _is_ip_literal(u.hostname):
+        if not is_ip_literal(u.hostname):
             raise ValueError(
                 f"DoH URL host must be an IP literal (got {u.hostname!r}); "
                 f"domain hosts cause bootstrap chicken-and-egg")
@@ -491,11 +495,3 @@ def _split_host_port(s: str, default_port: int) -> tuple[str, int]:
         host, _, port_s = s.rpartition(":")
         return host, int(port_s)
     return s, default_port
-
-
-def _is_ip_literal(s: str) -> bool:
-    try:
-        ipaddress.ip_address(s)
-        return True
-    except ValueError:
-        return False

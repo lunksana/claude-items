@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import asyncio
 import random
-import socket
 import time
 from typing import Callable, Optional
 
@@ -44,7 +43,7 @@ from .tls_raw import build_client_hello, build_fake_client_tail
 
 from .tunnel import EncryptedTunnel
 
-from .utils import get_logger
+from .utils import get_logger, set_keepalive
 
 from . import brutal
 
@@ -70,32 +69,6 @@ _MAX_IDLE_SEC  = 120    # 池中空闲连接最长存活时间（超过后丢弃
 _STAGGER_STEP   = 0.30
 _STAGGER_JITTER = 0.08
 _IDLE_JITTER    = 30.0      # _MAX_IDLE_SEC ± 该值随机化每条 tunnel 的实际寿命
-
-
-def _enable_tcp_keepalive(writer: asyncio.StreamWriter) -> None:
-    """
-    在已建好的 TCP 连接上启用 SO_KEEPALIVE + Linux 调优后的探测周期。
-
-    Linux 默认 TCP_KEEPIDLE=7200s（2 小时静默才探测），对代理场景太宽。
-    调到 60s 静默 + 10s 间隔 × 3 次 = 90s 内能确认对端是否活着，让 OS 提前
-    把死连接 RST 掉，避免我们的 _ReadyTunnel.is_alive 漏检（虽然有 MSG_PEEK
-    兜底，但 OS 主动探测能让池更早 refill）。
-
-    其它平台只开 SO_KEEPALIVE（用 OS 默认探测周期）。
-    """
-    try:
-        sock = writer.transport.get_extra_info("socket")
-        if sock is None:
-            return
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        if hasattr(socket, "TCP_KEEPIDLE"):
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
-        if hasattr(socket, "TCP_KEEPINTVL"):
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
-        if hasattr(socket, "TCP_KEEPCNT"):
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
-    except Exception as e:
-        logger.debug("Cannot enable TCP keepalive: %s", e)
 
 
 async def _read_server_handshake(reader: asyncio.StreamReader) -> None:
@@ -440,7 +413,9 @@ class BrutalPool:
             # 1b. 开 SO_KEEPALIVE：服务端 NAT 表项过期 / VPS 抖动等情况下，
             # OS 内核探测包能在 ~90s 内 RST 死连接，配合 _ReadyTunnel.is_alive
             # 在 acquire 时实时检测，把"池里有僵尸 tunnel"概率降到极小。
-            _enable_tcp_keepalive(server_writer)
+            sock = server_writer.transport.get_extra_info("socket")
+            if sock is not None:
+                set_keepalive(sock)
 
             # 2. 发送含认证 token 的 ClientHello，提取 client_random 用于密钥派生
             token = make_session_token(cfg["password"])

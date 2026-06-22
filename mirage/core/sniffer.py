@@ -125,9 +125,10 @@ async def sniff_domain(
             if not chunk:
                 break
             buffered.extend(chunk)
-            domain = sniff_tls_sni(bytes(buffered)) or sniff_http_host(bytes(buffered))
+            raw = bytes(buffered)
+            domain = sniff_tls_sni(raw) or sniff_http_host(raw)
             if domain:
-                return domain, bytes(buffered)
+                return domain, raw
     except Exception:
         pass
     return None, bytes(buffered)

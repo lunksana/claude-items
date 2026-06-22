@@ -64,28 +64,13 @@ import struct
 import time
 from typing import Iterator, Optional
 
-from .utils import get_logger, pack_address, unpack_address
+from .utils import get_logger, pack_address, unpack_address, is_ip_literal
 
 logger = get_logger("udp_relay")
 
 _UDP_MAX_PACKET    = 65507  # IPv4 UDP payload 上限
 _UDP_IDLE_TIMEOUT  = 60.0   # 无流量秒数后关闭 relay
 _UDP_QUEUE_MAXSIZE = 1024   # 上行队列上限：满则丢包（UDP 本就 best-effort，背压更友好）
-
-
-def _is_ip_literal(host: str) -> bool:
-    """判断 host 是否为合法 IP 字面量（v4 或 v6）"""
-    if ":" in host:
-        try:
-            socket.inet_pton(socket.AF_INET6, host)
-            return True
-        except OSError:
-            return False
-    try:
-        socket.inet_aton(host)
-        return True
-    except OSError:
-        return False
 
 
 def _normalize_addr_for_dualstack(host: str, port: int) -> tuple[str, int]:
@@ -386,7 +371,7 @@ class UDPRelay:
             # **不接受域名目标**——Python socket.sendto 对域名会阻塞调内核
             # getaddrinfo，**冻结整个 asyncio 事件循环**。彻底异步 UDP DNS 解析
             # 留待 v2（多数 UDP 应用直接用 IP 作 target，不踩到这条路径）
-            if not _is_ip_literal(target_host):
+            if not is_ip_literal(target_host):
                 logger.debug("direct UDP target %s is not an IP literal, dropping "
                              "(domain UDP target needs async DNS, v2 work)",
                              target_host)
@@ -552,7 +537,7 @@ async def handle_udp_tunnel(tunnel,
                 for tgt_host, tgt_port, payload in reader.frames():
                     if len(payload) > _UDP_MAX_PACKET:
                         continue
-                    if not _is_ip_literal(tgt_host):
+                    if not is_ip_literal(tgt_host):
                         logger.debug("[udp-srv] domain target %s dropped "
                                      "(v2 needs async DNS)", tgt_host)
                         continue

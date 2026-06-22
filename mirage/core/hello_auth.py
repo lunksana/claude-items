@@ -95,17 +95,34 @@ class TokenReplayCache:
     内存开销：
       每个 token 仅存 8 字节 nonce；即使每秒 1000 次连接，3 × 60s 滚动窗口
       内也仅需 ~1.4 MB。
+
+    DDoS 防护：
+      设有 max_size 上限（默认 500,000 entries）。超出时跳过新 nonce 的写入
+      （仍检查重放），避免攻击者用海量唯一 nonce 耗尽内存。被跳过的 nonce
+      不会进入缓存，但下次出现时仍会被视为"首次"——这在 DDoS 场景下是可接受的
+      折衷：宁可放过极少量重放，也不让内存无限增长。
     """
 
     # 必须 ≥ ⌈2 × TIMESTAMP_TOLERANCE / 桶宽⌉ + 1；
     # 桶宽 == TIMESTAMP_TOLERANCE，所以最小是 3。详见类 docstring 的临界分析。
     _BUCKETS_KEPT = 3
 
-    def __init__(self) -> None:
+    # DDoS 防护：缓存总条目上限。500K entries × ~48 bytes/entry ≈ 24 MB。
+    _DEFAULT_MAX_SIZE = 500_000
+
+    def __init__(self, max_size: int = _DEFAULT_MAX_SIZE) -> None:
         self._buckets: dict[int, set[bytes]] = {}
+        self._max_size = max_size
+        self._total_count = 0
 
     def _bucket(self) -> int:
         return _now() // TIMESTAMP_TOLERANCE
+
+    def _evict_stale(self, keep_from: int) -> None:
+        """清理过期桶并更新计数器"""
+        for stale in [b for b in self._buckets if b < keep_from]:
+            self._total_count -= len(self._buckets[stale])
+            del self._buckets[stale]
 
     def check_and_mark(self, token: bytes) -> bool:
         """
@@ -119,16 +136,19 @@ class TokenReplayCache:
         keep_from = bucket - (self._BUCKETS_KEPT - 1)
 
         # 清理过期桶（保留最近 _BUCKETS_KEPT 个）
-        for stale in [b for b in self._buckets if b < keep_from]:
-            del self._buckets[stale]
+        self._evict_stale(keep_from)
 
         # 在保留窗口内的所有桶查找重复
         for b in range(bucket, keep_from - 1, -1):
             if nonce in self._buckets.get(b, ()):
                 return False
 
-        # 首次出现：写入当前桶
-        self._buckets.setdefault(bucket, set()).add(nonce)
+        # 首次出现：写入当前桶（受 max_size 限制）
+        if self._total_count < self._max_size:
+            self._buckets.setdefault(bucket, set()).add(nonce)
+            self._total_count += 1
+        # else: DDoS 场景下跳过写入，仍返回 True（视为首次）
+
         return True
 
 

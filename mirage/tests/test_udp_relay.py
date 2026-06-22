@@ -5,7 +5,7 @@ UDP relay 编解码 / 工具函数 单元测试。
   - pack_udp_frame ↔ FrameReader：单帧、多帧串接、分片喂入、跨帧 buffer
   - build_socks5_udp_header ↔ parse_socks5_udp_header：v4/v6/domain 三种 ATYP
   - 畸形输入安全（不 crash，返 None / 不 yield）
-  - 工具函数：_is_ip_literal / _unmap_v4
+  - 工具函数：is_ip_literal / _unmap_v4
 
 UDPRelay 类 + handle_udp_tunnel 涉及真 socket，留给集成测试，不在这里。
 """
@@ -21,8 +21,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.udp_relay import (  # noqa: E402
     pack_udp_frame, FrameReader,
     parse_socks5_udp_header, build_socks5_udp_header,
-    _is_ip_literal, _unmap_v4,
+    _unmap_v4,
 )
+from core.utils import is_ip_literal  # noqa: E402
 
 
 class TestTunnelFrame(unittest.TestCase):
@@ -126,17 +127,17 @@ class TestSocks5UdpHeader(unittest.TestCase):
 
 
 class TestIpHelpers(unittest.TestCase):
-    def test_is_ip_literal_v4(self):
-        self.assertTrue(_is_ip_literal("1.2.3.4"))
-        self.assertTrue(_is_ip_literal("127.0.0.1"))
+    def testis_ip_literal_v4(self):
+        self.assertTrue(is_ip_literal("1.2.3.4"))
+        self.assertTrue(is_ip_literal("127.0.0.1"))
 
-    def test_is_ip_literal_v6(self):
-        self.assertTrue(_is_ip_literal("::1"))
-        self.assertTrue(_is_ip_literal("2001:db8::1"))
+    def testis_ip_literal_v6(self):
+        self.assertTrue(is_ip_literal("::1"))
+        self.assertTrue(is_ip_literal("2001:db8::1"))
 
-    def test_is_ip_literal_domain(self):
-        self.assertFalse(_is_ip_literal("example.com"))
-        self.assertFalse(_is_ip_literal("not-an-ip"))
+    def testis_ip_literal_domain(self):
+        self.assertFalse(is_ip_literal("example.com"))
+        self.assertFalse(is_ip_literal("not-an-ip"))
 
     def test_unmap_v4(self):
         self.assertEqual(_unmap_v4("::ffff:1.2.3.4"), "1.2.3.4")

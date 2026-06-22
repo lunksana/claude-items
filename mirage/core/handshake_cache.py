@@ -25,7 +25,7 @@ import random
 import time
 
 from .tls_raw import build_client_hello
-from .utils import get_logger
+from .utils import get_logger, read_tls_record
 
 logger = get_logger("handshake_cache")
 
@@ -33,16 +33,6 @@ _TLS_CHANGE_CIPHER = 0x14   # 唯一被代码逻辑用到的常量（ServerHello
 
 POOL_SIZE            = 32    # 同时持有的握手份数（扩大以降低重放碰撞概率）
 REFRESH_INTERVAL_SEC = 3600  # 每小时刷新一次（缩短历史 random 暴露窗口）
-
-
-# ── 底层工具函数 ───────────────────────────────────────────────────────────────
-
-async def _read_tls_record(reader: asyncio.StreamReader) -> tuple[int, bytes]:
-    header = await reader.readexactly(5)
-    ct     = header[0]
-    length = int.from_bytes(header[3:5], "big")
-    body   = await reader.readexactly(length)
-    return ct, header + body
 
 
 async def _fetch_one(host: str, port: int) -> list[bytes]:
@@ -76,7 +66,7 @@ async def _fetch_one(host: str, port: int) -> list[bytes]:
             # CCS 之后切换短超时：服务端会快速发完整个 flight，超时即代表 flight 结束
             timeout = 2.0 if saw_ccs else 8.0
             try:
-                ct, raw = await asyncio.wait_for(_read_tls_record(reader), timeout=timeout)
+                ct, raw = await asyncio.wait_for(read_tls_record(reader), timeout=timeout)
             except asyncio.TimeoutError:
                 break  # server flight done
 
@@ -95,6 +85,10 @@ async def _fetch_one(host: str, port: int) -> list[bytes]:
         records = []
     finally:
         writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
 
     return records
 

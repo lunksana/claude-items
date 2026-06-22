@@ -426,9 +426,13 @@ class _GeositeRule(_Rule):
         if host in self._exact:
             return f"exact {host}"
         if self._suffix:
-            parts = host.split(".")
-            for i in range(len(parts) - 1):
-                sfx = ".".join(parts[i:])
+            # 用 rfind 避免 split+join 的多次临时字符串分配
+            dot_pos = len(host)
+            while True:
+                dot_pos = host.rfind('.', 0, dot_pos)
+                if dot_pos < 0:
+                    break
+                sfx = host[dot_pos + 1:]
                 if self._bloom is not None and sfx not in self._bloom:
                     continue
                 if sfx in self._suffix:

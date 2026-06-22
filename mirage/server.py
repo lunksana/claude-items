@@ -19,8 +19,6 @@ import json
 
 import os
 
-import resource
-
 import socket
 
 import sys
@@ -44,7 +42,8 @@ from core.geosite_cache import ensure_all as geo_ensure_all
 
 from core.utils import (get_logger, unpack_address, safe_close, apply_log_levels, apply_log_format,
                         install_stale_gaierror_handler, set_drain_threshold,
-                        get_drain_threshold, wait_both_with_grace)
+                        get_drain_threshold, wait_both_with_grace, set_keepalive, raise_fd_limit,
+                        install_uvloop_if_available)
 from core.udp_relay import handle_udp_tunnel
 from core.version import __version__
 from core.time_sync import TimeSync
@@ -82,24 +81,6 @@ def _release_ip_slot(client_ip: str) -> None:
     else:
         _CONN_COUNT_BY_IP[client_ip] = c
 
-
-def _set_keepalive(sock: socket.socket) -> None:
-    """
-    在已 accept 的 TCP socket 上开 SO_KEEPALIVE，并把 Linux 默认的 2 小时探测
-    阈值调到 ~90s（60s 静默 + 10s 间隔 × 3 次探测），让"客户端 NAT/路由器/wifi
-    断了但没发 FIN"的死连接在 90s 内被踢掉。
-    Linux 才有 TCP_KEEPIDLE/INTVL/CNT；其它平台只开 SO_KEEPALIVE。
-    """
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        if hasattr(socket, "TCP_KEEPIDLE"):
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
-        if hasattr(socket, "TCP_KEEPINTVL"):
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
-        if hasattr(socket, "TCP_KEEPCNT"):
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
-    except OSError as e:
-        logger.debug("Cannot enable TCP keepalive: %s", e)
 
 from core.stats import StatsStore
 
@@ -148,7 +129,7 @@ async def handle_client(
         # 认证通过的合法客户端：开 TCP keepalive 检测死连接（NAT/路由器断了但没发 FIN）
         sock = client_writer.get_extra_info("socket")
         if _TCP_KEEPALIVE and sock:
-            _set_keepalive(sock)
+            set_keepalive(sock)
 
         # 合法客户端：对该 TCP 连接设置 Brutal 速率
         rate_bps = cfg.get("brutal_rate_bps", 0)
@@ -276,19 +257,8 @@ async def handle_client(
         _release_ip_slot(client_ip)
 
 
-def _raise_fd_limit() -> None:
-    """尝试将进程的文件描述符上限提升至系统硬限制"""
-    try:
-        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        if soft < hard:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
-            logger.info("File descriptor limit raised: %d -> %d", soft, hard)
-    except Exception as e:
-        logger.warning("Could not raise fd limit: %s", e)
-
-
 async def main(config_path: str) -> None:
-    _raise_fd_limit()
+    raise_fd_limit()
 
     # 静音 stale getaddrinfo future 的噪音（详见 utils.install_stale_gaierror_handler）
     install_stale_gaierror_handler(asyncio.get_running_loop())
@@ -413,16 +383,7 @@ async def main(config_path: str) -> None:
 
 
 if __name__ == "__main__":
-    # 接受 PYREALIY_NO_UVLOOP 作为 legacy 别名（0.4.35 前的环境变量名）
-    if os.environ.get("MIRAGE_NO_UVLOOP") == "1" or os.environ.get("PYREALIY_NO_UVLOOP") == "1":
-        print("[*] uvloop disabled (asyncio default)")
-    else:
-        try:
-            import uvloop
-            uvloop.install()
-            print("[*] uvloop enabled")
-        except ImportError:
-            pass
+    install_uvloop_if_available()
 
     config = sys.argv[1] if len(sys.argv) > 1 else "config_server.json"
     asyncio.run(main(config))

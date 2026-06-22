@@ -130,6 +130,10 @@ async def open_brutal_connection(
     # 在连接前设置 Brutal（内核会在握手后开始生效）
     enable(sock, rate_bps)
 
-    await loop.sock_connect(sock, sockaddr)
+    try:
+        await loop.sock_connect(sock, sockaddr)
+    except BaseException:
+        sock.close()
+        raise
     reader, writer = await asyncio.open_connection(sock=sock, limit=262144)
     return reader, writer

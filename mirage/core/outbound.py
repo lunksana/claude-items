@@ -276,6 +276,9 @@ def _resolve_host_inplace(node_cfg: dict, tag: str) -> None:
     后没人接住它的 gaierror，asyncio 会抱怨 "Future exception was never
     retrieved"。启动一次性解析既消除噪音根源，又能在启动期快速暴露
     "客户端连不上服务端"。
+
+    注意：此函数在启动期调用，阻塞是可接受的（避免并发 DNS 解析的复杂性）。
+    如果需要非阻塞，可改用 asyncio.get_event_loop().getaddrinfo()。
     """
     raw = node_cfg["server_host"]
     host = raw.strip() if isinstance(raw, str) else raw

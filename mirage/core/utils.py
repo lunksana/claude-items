@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import datetime as _dt
+import ipaddress
 import json as _json
 import logging
 import logging.handlers  # noqa: F401 (used at module level by _CompressedRotatingFileHandler)
+
+import resource
 
 import socket
 
@@ -272,6 +275,77 @@ _DRAIN_AFTER_HALF = 2.0        # 单向结束后，给另一方向最多多少�
 #   - apply_log_levels() 自身的反馈与告警
 # 模块级单例，名字直接对应 cfg["log_levels"] 里的 "utils" 键
 _logger = get_logger("utils")
+
+
+# ── 共用 socket / fd 工具 ──────────────────────────────────────────────────────
+
+def set_keepalive(sock: socket.socket) -> None:
+    """
+    在已 accept 的 TCP socket 上开 SO_KEEPALIVE，并把 Linux 默认的 2 小时探测
+    阈值调到 ~90s（60s 静默 + 10s 间隔 × 3 次探测），让"客户端 NAT/路由器/wifi
+    断了但没发 FIN"的死连接在 90s 内被踢掉。
+    Linux 才有 TCP_KEEPIDLE/INTVL/CNT；其它平台只开 SO_KEEPALIVE。
+    """
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if hasattr(socket, "TCP_KEEPIDLE"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)
+        if hasattr(socket, "TCP_KEEPINTVL"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+        if hasattr(socket, "TCP_KEEPCNT"):
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+    except OSError as e:
+        _logger.debug("Cannot enable TCP keepalive: %s", e)
+
+
+def raise_fd_limit() -> None:
+    """尝试将进程的文件描述符上限提升至系统硬限制"""
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft < hard:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+            _logger.info("File descriptor limit raised: %d -> %d", soft, hard)
+    except Exception as e:
+        _logger.warning("Could not raise fd limit: %s", e)
+
+
+def is_ip_literal(host: str) -> bool:
+    """判断 host 是否为合法 IP 字面量（v4 或 v6），包括 IPv4-mapped IPv6"""
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def install_uvloop_if_available() -> None:
+    """尝试安装 uvloop 事件循环（若可用）。支持 MIRAGE_NO_UVLOOP / PYREALIY_NO_UVLOOP 环境变量禁用。"""
+    import os
+    if os.environ.get("MIRAGE_NO_UVLOOP") == "1" or os.environ.get("PYREALIY_NO_UVLOOP") == "1":
+        print("[*] uvloop disabled (asyncio default)")
+    else:
+        try:
+            import uvloop
+            uvloop.install()
+            print("[*] uvloop enabled")
+        except ImportError:
+            pass
+
+
+async def read_tls_record(reader: asyncio.StreamReader, max_length: int = 16640) -> tuple[int, bytes]:
+    """
+    从 asyncio.StreamReader 读取一条 TLS 记录，返回 (content_type, raw_record)。
+
+    raw_record 包含 5 字节 header + body，可直接用于回放或解析。
+    max_length: 单条记录 body 的最大允许长度（默认 16384 + 256 = 16640）。
+    """
+    header = await reader.readexactly(5)
+    ct     = header[0]
+    length = int.from_bytes(header[3:5], "big")
+    if length > max_length:
+        raise ValueError(f"TLS record too large: {length}")
+    body = await reader.readexactly(length)
+    return ct, header + body
 
 
 def set_drain_threshold(n: int) -> None:

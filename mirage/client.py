@@ -29,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import resource
 import sys
 
 from core.version import __version__
@@ -46,7 +45,8 @@ from core.geosite_cache import ensure_all as geo_ensure_all
 from core.router import build_router, PROXY, DIRECT, REJECT
 from core.healthcheck import HealthCheck
 from core.utils import (get_logger, safe_close, apply_log_levels, apply_log_format,
-                        install_stale_gaierror_handler, set_drain_threshold)
+                        install_stale_gaierror_handler, set_drain_threshold, raise_fd_limit,
+                        install_uvloop_if_available)
 from core import brutal
 
 logger = get_logger("client")
@@ -281,16 +281,6 @@ async def handle_tproxy_connection(
                     routing_host=domain)
 
 
-def _raise_fd_limit() -> None:
-    try:
-        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        if soft < hard:
-            resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
-            logger.info("File descriptor limit raised: %d -> %d", soft, hard)
-    except Exception as e:
-        logger.warning("Could not raise fd limit: %s", e)
-
-
 def _legacy_action_map(outbounds: dict[str, Outbound]) -> dict[str, str]:
     """
     老 CSV rules 的 PROXY/DIRECT/REJECT 关键字 → outbound tag。
@@ -330,7 +320,7 @@ def _check_brutal_kernel(cfg: dict) -> None:
 
 
 async def main(config_path: str) -> None:
-    _raise_fd_limit()
+    raise_fd_limit()
     install_stale_gaierror_handler(asyncio.get_running_loop())
 
     cfg = load_config(config_path)
@@ -631,16 +621,7 @@ async def main(config_path: str) -> None:
 
 
 if __name__ == "__main__":
-    # 接受 PYREALIY_NO_UVLOOP 作为 legacy 别名（0.4.35 前的环境变量名）
-    if os.environ.get("MIRAGE_NO_UVLOOP") == "1" or os.environ.get("PYREALIY_NO_UVLOOP") == "1":
-        print("[*] uvloop disabled (asyncio default)")
-    else:
-        try:
-            import uvloop
-            uvloop.install()
-            print("[*] uvloop enabled")
-        except ImportError:
-            pass
+    install_uvloop_if_available()
 
     config = sys.argv[1] if len(sys.argv) > 1 else "config_client.json"
     asyncio.run(main(config))

@@ -64,6 +64,9 @@ class EncryptedTunnel:
       双方各自维护独立的 nonce 计数器（发送/接收分开）。
     """
 
+    __slots__ = ("_reader", "_writer", "_password", "_send_cipher", "_recv_cipher",
+                 "_send_nonce", "_recv_nonce")
+
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, password: str):
         self._reader = reader
         self._writer = writer
@@ -148,7 +151,7 @@ class EncryptedTunnel:
             # 外层 = 0x17（application_data）—— TLS 1.3 加密 alert 的外层必须如此
             self._writer.write(b"\x17\x03\x03" + struct.pack("!H", len(ciphertext)) + ciphertext)
             await self._writer.drain()
-        except Exception:
+        except (OSError, EOFError, asyncio.CancelledError):
             pass
 
     async def recv(self) -> bytes:
