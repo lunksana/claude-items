@@ -43,6 +43,25 @@ ask() {                              # ask "提示" ["默认"]  → 输出
     echo "${val:-$default}"
 }
 
+ask_secret() {                       # ask_secret "提示"  → 输出（输入不回显）
+    local prompt=$1 val
+    read -rsp "    ${prompt}: " val </dev/tty
+    echo >&2                          # read -s 不换行，手动补一个
+    echo "$val"
+}
+
+# 让用户手动设密码：隐藏输入 + 重输确认（防隐藏态打错却不自知）
+ask_password_confirmed() {
+    local p1 p2
+    while :; do
+        p1=$(ask_secret "密码")
+        [[ -z "$p1" ]] && { warn "密码不能为空"; continue; }
+        p2=$(ask_secret "再输一次确认")
+        [[ "$p1" == "$p2" ]] && { echo "$p1"; return; }
+        warn "两次输入不一致，请重来"
+    done
+}
+
 ask_yn() {                           # ask_yn "提示" [y|n]  → 0/1
     local prompt=$1 default=${2:-y} hint val
     hint=$( [[ "$default" == y ]] && echo "Y/n" || echo "y/N" )
@@ -1026,19 +1045,22 @@ install_server() {
         password=$(openssl rand -base64 24 | tr -d /+= | head -c 24)
         info "已生成密码：$password"
     else
-        password=$(ask "密码")
-        [[ -z "$password" ]] && err "密码不能为空"
+        password=$(ask_password_confirmed)   # 隐藏输入 + 重输确认
     fi
 
     camouflage=$(ask_camouflage_host "www.apple.com")
 
     if handle_brutal_optional; then
-        local default_rate=$((10 * 1000 * 1000))
         local rate_mbps
         rate_mbps=$(ask "每条连接的 Brutal 速率上限（Mbps）" "10")
         brutal_rate_bps=$(( rate_mbps * 1000 * 1000 ))
         info "Brutal 速率：${rate_mbps} Mbps / connection"
     fi
+
+    # 记下连接信息：两端模式下客户端直接复用，无需重输
+    INSTALLED_SERVER_PORT="$listen_port"
+    INSTALLED_SERVER_PASSWORD="$password"
+    INSTALLED_SERVER_CAMOUFLAGE="$camouflage"
 
     ask_log_config
 
@@ -1046,6 +1068,21 @@ install_server() {
     install_shim_scripts "server"
     write_server_config "$listen_host" "$listen_port" "$password" "$camouflage" "$brutal_rate_bps"
     install_service_unit "server"
+
+    # 防火墙提醒：新手最常踩的坑——服务起来了但云安全组/ufw 没放行端口 → 客户端连不上
+    echo
+    warn "别忘了放行入站 TCP 端口 ${listen_port}（最常见的\"连不上\"原因）："
+    if command -v ufw &>/dev/null; then
+        info "  本机 ufw：sudo ufw allow ${listen_port}/tcp"
+    elif command -v firewall-cmd &>/dev/null; then
+        info "  本机 firewalld：sudo firewall-cmd --add-port=${listen_port}/tcp --permanent && sudo firewall-cmd --reload"
+    fi
+    info "  云服务器还需在控制台「安全组 / 防火墙」放行该端口"
+
+    # 两端模式：客户端马上在本机装并复用以上信息，"拷到远程客户端"那段是噪音，跳过
+    if [[ "${BOTH_MODE:-0}" == "1" ]]; then
+        return
+    fi
 
     # 末尾：打印对应客户端 cfg 模板，让用户直接复制到客户端
     title "客户端配置模板（复制到客户端机器的 config_client.json）"
@@ -1166,11 +1203,24 @@ install_client() {
     fi
 
     local local_listen_host="0.0.0.0"     # 默认 LAN 共用；用户可改 127.0.0.1
+
+    # 两端模式：直接复用刚装的服务端信息（连本机），只问本地监听端口
+    if [[ "${BOTH_MODE:-0}" == "1" && "$existing_loaded" != "yes" ]]; then
+        server_host="127.0.0.1"
+        server_port="$INSTALLED_SERVER_PORT"
+        password="$INSTALLED_SERVER_PASSWORD"
+        camouflage="$INSTALLED_SERVER_CAMOUFLAGE"
+        local_listen_host="127.0.0.1"
+        ok "复用服务端信息：127.0.0.1:${server_port}（SNI ${camouflage}）"
+        socks5_port=$(ask_port "本地监听端口（mixed = SOCKS5 + HTTP 同口）" "7890" tcp)
+        existing_loaded=yes
+    fi
+
     if [[ "$existing_loaded" != "yes" ]]; then
         server_host=$(ask "服务端地址（IP 或域名）" "")
         [[ -z "$server_host" ]] && err "服务端地址不能为空"
         server_port=$(ask_port "服务端端口" "443")
-        password=$(ask "密码（与服务端一致）")
+        password=$(ask_secret "密码（与服务端一致；粘贴即可，不回显）")
         [[ -z "$password" ]] && err "密码不能为空"
         camouflage=$(ask "伪装 SNI（与服务端一致）" "www.apple.com")
         local_listen_host=$(ask "本地监听地址（0.0.0.0 = LAN 设备共用；127.0.0.1 = 仅本机）" "0.0.0.0")
@@ -1478,10 +1528,11 @@ main() {
         server) install_server ;;
         client) install_client ;;
         both)
+            BOTH_MODE=1                      # 让 install_server 跳过"拷到远程客户端"模板
             install_server
             echo
-            warn "服务端装完，现在装客户端（用你刚才看到的配置）"
-            ask_yn "继续吗？" y && install_client
+            info "服务端装完，现在装客户端——自动复用刚才的连接信息（连本机 127.0.0.1）"
+            ask_yn "继续装客户端吗？" y && install_client
             ;;
     esac
 
