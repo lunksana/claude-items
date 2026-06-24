@@ -191,12 +191,12 @@ check_root()  { [[ $EUID -eq 0 ]] || err "需要 root 权限：sudo bash install
 check_linux() { [[ "$(uname -s)" == "Linux" ]] || err "仅支持 Linux"; }
 
 check_python() {
-    command -v python3 &>/dev/null || err "未找到 python3。请先安装 Python 3.10+"
+    command -v python3 &>/dev/null || err "未找到 python3。请先安装 Python 3.9+"
     local v
     v=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
     info "Python 版本：$v"
-    python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
-        || err "需要 Python 3.10+（当前 $v）"
+    python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' \
+        || err "需要 Python 3.9+（当前 $v）"
 }
 
 check_openssl() {

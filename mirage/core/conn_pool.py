@@ -224,12 +224,20 @@ class BrutalPool:
         # 高并发场景且不在意 GFW 指纹的用户可降到 0.05 / 0.02 加速 refill。
         self._stagger_step   = float(cfg.get("stagger_step_sec", _STAGGER_STEP))
         self._stagger_jitter = float(cfg.get("stagger_jitter_sec", _STAGGER_JITTER))
-        self._queue: asyncio.Queue[_ReadyTunnel] = asyncio.Queue()
+        self._queue: asyncio.Queue[_ReadyTunnel] | None = None
         # 正在建立中的连接数。asyncio 单线程，在任意两个 await 之间修改是原子的，
         # 因此可以用普通 int 代替 Lock 来防止并发超建。
         self._building  = 0
         self._on_latency = on_latency
         self._on_failure = on_failure
+
+    @property
+    def _q(self) -> asyncio.Queue[_ReadyTunnel]:
+        if self._queue is None:
+            self._queue = asyncio.Queue()
+        return self._queue
+
+    def start(self) -> None:
         # 池级累计阶梯起点（monotonic time），跨 _schedule_refills 调用累计。
         # 见模块顶部注释；用法：_reserve_build_slot() 取一个 delay 并把游标推进
         self._next_build_at = 0.0
@@ -274,7 +282,7 @@ class BrutalPool:
     @property
     def ready_count(self) -> int:
         """当前可用隧道数（队列长度）"""
-        return self._queue.qsize()
+        return self._q.qsize()
 
     async def acquire(self) -> _ReadyTunnel | None:
         """
@@ -286,7 +294,7 @@ class BrutalPool:
         self._schedule_refills()
         try:
             while True:
-                ready = await asyncio.wait_for(self._queue.get(), timeout=5.0)
+                ready = await asyncio.wait_for(self._q.get(), timeout=5.0)
                 if ready.is_stale:
                     ready.close()
                     logger.debug("Discarded stale pool connection, rebuilding")
@@ -328,13 +336,13 @@ class BrutalPool:
         if self._on_latency and latency_ms is not None:
             self._on_latency(latency_ms)
         # 池满时挤掉一条最旧的（自然轮换，无锁）
-        if self._queue.qsize() >= self._pool_size:
+        if self._q.qsize() >= self._pool_size:
             try:
-                old = self._queue.get_nowait()
+                old = self._q.get_nowait()
                 old.close()
             except asyncio.QueueEmpty:
                 pass
-        await self._queue.put(ready)
+        await self._q.put(ready)
         return True
 
     def _schedule_refills(self) -> None:
@@ -346,7 +354,7 @@ class BrutalPool:
         各排一条 build 时，N 条 build 仍然彼此间隔 _STAGGER_STEP，**而不是**
         每条都从 delay=0 立刻发 → N 条 SYN 同秒一齐出去。
         """
-        deficit = self._pool_size - self._queue.qsize() - self._building
+        deficit = self._pool_size - self._q.qsize() - self._building
         for _ in range(max(0, deficit)):
             asyncio.create_task(self._build_and_enqueue(delay=self._reserve_build_slot()))
 
@@ -361,7 +369,7 @@ class BrutalPool:
         if delay > 0:
             await asyncio.sleep(delay)
         # 检查与占位之间没有 await，asyncio 单线程保证原子性
-        if self._queue.qsize() + self._building >= self._pool_size:
+        if self._q.qsize() + self._building >= self._pool_size:
             return False
         self._building += 1
         try:
@@ -369,7 +377,7 @@ class BrutalPool:
             if ready:
                 if self._on_latency and latency_ms is not None:
                     self._on_latency(latency_ms)
-                await self._queue.put(ready)
+                await self._q.put(ready)
                 return True
             if self._on_failure:
                 self._on_failure()
