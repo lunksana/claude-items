@@ -204,7 +204,16 @@ check_openssl() {
 }
 
 install_pip_deps() {
-    info "安装 Python 依赖（cryptography, uvloop）..."
+    info "检查 Python 依赖（cryptography, uvloop）..."
+    if python3 -c "import cryptography, uvloop" &>/dev/null; then
+        ok "检测到 cryptography 与 uvloop 已安装且可用，跳过 pip 安装步骤。"
+        return 0
+    elif python3 -c "import cryptography" &>/dev/null; then
+        ok "检测到 cryptography 已安装，尝试单独安装可选加速依赖 uvloop..."
+        python3 -m pip install uvloop --prefer-binary --quiet 2>/dev/null || warn "uvloop 安装失败，继续（不影响核心功能）"
+        return 0
+    fi
+
     if ! python3 -m pip --version &>/dev/null; then
         case $PKG_MGR in
             apt) apt-get install -y python3-pip ;;
@@ -215,13 +224,13 @@ install_pip_deps() {
     fi
     # PEP 668：Debian 13/Ubuntu 24+/最近的 Fedora 默认禁止全局 pip，要 --break-system-packages。
     # 老系统 pip < 23.0.1 不识别该 flag —— 仅在检测到 EXTERNALLY-MANAGED 标志时才加。
-    local pip_args=""
+    local pip_args="--prefer-binary"
     if compgen -G "/usr/lib/python3*/EXTERNALLY-MANAGED" > /dev/null 2>&1 \
        || compgen -G "/usr/lib/python3.*/EXTERNALLY-MANAGED" > /dev/null 2>&1; then
-        pip_args="--break-system-packages"
+        pip_args="--break-system-packages --prefer-binary"
         info "  检测到 PEP 668 environment，加 --break-system-packages"
     fi
-    python3 -m pip install $pip_args -r requirements.txt --quiet
+    python3 -m pip install $pip_args -r requirements.txt --quiet || err "安装 cryptography 失败！对于 32 位/老旧系统，请先通过系统包管理器 (如 apt install python3-cryptography) 手动安装。"
     # uvloop 可选但强推（性能 +18%）
     python3 -m pip install $pip_args uvloop --quiet || warn "uvloop 安装失败，继续（性能受影响）"
     ok "Python 依赖装好"
@@ -1030,6 +1039,137 @@ _install_skip() {
     return 0
 }
 
+# ── 导出客户端模板与连接信息 ──
+_print_and_save_client_template() {
+    local server_ip=$1 port=$2 password=$3 camouflage=$4
+    local sys_dir="${EFFECTIVE_ETC:-/etc/mirage}"
+    mkdir -p "$sys_dir" 2>/dev/null || true
+    local sys_txt="${sys_dir}/mirage_client_info.txt"
+    local cur_txt="mirage_client_info.txt"
+
+    # 构造导出的文本内容
+    local content
+    content=$(cat <<EOF
+================================================================================
+Mirage 客户端连接配置信息与导出模板
+================================================================================
+
+【快捷填参连接字段】在客户端执行 ./install.sh 引导时可依次填入：
+    服务端地址  : $server_ip
+    服务端端口  : $port
+    密码        : $password
+    伪装 SNI    : $camouflage
+
+--------------------------------------------------------------------------------
+【客户端完整配置模板】也可直接将下方 JSON 保存为客户端机器的 config_client.json，
+ 放入客户端 /etc/mirage/ 目录或在客户端执行 install.sh 时自动识别加载：
+
+{
+    "schema_version": 1,
+    "inbounds": [{"type": "mixed", "listen": "127.0.0.1:7890"}],
+    "outbounds": [
+        {
+            "tag": "proxy", "type": "mirage",
+            "server_host": "$server_ip",
+            "server_port": $port,
+            "password": "$password",
+            "camouflage_host": "$camouflage"
+        },
+        {"tag": "direct", "type": "direct"},
+        {"tag": "block",  "type": "block"}
+    ],
+    "route": {
+        "default": "proxy",
+        "rules": [
+            {"ip_cidr": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"], "outbound": "direct"},
+            {"rule_set": ["loyalsoldier:cn"], "outbound": "direct"},
+            {"geoip":    ["loyalsoldier:cn"], "outbound": "direct"}
+        ]
+    },
+    "dns": {
+        "listen": "127.0.0.1:5353",
+        "cn":     "119.29.29.29",
+        "remote": "1.1.1.1:53"
+    },
+    "geosite_sources": [
+        {"name": "loyalsoldier",
+         "url":  "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"}
+    ],
+    "geoip_sources": [
+        {"name": "loyalsoldier",
+         "url":  "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"}
+    ]
+}
+================================================================================
+EOF
+)
+
+    # 写入文件
+    echo "$content" > "$sys_txt" 2>/dev/null && chmod 600 "$sys_txt" 2>/dev/null || true
+    if [[ "$(realpath "$sys_txt" 2>/dev/null || echo "$sys_txt")" != "$(realpath "$cur_txt" 2>/dev/null || echo "$cur_txt")" ]]; then
+        echo "$content" > "$cur_txt" 2>/dev/null && chmod 600 "$cur_txt" 2>/dev/null || true
+    fi
+
+    # 终端输出屏幕提示
+    title "客户端配置模板与连接字段"
+    cat <<EOF
+$(_c 36 "请用下面的配置在客户端 install.sh 引导时输入对应字段：")
+
+    服务端地址  : $(_c 33 "$server_ip")
+    服务端端口  : $(_c 33 "$port")
+    密码        : $(_c 33 "$password")
+    伪装 SNI    : $(_c 33 "$camouflage")
+
+$(_c 36 "或者直接把导出的 config_client.json 模板拷到客户端（含国内外分流 + DNS）：")
+
+EOF
+    echo "$content" | sed -n '/^{/,/^}/p'
+    echo
+
+    ok "配置信息与模板已成功导出至文本文件："
+    [[ -f "$sys_txt" ]] && info "  系统路径：$sys_txt"
+    [[ -f "$cur_txt" && "$(realpath "$cur_txt" 2>/dev/null)" != "$(realpath "$sys_txt" 2>/dev/null)" ]] && info "  当前目录：$(pwd)/$cur_txt"
+    echo
+    $(_c 36 "提示：传到客户端建议用 scp 或 SFTP（更安全），不要走明文聊天软件；")
+    $(_c 36 "       后续随时在服务端执行 ./install.sh info 或通过菜单选项 4 再次查看与导出。")
+}
+
+export_server_info() {
+    title "查看与导出现有服务端配置信息"
+    local cfg_file=""
+    local etc_target="/etc/mirage"
+    for p in "/etc/mirage/config_server.json" "/etc/pyrealiy/config_server.json" "./config_server.json"; do
+        if [[ -f "$p" ]]; then
+            cfg_file="$p"
+            if [[ "$p" == "./config_server.json" ]]; then
+                etc_target="."
+            fi
+            break
+        fi
+    done
+
+    if [[ -z "$cfg_file" ]]; then
+        err "未找到服务端的配置文件 config_server.json。请确认本机是否已安装服务端。"
+    fi
+
+    info "正在从 $cfg_file 解析连接参数..."
+    local port pwd cam
+    port=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('listen_port', 443))" "$cfg_file" 2>/dev/null)
+    pwd=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('password', ''))" "$cfg_file" 2>/dev/null)
+    cam=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get('camouflage_host', 'www.apple.com'))" "$cfg_file" 2>/dev/null)
+
+    if [[ -z "$pwd" ]]; then
+        err "从 $cfg_file 中解析密码失败！请检查 JSON 格式。"
+    fi
+
+    local auto_ip
+    auto_ip=$(curl -s -4 --max-time 5 https://api.ipify.org 2>/dev/null || curl -s -4 --max-time 5 https://ifconfig.me 2>/dev/null || echo "")
+    local server_ip
+    server_ip=$(ask "确认服务端公网 IP 或域名（用于生成客户端配置）" "${auto_ip:-1.2.3.4}")
+
+    EFFECTIVE_ETC="$etc_target" _print_and_save_client_template "$server_ip" "$port" "$pwd" "$cam"
+}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 服务端流程
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1038,14 +1178,22 @@ install_server() {
     title "服务端安装"
 
     local listen_host listen_port password camouflage brutal_rate_bps=0
-    listen_host=$(ask "监听地址（0.0.0.0 = 所有网卡）" "0.0.0.0")
+    local auto_ip
+    auto_ip=$(curl -s -4 --max-time 5 https://api.ipify.org 2>/dev/null || curl -s -4 --max-time 5 https://ifconfig.me 2>/dev/null || echo "")
+    local public_host
+    public_host=$(ask "本机公网 IP 或域名（供客户端导出连接使用）" "${auto_ip:-1.2.3.4}")
+    listen_host="0.0.0.0"
     listen_port=$(ask_port "监听端口" "443")
 
     if ask_yn "自动生成密码？" y; then
         password=$(openssl rand -base64 24 | tr -d /+= | head -c 24)
         info "已生成密码：$password"
     else
-        password=$(ask_password_confirmed)   # 隐藏输入 + 重输确认
+        password=$(ask "自定义密码（明文显示以便确认）" "")
+        while [[ -z "$password" ]]; do
+            warn "密码不能为空"
+            password=$(ask "自定义密码（明文显示以便确认）" "")
+        done
     fi
 
     camouflage=$(ask_camouflage_host "www.apple.com")
@@ -1084,64 +1232,8 @@ install_server() {
         return
     fi
 
-    # 末尾：打印对应客户端 cfg 模板，让用户直接复制到客户端
-    title "客户端配置模板（复制到客户端机器的 config_client.json）"
-    local server_ip
-    server_ip=$(curl -s -4 --max-time 5 https://api.ipify.org 2>/dev/null || echo "<你的服务端公网 IP>")
-    cat <<EOF
-$(_c 36 "请用下面的配置在客户端 install.sh 引导时输入对应字段：")
-
-    服务端地址  : $(_c 33 "$server_ip")
-    服务端端口  : $(_c 33 "$listen_port")
-    密码        : $(_c 33 "$password")
-    伪装 SNI    : $(_c 33 "$camouflage")
-
-$(_c 36 "或者直接把下面的 config_client.json 模板拷到客户端（含国内外分流 + DNS）：")
-
-{
-    "schema_version": 1,
-    "inbounds": [{"type": "mixed", "listen": "127.0.0.1:7890"}],
-    "outbounds": [
-        {
-            "tag": "proxy", "type": "mirage",
-            "server_host": "$server_ip",
-            "server_port": $listen_port,
-            "password": "$password",
-            "camouflage_host": "$camouflage"
-        },
-        {"tag": "direct", "type": "direct"},
-        {"tag": "block",  "type": "block"}
-    ],
-    "route": {
-        "default": "proxy",
-        "rules": [
-            {"ip_cidr": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"], "outbound": "direct"},
-            {"rule_set": ["loyalsoldier:cn"], "outbound": "direct"},
-            {"geoip":    ["loyalsoldier:cn"], "outbound": "direct"}
-        ]
-    },
-    "dns": {
-        "listen": "127.0.0.1:5353",
-        "cn":     "119.29.29.29",
-        "remote": "1.1.1.1:53"
-    },
-    "geosite_sources": [
-        {"name": "loyalsoldier",
-         "url":  "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat"}
-    ],
-    "geoip_sources": [
-        {"name": "loyalsoldier",
-         "url":  "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"}
-    ]
-}
-
-$(_c 36 "传到客户端建议用 scp（更安全），不要明文走 IM：")
-    $(_c 33 "scp config_client.json user@<客户端机器>:~/")
-
-$(_c 36 "提示：客户端 install.sh 会自动识别上面这个文件，跳过连接信息询问；")
-$(_c 36 "       想换 DNS / 路由策略时直接重跑 install.sh 即可。")
-
-EOF
+    # 末尾：打印并导出客户端配置模板与连接信息
+    _print_and_save_client_template "$public_host" "$listen_port" "$password" "$camouflage"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1220,7 +1312,7 @@ install_client() {
         server_host=$(ask "服务端地址（IP 或域名）" "")
         [[ -z "$server_host" ]] && err "服务端地址不能为空"
         server_port=$(ask_port "服务端端口" "443")
-        password=$(ask_secret "密码（与服务端一致；粘贴即可，不回显）")
+        password=$(ask "密码（与服务端一致；明文显示以便确认）" "")
         [[ -z "$password" ]] && err "密码不能为空"
         camouflage=$(ask "伪装 SNI（与服务端一致）" "www.apple.com")
         local_listen_host=$(ask "本地监听地址（0.0.0.0 = LAN 设备共用；127.0.0.1 = 仅本机）" "0.0.0.0")
@@ -1494,21 +1586,33 @@ main() {
     detect_pkg_mgr
     detect_init_system
 
+    if [[ "${1:-}" =~ ^(info|show|export|config)$ ]]; then
+        check_python
+        export_server_info
+        return
+    fi
+
     local choice mode
     choice=$(ask_choice "操作类型" \
         "服务端安装" \
         "客户端安装" \
         "两端都装（本地测试用）" \
+        "查看与导出现有服务端连接信息" \
         "卸载（停服务、删文件）")
     case $choice in
         1) mode="server" ;;
         2) mode="client" ;;
         3) mode="both" ;;
-        4) mode="uninstall" ;;
+        4) mode="info" ;;
+        5) mode="uninstall" ;;
     esac
 
     if [[ "$mode" == "uninstall" ]]; then
         uninstall
+        return
+    elif [[ "$mode" == "info" ]]; then
+        check_python
+        export_server_info
         return
     fi
 
