@@ -45,13 +45,15 @@ class _GroupBase(Outbound):
         leaf = self.resolve_leaf()
         return leaf.latency_ms if leaf is not self else None
 
-    async def handle(self, local_reader, local_writer, target_host, target_port):
+    async def handle(self, local_reader, local_writer, target_host, target_port,
+                     on_up=None, on_down=None):
         leaf = self.resolve_leaf()
         if leaf is self:
             logger.error("[%s] no healthy child", self.tag)
             await safe_close(local_writer)
             return
-        await leaf.handle(local_reader, local_writer, target_host, target_port)
+        await leaf.handle(local_reader, local_writer, target_host, target_port,
+                          on_up=on_up, on_down=on_down)
 
 
 class UrlTestGroup(_GroupBase):

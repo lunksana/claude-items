@@ -108,7 +108,8 @@ class BlockOutbound(Outbound):
     def __init__(self, tag: str = "block"):
         self.tag = tag
 
-    async def handle(self, local_reader, local_writer, target_host, target_port):
+    async def handle(self, local_reader, local_writer, target_host, target_port,
+                     on_up=None, on_down=None):
         await safe_close(local_writer)
 
 
