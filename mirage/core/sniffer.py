@@ -218,6 +218,9 @@ class PrefixedReader:
         remaining_from_reader = await self._reader.readuntil(separator)
         return bytes(buf) + remaining_from_reader
 
+    async def readline(self) -> bytes:
+        return await self.readuntil(b"\n")
+
     def at_eof(self) -> bool:
         if self._pos < len(self._prefix):
             return False

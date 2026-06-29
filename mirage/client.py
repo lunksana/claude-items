@@ -273,12 +273,14 @@ async def handle_tproxy_connection(
     local_writer: asyncio.StreamWriter,
     outbounds: dict[str, Outbound],
     router,
+    registry=None,
+    routing_cache=None,
 ) -> None:
     target_host, target_port = local_writer.get_extra_info("sockname")
     domain, buffered = await sniff_domain(local_reader)
     reader = PrefixedReader(local_reader, buffered) if buffered else local_reader
     await _dispatch(reader, local_writer, target_host, target_port, outbounds, router,
-                    routing_host=domain)
+                    routing_host=domain, registry=registry, routing_cache=routing_cache)
 
 
 def _legacy_action_map(outbounds: dict[str, Outbound]) -> dict[str, str]:
@@ -497,7 +499,7 @@ async def main(config_path: str) -> None:
             tproxy_server = await _tproxy_mod.start_server(
                 "0.0.0.0",
                 tproxy_port,
-                lambda r, w: handle_tproxy_connection(r, w, outbounds, router),
+                lambda r, w: handle_tproxy_connection(r, w, outbounds, router, registry=api_registry, routing_cache=routing_cache),
             )
         except OSError as e:
             logger.error("TProxy failed to start: %s", e)
