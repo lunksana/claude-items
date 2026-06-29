@@ -293,6 +293,52 @@ parse_node_uri() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 客户端多节点收集（push 一个节点到 NODES_* 数组）
+# ──────────────────────────────────────────────────────────────────────────────
+
+# 调用前由 install_client 重置 NODES_HOST 等数组。每次调用收集一个节点，
+# 优先让用户粘 mirage:// URI；URI 无效或留空时回退手动逐项。
+_collect_node() {
+    local idx=$(( ${#NODES_HOST[@]} + 1 ))
+    local src_choice
+    src_choice=$(ask_choice "节点 #${idx} 输入方式" \
+        "粘贴 mirage:// 节点串（推荐）" \
+        "手动逐项输入")
+    local h="" p="" pw="" sni="" brutal=0
+    if [[ "$src_choice" == "1" ]]; then
+        while :; do
+            local uri_in
+            uri_in=$(ask "请粘贴 mirage:// 节点串" "")
+            if [[ -z "$uri_in" ]]; then
+                warn "未输入，退回手动逐项输入"
+                src_choice="2"; break
+            fi
+            if parse_node_uri "$uri_in"; then
+                h="$NODE_HOST"; p="$NODE_PORT"; pw="$NODE_PWD"; sni="$NODE_SNI"
+                brutal="${NODE_BRUTAL:-0}"
+                ok "节点 #${idx} 解析成功：${h}:${p} (SNI=${sni})"
+                break
+            else
+                warn "节点格式无效，期望：mirage://<密码>@<host>:<port>?sni=<域名>"
+            fi
+        done
+    fi
+    if [[ -z "$h" ]]; then
+        h=$(ask "节点 #${idx} 服务端地址（IP 或域名）" "")
+        [[ -z "$h" ]] && err "服务端地址不能为空"
+        p=$(ask_port "节点 #${idx} 服务端端口" "443")
+        pw=$(ask "节点 #${idx} 密码（与服务端一致；明文显示以便确认）" "")
+        [[ -z "$pw" ]] && err "密码不能为空"
+        sni=$(ask "节点 #${idx} 伪装 SNI（与服务端一致）" "www.apple.com")
+    fi
+    NODES_HOST+=("$h")
+    NODES_PORT+=("$p")
+    NODES_PASSWORD+=("$pw")
+    NODES_SNI+=("$sni")
+    NODES_BRUTAL+=("$brutal")
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 伪装 SNI 探测（openssl TLS 1.3 真握手）
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -696,10 +742,10 @@ EOF
 }
 
 write_client_config() {
-    local server_host=$1 server_port=$2 password=$3 camouflage=$4
-    local listen_host=$5 socks5_port=$6 routing_preset=$7 dns_preset=$8
-    local tproxy_port=$9 enable_api=${10} api_secret=${11}
-    local routing_json dns_extra api_extra tproxy_extra
+    local listen_host=$1 socks5_port=$2 routing_preset=$3 dns_preset=$4
+    local tproxy_port=$5 enable_api=$6 api_secret=$7
+    # 节点信息来自全局 NODES_* 数组；GROUP_TYPE 非空 → 多节点 + 组节点 'proxy'
+    local routing_json dns_extra api_extra tproxy_extra outbounds_block
 
     case $routing_preset in
         transparent) routing_json='{"default": "proxy", "rules": []}' ;;
@@ -794,6 +840,60 @@ write_client_config() {
          "url":  "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"}
     ]'
 
+    # 构造 outbounds 块：单节点 → 1 个 mirage（tag=proxy），多节点 → N 个 mirage(tag=proxy-i) + 1 个组(tag=proxy)
+    local node_count=${#NODES_HOST[@]}
+    if (( node_count <= 1 )); then
+        local brutal_extra=""
+        if [[ "${NODES_BRUTAL[0]:-0}" =~ ^[0-9]+$ ]] && (( ${NODES_BRUTAL[0]:-0} > 0 )); then
+            brutal_extra=",
+            \"brutal_rate_bps\": ${NODES_BRUTAL[0]}"
+        fi
+        outbounds_block="{
+            \"tag\": \"proxy\",
+            \"type\": \"mirage\",
+            \"server_host\": \"${NODES_HOST[0]}\",
+            \"server_port\": ${NODES_PORT[0]},
+            \"password\": \"${NODES_PASSWORD[0]}\",
+            \"camouflage_host\": \"${NODES_SNI[0]}\"${brutal_extra}
+        },
+        {\"tag\": \"direct\", \"type\": \"direct\"},
+        {\"tag\": \"block\",  \"type\": \"block\"}"
+    else
+        local i child_tags=""
+        outbounds_block=""
+        for (( i = 0; i < node_count; i++ )); do
+            local brutal_extra=""
+            if [[ "${NODES_BRUTAL[i]:-0}" =~ ^[0-9]+$ ]] && (( ${NODES_BRUTAL[i]:-0} > 0 )); then
+                brutal_extra=",
+            \"brutal_rate_bps\": ${NODES_BRUTAL[i]}"
+            fi
+            outbounds_block+="{
+            \"tag\": \"proxy-$((i+1))\",
+            \"type\": \"mirage\",
+            \"server_host\": \"${NODES_HOST[i]}\",
+            \"server_port\": ${NODES_PORT[i]},
+            \"password\": \"${NODES_PASSWORD[i]}\",
+            \"camouflage_host\": \"${NODES_SNI[i]}\"${brutal_extra}
+        },
+        "
+            [[ -n "$child_tags" ]] && child_tags+=", "
+            child_tags+="\"proxy-$((i+1))\""
+        done
+        local group_extra=""
+        if [[ "$GROUP_TYPE" == "urltest" ]]; then
+            group_extra=", \"tolerance\": 50"
+        elif [[ "$GROUP_TYPE" == "selector" ]]; then
+            group_extra=", \"default\": \"proxy-1\""
+        fi
+        outbounds_block+="{
+            \"tag\": \"proxy\",
+            \"type\": \"${GROUP_TYPE}\",
+            \"outbounds\": [${child_tags}]${group_extra}
+        },
+        {\"tag\": \"direct\", \"type\": \"direct\"},
+        {\"tag\": \"block\",  \"type\": \"block\"}"
+    fi
+
     mkdir -p "$EFFECTIVE_ETC"
     local path="$EFFECTIVE_ETC/config_client.json"
     cat > "$path" <<EOF
@@ -803,16 +903,7 @@ write_client_config() {
         {"type": "mixed", "listen": "${listen_host}:${socks5_port}"}
     ],
     "outbounds": [
-        {
-            "tag": "proxy",
-            "type": "mirage",
-            "server_host": "${server_host}",
-            "server_port": ${server_port},
-            "password": "${password}",
-            "camouflage_host": "${camouflage}"
-        },
-        {"tag": "direct", "type": "direct"},
-        {"tag": "block",  "type": "block"}
+        ${outbounds_block}
     ],
     "route": ${routing_json},
     $(_build_log_block "client")${dns_extra}${api_extra}${tproxy_extra}${geosite_extra}${geo_sources_extra}
@@ -1373,41 +1464,34 @@ install_client() {
     fi
 
     if [[ "$existing_loaded" != "yes" ]]; then
-        local src_choice
-        src_choice=$(ask_choice "获取节点参数方式" \
-            "粘贴服务端导出的 mirage:// 节点串（推荐）" \
-            "手动逐项输入")
-        if [[ "$src_choice" == "1" ]]; then
-            while :; do
-                local uri_in
-                uri_in=$(ask "请粘贴 mirage:// 节点串" "")
-                if [[ -z "$uri_in" ]]; then
-                    warn "未输入，退回手动逐项输入模式"
-                    src_choice="2"; break
-                fi
-                if parse_node_uri "$uri_in"; then
-                    server_host="$NODE_HOST"
-                    server_port="$NODE_PORT"
-                    password="$NODE_PWD"
-                    camouflage="$NODE_SNI"
-                    ok "节点解析成功：${server_host}:${server_port} (SNI=${camouflage})"
-                    existing_loaded="yes"
-                    break
-                else
-                    warn "节点格式无效，期望：mirage://<密码>@<host>:<port>?sni=<域名>"
-                fi
-            done
-        fi
-        if [[ "$existing_loaded" != "yes" ]]; then
-            server_host=$(ask "服务端地址（IP 或域名）" "")
-            [[ -z "$server_host" ]] && err "服务端地址不能为空"
-            server_port=$(ask_port "服务端端口" "443")
-            password=$(ask "密码（与服务端一致；明文显示以便确认）" "")
-            [[ -z "$password" ]] && err "密码不能为空"
-            camouflage=$(ask "伪装 SNI（与服务端一致）" "www.apple.com")
-        fi
+        NODES_HOST=(); NODES_PORT=(); NODES_PASSWORD=(); NODES_SNI=(); NODES_BRUTAL=()
+        _collect_node
+        while ask_yn "再添加一个节点？" n; do
+            _collect_node
+        done
+        # 首节点同时填到旧变量，给末尾的提示文本复用
+        server_host="${NODES_HOST[0]}"
+        server_port="${NODES_PORT[0]}"
+        password="${NODES_PASSWORD[0]}"
+        camouflage="${NODES_SNI[0]}"
         local_listen_host=$(ask "本地监听地址（0.0.0.0 = LAN 设备共用；127.0.0.1 = 仅本机）" "0.0.0.0")
         socks5_port=$(ask_port "本地监听端口（mixed = SOCKS5 + HTTP 同口）" "7890" tcp)
+    fi
+
+    # 多节点 → 询问选路模式（单节点时跳过、走单 mirage outbound 旧路径）
+    GROUP_TYPE=""
+    if (( ${#NODES_HOST[@]} > 1 )); then
+        echo
+        info "已配置 ${#NODES_HOST[@]} 个节点。选路模式："
+        local gchoice
+        gchoice=$(ask_choice "选路模式" \
+            "urltest — 自动选 BrutalPool 建连延迟最低的节点（带 50ms 防抖）" \
+            "selector — 手动指定走哪个节点（启用 Clash API 后用 UI / curl 切换）")
+        case "$gchoice" in
+            1) GROUP_TYPE="urltest" ;;
+            2) GROUP_TYPE="selector" ;;
+        esac
+        info "已选：${GROUP_TYPE}"
     fi
 
     # ── 路由模板 ──
@@ -1478,10 +1562,19 @@ install_client() {
 
     ask_log_config
 
+    # 复用既有配置（existing_loaded=yes）或 BOTH_MODE 路径里 NODES_* 是空的，
+    # 从单节点变量回填，让 write_client_config 统一从 NODES_* 读取
+    if (( ${#NODES_HOST[@]} == 0 )); then
+        NODES_HOST=("$server_host")
+        NODES_PORT=("$server_port")
+        NODES_PASSWORD=("$password")
+        NODES_SNI=("$camouflage")
+        NODES_BRUTAL=(0)
+    fi
+
     install_system_files
     install_shim_scripts "client"
-    write_client_config "$server_host" "$server_port" "$password" "$camouflage" \
-                        "$local_listen_host" "$socks5_port" "$routing_preset" "$dns_preset" \
+    write_client_config "$local_listen_host" "$socks5_port" "$routing_preset" "$dns_preset" \
                         "$tproxy_port" "$enable_api" "$api_secret"
 
     install_service_unit "client"

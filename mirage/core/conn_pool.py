@@ -269,10 +269,10 @@ class BrutalPool:
         """
         # warmup 是池生命期起点，游标从 now 重新计起（避免上次会话残留状态）
         self._next_build_at = time.monotonic()
-        tasks = [
-            self._build_and_enqueue(delay=self._reserve_build_slot())
-            for _ in range(self._pool_size)
-        ]
+        tasks = []
+        for _ in range(self._pool_size):
+            self._building += 1
+            tasks.append(self._build_and_enqueue(delay=self._reserve_build_slot(), pre_reserved=True))
         results = await asyncio.gather(*tasks, return_exceptions=True)
         ok = sum(1 for r in results if r is True)
         logger.info("Pool warmed up: %d/%d connections ready (rate=%.0f Mbps each, staggered)",
@@ -356,23 +356,23 @@ class BrutalPool:
         """
         deficit = self._pool_size - self._q.qsize() - self._building
         for _ in range(max(0, deficit)):
-            asyncio.create_task(self._build_and_enqueue(delay=self._reserve_build_slot()))
+            self._building += 1
+            asyncio.create_task(self._build_and_enqueue(delay=self._reserve_build_slot(), pre_reserved=True))
 
-    async def _build_and_enqueue(self, delay: float = 0.0) -> bool:
+    async def _build_and_enqueue(self, delay: float = 0.0, pre_reserved: bool = False) -> bool:
         """
-        原子检查 + 占位：在第一个 await 之前先递增 _building，
-        保证不会有多余的连接被建立。
-
-        delay > 0 时先 sleep（refill / staggered warmup 用），sleep 期间池可能
-        已经被别的 task 填满 —— 原子检查仍能正确拒绝多余建设。
+        原子检查 + 占位：支持 pre_reserved 参数防止高并发调用 _schedule_refills 时
+        计算出的 deficit 重复放大。
         """
-        if delay > 0:
-            await asyncio.sleep(delay)
-        # 检查与占位之间没有 await，asyncio 单线程保证原子性
-        if self._q.qsize() + self._building >= self._pool_size:
-            return False
-        self._building += 1
+        if not pre_reserved:
+            if self._q.qsize() + self._building >= self._pool_size:
+                return False
+            self._building += 1
         try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if self._q.qsize() >= self._pool_size:
+                return False
             ready, latency_ms = await self._build_one()
             if ready:
                 if self._on_latency and latency_ms is not None:
@@ -401,7 +401,7 @@ class BrutalPool:
             ready = await asyncio.wait_for(self._build_one_inner(), timeout=_BUILD_TIMEOUT)
             return ready, (time.monotonic() - t0) * 1000.0
         except Exception as e:
-            logger.debug("Failed to build pool connection: %s", e)
+            logger.debug("Failed to build pool connection: %s: %s", type(e).__name__, e)
             return None, None
 
     async def _build_one_inner(self) -> _ReadyTunnel:

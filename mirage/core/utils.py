@@ -510,17 +510,18 @@ async def wait_both_with_grace(task_a: asyncio.Task, task_b: asyncio.Task,
     剩余数据 / 发送 close_notify、自然返回。这样最后 safe_close 时接收缓冲
     已空，不再触发 RST。
     """
-    await asyncio.wait([task_a, task_b], return_when=asyncio.FIRST_COMPLETED)
-    pending = {t for t in (task_a, task_b) if not t.done()}
-    if not pending:
-        return
     try:
-        await asyncio.wait_for(
-            asyncio.gather(*pending, return_exceptions=True),
-            timeout=grace,
-        )
-    except asyncio.TimeoutError:
-        for t in pending:
+        await asyncio.wait([task_a, task_b], return_when=asyncio.FIRST_COMPLETED)
+        pending = [t for t in (task_a, task_b) if not t.done()]
+        if pending:
+            await asyncio.wait_for(
+                asyncio.gather(*pending, return_exceptions=True),
+                timeout=grace,
+            )
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+    finally:
+        for t in (task_a, task_b):
             if not t.done():
                 t.cancel()
                 try:
@@ -557,8 +558,12 @@ async def relay(reader_a: asyncio.StreamReader, writer_b: asyncio.StreamWriter,
                 if writer.transport.get_write_buffer_size() > _DRAIN_THRESHOLD:
                     await writer.drain()
         except Exception as e:
-            _logger.debug("relay %s %s ended: %s: %s",
-                          label or "?", direction, type(e).__name__, e)
+            if isinstance(e, RuntimeError) and "handler is closed" in str(e):
+                _logger.debug("relay %s %s ended: peer closed",
+                              label or "?", direction)
+            else:
+                _logger.debug("relay %s %s ended: %s: %s",
+                              label or "?", direction, type(e).__name__, e)
         # 发我方 FIN 让对端的 reader 尽快 EOF；不 close（外层统一）
         try:
             if writer.can_write_eof():

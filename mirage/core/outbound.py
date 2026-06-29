@@ -245,8 +245,11 @@ async def _bidi_tunnel_relay(local_reader, local_writer, tunnel, server_writer,
                 if local_writer.transport.get_write_buffer_size() > get_drain_threshold():
                     await local_writer.drain()
         except Exception as e:
-            logger.debug("relay %s tunnel→local ended: %s: %s",
-                         label or "?", type(e).__name__, e)
+            if isinstance(e, RuntimeError) and "handler is closed" in str(e):
+                logger.debug("relay %s tunnel→local ended: peer closed", label or "?")
+            else:
+                logger.debug("relay %s tunnel→local ended: %s: %s",
+                             label or "?", type(e).__name__, e)
         # 本地侧发 FIN 让 SOCKS5 客户端尽快 EOF；不 close（外层统一）
         try:
             if local_writer.can_write_eof():
