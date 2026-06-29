@@ -237,6 +237,62 @@ install_pip_deps() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 节点 URI 编解码与解析 (mirage://)
+# ──────────────────────────────────────────────────────────────────────────────
+
+url_encode() {
+    local LC_ALL=C
+    local s=$1 out="" i ch
+    for (( i=0; i<${#s}; i++ )); do
+        ch="${s:i:1}"
+        case "$ch" in
+            [a-zA-Z0-9.~_-]) out+="$ch" ;;
+            *) out+=$(printf '%%%02X' "'$ch") ;;
+        esac
+    done
+    echo "$out"
+}
+
+url_decode() {
+    local LC_ALL=C
+    local s=$1
+    s="${s//+/ }"
+    printf '%b' "${s//%/\\x}"
+}
+
+build_node_uri() {
+    local pwd=$1 host=$2 port=$3 sni=$4 brutal=${5:-0}
+    local epwd esni q
+    epwd=$(url_encode "$pwd")
+    esni=$(url_encode "$sni")
+    q="sni=${esni}"
+    if [[ "$brutal" =~ ^[0-9]+$ ]] && (( brutal > 0 )); then
+        q+="&brutal=$brutal"
+    fi
+    echo "mirage://${epwd}@${host}:${port}?${q}"
+}
+
+parse_node_uri() {
+    local uri=$1
+    NODE_PWD=""; NODE_HOST=""; NODE_PORT=""; NODE_SNI=""; NODE_BRUTAL=0
+    if [[ ! "$uri" =~ ^mirage://([^@]+)@([^:/?]+):([0-9]+)(\?(.*))?$ ]]; then
+        return 1
+    fi
+    NODE_PWD=$(url_decode "${BASH_REMATCH[1]}")
+    NODE_HOST="${BASH_REMATCH[2]}"
+    NODE_PORT="${BASH_REMATCH[3]}"
+    local query="${BASH_REMATCH[5]:-}"
+    local IFS='&'; local pairs=($query); unset IFS
+    for p in "${pairs[@]}"; do
+        local k="${p%%=*}" v="${p#*=}"
+        case "$k" in
+            sni)    NODE_SNI=$(url_decode "$v") ;;
+            brutal) NODE_BRUTAL="$v" ;;
+        esac
+    done
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 伪装 SNI 探测（openssl TLS 1.3 真握手）
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1042,6 +1098,8 @@ _install_skip() {
 # ── 导出客户端模板与连接信息 ──
 _print_and_save_client_template() {
     local server_ip=$1 port=$2 password=$3 camouflage=$4
+    local node_uri
+    node_uri=$(build_node_uri "$password" "$server_ip" "$port" "$camouflage" 0)
     local sys_dir="${EFFECTIVE_ETC:-/etc/mirage}"
     mkdir -p "$sys_dir" 2>/dev/null || true
     local sys_txt="${sys_dir}/mirage_client_info.txt"
@@ -1054,7 +1112,11 @@ _print_and_save_client_template() {
 Mirage 客户端连接配置信息与导出模板
 ================================================================================
 
-【快捷填参连接字段】在客户端执行 ./install.sh 引导时可依次填入：
+【专属节点分享链接 (推荐)】直接复制单行链接，在客户端执行 ./install.sh 引导时一键导入：
+    $node_uri
+
+--------------------------------------------------------------------------------
+【快捷填参连接字段】也可手动依次填入：
     服务端地址  : $server_ip
     服务端端口  : $port
     密码        : $password
@@ -1113,8 +1175,10 @@ EOF
     # 终端输出屏幕提示
     title "客户端配置模板与连接字段"
     cat <<EOF
-$(_c 36 "请用下面的配置在客户端 install.sh 引导时输入对应字段：")
+$(_c 32 "【一键节点分享链接 (推荐)】在客户端安装时选择粘贴即可秒装：")
+    $(_c 33 "$node_uri")
 
+$(_c 36 "【手动填参字段】")
     服务端地址  : $(_c 33 "$server_ip")
     服务端端口  : $(_c 33 "$port")
     密码        : $(_c 33 "$password")
@@ -1309,12 +1373,39 @@ install_client() {
     fi
 
     if [[ "$existing_loaded" != "yes" ]]; then
-        server_host=$(ask "服务端地址（IP 或域名）" "")
-        [[ -z "$server_host" ]] && err "服务端地址不能为空"
-        server_port=$(ask_port "服务端端口" "443")
-        password=$(ask "密码（与服务端一致；明文显示以便确认）" "")
-        [[ -z "$password" ]] && err "密码不能为空"
-        camouflage=$(ask "伪装 SNI（与服务端一致）" "www.apple.com")
+        local src_choice
+        src_choice=$(ask_choice "获取节点参数方式" \
+            "粘贴服务端导出的 mirage:// 节点串（推荐）" \
+            "手动逐项输入")
+        if [[ "$src_choice" == "1" ]]; then
+            while :; do
+                local uri_in
+                uri_in=$(ask "请粘贴 mirage:// 节点串" "")
+                if [[ -z "$uri_in" ]]; then
+                    warn "未输入，退回手动逐项输入模式"
+                    src_choice="2"; break
+                fi
+                if parse_node_uri "$uri_in"; then
+                    server_host="$NODE_HOST"
+                    server_port="$NODE_PORT"
+                    password="$NODE_PWD"
+                    camouflage="$NODE_SNI"
+                    ok "节点解析成功：${server_host}:${server_port} (SNI=${camouflage})"
+                    existing_loaded="yes"
+                    break
+                else
+                    warn "节点格式无效，期望：mirage://<密码>@<host>:<port>?sni=<域名>"
+                fi
+            done
+        fi
+        if [[ "$existing_loaded" != "yes" ]]; then
+            server_host=$(ask "服务端地址（IP 或域名）" "")
+            [[ -z "$server_host" ]] && err "服务端地址不能为空"
+            server_port=$(ask_port "服务端端口" "443")
+            password=$(ask "密码（与服务端一致；明文显示以便确认）" "")
+            [[ -z "$password" ]] && err "密码不能为空"
+            camouflage=$(ask "伪装 SNI（与服务端一致）" "www.apple.com")
+        fi
         local_listen_host=$(ask "本地监听地址（0.0.0.0 = LAN 设备共用；127.0.0.1 = 仅本机）" "0.0.0.0")
         socks5_port=$(ask_port "本地监听端口（mixed = SOCKS5 + HTTP 同口）" "7890" tcp)
     fi
