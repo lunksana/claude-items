@@ -257,6 +257,21 @@ async def handle_client(
         _release_ip_slot(client_ip)
 
 
+def _check_brutal_kernel(cfg: dict) -> None:
+    """
+    brutal_rate_bps>0 但内核模块未加载 → 置 0 + warning。
+    与客户端 client._check_brutal_kernel 对称，避免"以为开了实际跑 cubic"
+    的无声失败：set_algorithm / set_rate 失败本身只 logger.debug，不可见。
+    """
+    if not cfg.get("brutal_rate_bps", 0):
+        return
+    if brutal.is_available():
+        logger.info("TCP Brutal kernel module: available")
+        return
+    logger.warning("brutal_rate_bps set but kernel module not loaded — falling back to normal TCP")
+    cfg["brutal_rate_bps"] = 0
+
+
 async def main(config_path: str) -> None:
     raise_fd_limit()
 
@@ -270,6 +285,10 @@ async def main(config_path: str) -> None:
     apply_log_levels(cfg)
 
     logger.info("Mirage server v%s", __version__)
+
+    # brutal 内核自检：放在 apply_log_* 之后（warning 走配置好的 formatter），
+    # 在监听 socket 创建之前（避免对没加载模块的环境无效 set_algorithm）
+    _check_brutal_kernel(cfg)
 
     # 时钟同步：阻塞 ≤5s 拉一次 NTP/HTTPS 时间，避免 VPS 时钟漂移 > 60s
     # 让客户端的合法 token 被误判为超时。失败不挂掉业务、后台周期重试。
