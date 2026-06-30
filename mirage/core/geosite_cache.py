@@ -52,11 +52,25 @@ logger = get_logger("geo_cache")
 _META_VERSION = 1
 _META_FILE    = "meta.json"
 
+# 下载完整性 / sanity
+_MIN_DAT_SIZE = 100 * 1024       # 真实 geosite/geoip dat 至少几 MB；< 100KB 几乎一定是
+                                 # HTML 错误页 / 0 字节 / 中途断流的残片，拒绝覆盖现有文件
+
 # 隧道下载相关
 _TUNNEL_MAX_REDIRECTS  = 5
 _TUNNEL_HS_TIMEOUT     = 15.0    # TLS 握手单次 recv 等待
 _TUNNEL_BODY_TIMEOUT   = 60.0    # 响应体单次 recv 等待
 _TUNNEL_REQUEST_BUDGET = 180.0   # 单次 GET（含握手+全部 body）总时长上界，防慢速 DoS
+
+
+def _check_dat_sane(path: str) -> None:
+    """写入前最后一道 sanity check：拒绝异常小的文件。"""
+    size = os.path.getsize(path)
+    if size < _MIN_DAT_SIZE:
+        raise IOError(
+            f"suspiciously small dat: {size} bytes (< {_MIN_DAT_SIZE}); "
+            f"likely an HTML error page or truncated body"
+        )
 
 
 # ── 元数据读写 ─────────────────────────────────────────────────────────────────
@@ -88,22 +102,51 @@ def _dat_path(cache_dir: str, key: str) -> str:
     return os.path.join(cache_dir, f"{key}.dat")
 
 
-def _download(url: str, dest: str) -> None:
+def _download(url: str, dest: str,
+              cached_etag: str | None = None,
+              cached_lm:   str | None = None) -> dict:
     """
     同步直连下载（在线程池中调用），原子写入。tunnel 路径失败时的兜底。
 
     用显式空 ProxyHandler 屏蔽宿主机的 HTTP_PROXY/HTTPS_PROXY/NO_PROXY 环境变量 ——
     否则用户从旧代理迁移过来若没清 env，fallback 会被劫持到死掉的旧代理，
     日志只会看到 "direct download failed" 但说不清根因。
+
+    含 cached_etag / cached_lm 时发条件请求；上游 304 → 不重下、返回 not_modified。
+
+    返回：
+      {"kind": "saved" | "not_modified", "etag": str|None, "last_modified": str|None}
     """
     tmp = dest + ".tmp"
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        req = urllib.request.Request(url, headers={"User-Agent": "mirage-proxy/1.0"})
-        with opener.open(req, timeout=60) as resp, open(tmp, "wb") as f:
-            while chunk := resp.read(65536):
-                f.write(chunk)
-        os.replace(tmp, dest)
+        headers = {"User-Agent": "mirage-proxy/1.0"}
+        if cached_etag:
+            headers["If-None-Match"] = cached_etag
+        if cached_lm:
+            headers["If-Modified-Since"] = cached_lm
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with opener.open(req, timeout=60) as resp:
+                new_etag = resp.headers.get("ETag")
+                new_lm   = resp.headers.get("Last-Modified")
+                cl       = resp.headers.get("Content-Length")
+                expected = int(cl) if cl and cl.isdigit() else None
+                written  = 0
+                with open(tmp, "wb") as f:
+                    while chunk := resp.read(65536):
+                        f.write(chunk)
+                        written += len(chunk)
+                if expected is not None and written < expected:
+                    raise IOError(f"truncated body: got {written} of {expected} bytes")
+                _check_dat_sane(tmp)
+                os.replace(tmp, dest)
+                return {"kind": "saved", "etag": new_etag, "last_modified": new_lm}
+        except urllib.error.HTTPError as e:
+            if e.code == 304:
+                return {"kind": "not_modified",
+                        "etag": cached_etag, "last_modified": cached_lm}
+            raise
     except Exception:
         try:
             os.remove(tmp)
@@ -114,18 +157,41 @@ def _download(url: str, dest: str) -> None:
 
 # ── 隧道下载（优先路径）─────────────────────────────────────────────────────────
 
-async def _download_via_tunnel(url: str, dest: str, pool) -> None:
+async def _download_via_tunnel(
+    url: str, dest: str, pool,
+    cached_etag: str | None = None,
+    cached_lm:   str | None = None,
+) -> dict:
     """
     经我们自己的加密隧道下载：pool 拿一条 tunnel → server 为我们连 host:443 →
     在 tunnel 上跑真实 TLS（ssl.MemoryBIO 模式）到 GitHub → 普通 HTTP/1.1 GET。
 
     这样弱网下不依赖宿主机直连 GitHub 的成功率，借用 VPS 出口带宽。
+
+    含 cached_etag / cached_lm 时发条件请求；上游 304 → 不重下、返回 not_modified。
+
+    返回：
+      {"kind": "saved" | "not_modified", "etag": str|None, "last_modified": str|None}
     """
-    body = await _https_get_via_pool(url, pool)
+    extra: dict[str, str] = {}
+    if cached_etag:
+        extra["If-None-Match"] = cached_etag
+    if cached_lm:
+        extra["If-Modified-Since"] = cached_lm
+
+    status, headers, body = await _https_get_via_pool(url, pool, extra_headers=extra or None)
+
+    if status == 304:
+        return {"kind": "not_modified",
+                "etag": cached_etag, "last_modified": cached_lm}
+
+    new_etag = next((v for k, v in headers if k.lower() == "etag"), None)
+    new_lm   = next((v for k, v in headers if k.lower() == "last-modified"), None)
     tmp = dest + ".tmp"
     try:
         with open(tmp, "wb") as f:
             f.write(body)
+        _check_dat_sane(tmp)
         os.replace(tmp, dest)
     except Exception:
         try:
@@ -133,9 +199,17 @@ async def _download_via_tunnel(url: str, dest: str, pool) -> None:
         except OSError:
             pass
         raise
+    return {"kind": "saved", "etag": new_etag, "last_modified": new_lm}
 
 
-async def _https_get_via_pool(url: str, pool) -> bytes:
+async def _https_get_via_pool(
+    url: str, pool,
+    extra_headers: dict | None = None,
+) -> tuple[int, list[tuple[str, str]], bytes]:
+    """
+    返回 (status, response_headers, body)。
+    调用方处理 200（含 body）/ 304（空 body）；其余非 3xx 抛 IOError。
+    """
     for _ in range(_TUNNEL_MAX_REDIRECTS + 1):
         u = urllib.parse.urlparse(url)
         if u.scheme != "https":
@@ -146,10 +220,13 @@ async def _https_get_via_pool(url: str, pool) -> bytes:
 
         # 总超时：避免对端慢速喂数据让一个请求拖太久
         status, headers, body = await asyncio.wait_for(
-            _https_request_once(host, port, path, pool),
+            _https_request_once(host, port, path, pool, extra_headers),
             timeout=_TUNNEL_REQUEST_BUDGET,
         )
 
+        # 304 不算 redirect，直接交给调用方
+        if status == 304:
+            return status, headers, body
         if 300 <= status < 400:
             loc = next((v for k, v in headers if k.lower() == "location"), None)
             if not loc:
@@ -164,12 +241,13 @@ async def _https_get_via_pool(url: str, pool) -> bytes:
             continue
         if status != 200:
             raise IOError(f"HTTP {status}")
-        return body
+        return status, headers, body
     raise IOError(f"too many redirects ({_TUNNEL_MAX_REDIRECTS})")
 
 
 async def _https_request_once(
     host: str, port: int, path: str, pool,
+    extra_headers: dict | None = None,
 ) -> tuple[int, list[tuple[str, str]], bytes]:
     ready = await pool.acquire()
     if ready is None:
@@ -229,12 +307,17 @@ async def _https_request_once(
         await flush()
 
         # HTTP GET
+        extra_lines = ""
+        if extra_headers:
+            extra_lines = "".join(f"{k}: {v}\r\n" for k, v in extra_headers.items())
         req = (
             f"GET {path} HTTP/1.1\r\n"
             f"Host: {host}\r\n"
             f"User-Agent: mirage-proxy/1.0\r\n"
             f"Accept: */*\r\n"
-            f"Connection: close\r\n\r\n"
+            f"Connection: close\r\n"
+            f"{extra_lines}"
+            f"\r\n"
         ).encode("ascii")
         sslobj.write(req)
         await flush()
@@ -371,14 +454,36 @@ async def _ensure_one(
     logger.info("Downloading geo[%s] from %d mirror(s) — %s",
                 key, len(urls), reason)
 
+    # 条件 GET 的 etag / last_modified：仅当本地 .dat 还在时才透传，
+    # 否则强制无条件下载（防 304 命中但本地文件已被删的尴尬）
+    existing = meta["sources"].get(key, {})
+    if exists and not force:
+        cached_etag = existing.get("etag")
+        cached_lm   = existing.get("last_modified")
+    else:
+        cached_etag = None
+        cached_lm   = None
+
+    def _record(u: str, result: dict, via: str, i: int) -> None:
+        meta["sources"][key] = {
+            "url":           u,
+            "downloaded_at": int(time.time()),
+            "etag":          result.get("etag"),
+            "last_modified": result.get("last_modified"),
+        }
+        if result["kind"] == "not_modified":
+            logger.info("geo[%s] not modified (304) via %s, revalidated (mirror %d/%d): %s",
+                        key, via, i, len(urls), u)
+        else:
+            logger.info("geo[%s] saved via %s (mirror %d/%d, %d KB): %s",
+                        key, via, i, len(urls), os.path.getsize(dest) // 1024, u)
+
     for i, u in enumerate(urls, start=1):
         # 优先：经我们自己的加密隧道（弱网更稳）
         if pool is not None:
             try:
-                await _download_via_tunnel(u, dest, pool)
-                meta["sources"][key] = {"url": u, "downloaded_at": int(time.time())}
-                logger.info("geo[%s] saved via tunnel (mirror %d/%d, %d KB): %s",
-                            key, i, len(urls), os.path.getsize(dest) // 1024, u)
+                result = await _download_via_tunnel(u, dest, pool, cached_etag, cached_lm)
+                _record(u, result, "tunnel", i)
                 return True
             except Exception as e:
                 logger.warning("geo[%s] tunnel mirror %d/%d failed: %s",
@@ -386,10 +491,8 @@ async def _ensure_one(
 
         # 兜底：直连
         try:
-            await asyncio.to_thread(_download, u, dest)
-            meta["sources"][key] = {"url": u, "downloaded_at": int(time.time())}
-            logger.info("geo[%s] saved direct (mirror %d/%d, %d KB): %s",
-                        key, i, len(urls), os.path.getsize(dest) // 1024, u)
+            result = await asyncio.to_thread(_download, u, dest, cached_etag, cached_lm)
+            _record(u, result, "direct", i)
             return True
         except Exception as e:
             logger.warning("geo[%s] direct mirror %d/%d failed: %s",
