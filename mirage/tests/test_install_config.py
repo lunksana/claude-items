@@ -111,13 +111,16 @@ class _GenMixin:
 
 
 class TestClientConfigGen(_GenMixin, unittest.TestCase):
-    # write_client_config <server_host> <server_port> <password> <camouflage>
-    #   <listen_host> <socks5_port> <routing_preset> <dns_preset>
+    # write_client_config <listen_host> <socks5_port> <routing_preset> <dns_preset>
     #   <tproxy_port> <enable_api> <api_secret>
 
     def _gen_client(self, routing, dns, tproxy="0", api="no", secret="", extra=""):
-        call = (f'write_client_config "1.2.3.4" 443 "pw" "www.bing.com" '
-                f'"0.0.0.0" 7890 "{routing}" "{dns}" {tproxy} "{api}" "{secret}"')
+        nodes_setup = (
+            'NODES_HOST=("1.2.3.4"); NODES_PORT=(443); NODES_PASSWORD=("pw"); '
+            'NODES_SNI=("www.bing.com"); NODES_BRUTAL=(0); GROUP_TYPE=""; '
+        )
+        call = (f'{nodes_setup}write_client_config "0.0.0.0" 7890 "{routing}" "{dns}" '
+                f'{tproxy} "{api}" "{secret}"')
         self._run_driver(call, extra=extra)
         return self._validate("config_client.json", expect_schema_v1=True)
 
@@ -176,6 +179,37 @@ class TestClientConfigGen(_GenMixin, unittest.TestCase):
             for dns in ("off", "china_split", "full_proxy"):
                 with self.subTest(routing=routing, dns=dns):
                     self._gen_client(routing, dns)
+
+    def test_multi_node_urltest(self):
+        nodes_setup = (
+            'NODES_HOST=("1.1.1.1" "2.2.2.2"); NODES_PORT=(443 8443); '
+            'NODES_PASSWORD=("pw1" "pw2"); NODES_SNI=("sni1" "sni2"); '
+            'NODES_BRUTAL=(50000000 0); GROUP_TYPE="urltest"; '
+        )
+        call = f'{nodes_setup}write_client_config "0.0.0.0" 7890 "china_split" "china_split" 0 "no" ""'
+        self._run_driver(call)
+        cfg = self._validate("config_client.json", expect_schema_v1=True)
+        outbounds = {o["tag"]: o for o in cfg["outbounds"]}
+        self.assertIn("proxy-1", outbounds)
+        self.assertIn("proxy-2", outbounds)
+        self.assertIn("proxy", outbounds)
+        self.assertEqual(outbounds["proxy"]["type"], "urltest")
+        self.assertEqual(outbounds["proxy"]["outbounds"], ["proxy-1", "proxy-2"])
+        self.assertEqual(outbounds["proxy"]["tolerance"], 50)
+        self.assertEqual(outbounds["proxy-1"]["brutal_rate_bps"], 50000000)
+
+    def test_multi_node_selector(self):
+        nodes_setup = (
+            'NODES_HOST=("1.1.1.1" "2.2.2.2"); NODES_PORT=(443 8443); '
+            'NODES_PASSWORD=("pw1" "pw2"); NODES_SNI=("sni1" "sni2"); '
+            'NODES_BRUTAL=(0 0); GROUP_TYPE="selector"; '
+        )
+        call = f'{nodes_setup}write_client_config "0.0.0.0" 7890 "china_split" "china_split" 0 "no" ""'
+        self._run_driver(call)
+        cfg = self._validate("config_client.json", expect_schema_v1=True)
+        outbounds = {o["tag"]: o for o in cfg["outbounds"]}
+        self.assertEqual(outbounds["proxy"]["type"], "selector")
+        self.assertEqual(outbounds["proxy"]["default"], "proxy-1")
 
 
 class TestServerConfigGen(_GenMixin, unittest.TestCase):
