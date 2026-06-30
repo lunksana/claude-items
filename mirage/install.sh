@@ -382,6 +382,28 @@ brutal_loaded() {
         grep -qw brutal /proc/sys/net/ipv4/tcp_available_congestion_control
 }
 
+# 把 bash heredoc 拼出来的 JSON 重新 normalize 排版：消除缩进错位、风格不一
+# 失败不致命（保留原文件，warn 一下）
+_normalize_json_file() {
+    local path=$1
+    local tmp="${path}.tmp_norm"
+    if python3 - "$path" "$tmp" <<'PY' 2>/dev/null
+import json, sys
+src, dst = sys.argv[1], sys.argv[2]
+with open(src, encoding="utf-8") as f:
+    data = json.load(f)
+with open(dst, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=4)
+    f.write("\n")
+PY
+    then
+        mv -f "$tmp" "$path"
+    else
+        rm -f "$tmp"
+        warn "JSON normalize 失败，保留 $path 原始排版（不影响功能）"
+    fi
+}
+
 # 未启用 Brutal 时给一条系统层替代建议：检查当前 / 可用拥塞控制并建议切到 BBR
 # 跨境高 RTT 链路下 BBR 显著好于默认 cubic（mirage 出口流量典型场景）
 _hint_bbr_fallback() {
@@ -782,6 +804,7 @@ write_server_config() {
     ${log_block}
 }
 EOF
+    _normalize_json_file "$path"
     chmod 600 "$path"
     ok "已生成 $path"
 }
@@ -967,6 +990,7 @@ PY
     $(_build_log_block "client")${dns_extra}${api_extra}${tproxy_extra}${geosite_extra}${geo_sources_extra}
 }
 EOF
+    _normalize_json_file "$path"
     chmod 600 "$path"
     ok "已生成 $path"
     if [[ "$routing_preset" == "custom" ]]; then
