@@ -382,6 +382,33 @@ brutal_loaded() {
         grep -qw brutal /proc/sys/net/ipv4/tcp_available_congestion_control
 }
 
+# 未启用 Brutal 时给一条系统层替代建议：检查当前 / 可用拥塞控制并建议切到 BBR
+# 跨境高 RTT 链路下 BBR 显著好于默认 cubic（mirage 出口流量典型场景）
+_hint_bbr_fallback() {
+    echo
+    info "未启用 Brutal——这里有个系统层替代：BBR 拥塞控制"
+    info "  跨境高 RTT 链路下 BBR 显著优于默认 cubic（mirage 出口流量的典型场景）"
+
+    local cur="" avail=""
+    [[ -r /proc/sys/net/ipv4/tcp_congestion_control ]] && \
+        cur=$(cat /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null)
+    [[ -r /proc/sys/net/ipv4/tcp_available_congestion_control ]] && \
+        avail=$(cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null)
+
+    if [[ "$cur" == "bbr" ]]; then
+        ok "  当前系统拥塞控制已是 BBR，无需额外操作"
+        return
+    fi
+    if [[ " $avail " == *" bbr "* ]]; then
+        info "  当前是 \"${cur:-未知}\"；BBR 可用。要切换执行："
+        info "    sudo sysctl -w net.ipv4.tcp_congestion_control=bbr"
+        info "    echo 'net.ipv4.tcp_congestion_control=bbr' | sudo tee -a /etc/sysctl.conf"
+    else
+        warn "  本机内核未列出 BBR (\"${avail:-无法读取}\")"
+        warn "  内核 < 4.9 不支持 BBR；部分容器 / OpenVZ 也限制"
+    fi
+}
+
 handle_brutal_optional() {
     info "Brutal 是给单条连接定速的内核模块（Hysteria2 思路），可选"
     if brutal_loaded; then
@@ -1389,6 +1416,8 @@ install_server() {
         rate_mbps=$(ask "每条连接的 Brutal 速率上限（Mbps）" "10")
         brutal_rate_bps=$(( rate_mbps * 1000 * 1000 ))
         info "Brutal 速率：${rate_mbps} Mbps / connection"
+    else
+        _hint_bbr_fallback
     fi
 
     # 记下连接信息：两端模式下客户端直接复用，无需重输
