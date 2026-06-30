@@ -177,6 +177,10 @@ LOGROTATE_ENABLED="no"
 LOGROTATE_MAXSIZE="100M"
 LOGROTATE_KEEP="7"
 LOGROTATE_COMPRESS="yes"
+ACCESS_LOG_ENABLED="no"   # 每连接打印 outbound 分流标签（_build_log_block 读）
+
+# 由 install_client 设置（仅客户端流程相关）
+WEBRTC_BLOCK="no"         # WebRTC 防泄漏：注入 STUN 关键字 block 规则
 
 PKG_MGR=""
 detect_pkg_mgr() {
@@ -589,11 +593,25 @@ ask_log_config() {
         LOGROTATE_ENABLED="no"
         warn "未启用文件日志：日志走 stderr，systemd journal 捕获"
     fi
+
+    # access_log：每连接打印 outbound 分流标签（proxy / direct / block），方便排查
+    echo
+    info "access_log：每连接打印 outbound 分流标签（proxy / direct / block）"
+    info "  开了排查\"这条流量到底走的哪条出口\"会非常清楚，但日志量会显著上涨"
+    if ask_yn "开启 access_log？" n; then
+        ACCESS_LOG_ENABLED="yes"
+        info "已开启"
+    else
+        ACCESS_LOG_ENABLED="no"
+    fi
 }
 
-# 生成 cfg.log JSON 片段：format + 可选 file/max_bytes/backup_count/compress
+# 生成 cfg.log JSON 片段：format + 可选 file/max_bytes/backup_count/compress + access_log
 _build_log_block() {
     local kind=$1   # server 或 client
+    local access_extra=""
+    [[ "$ACCESS_LOG_ENABLED" == "yes" ]] && access_extra=',
+    "access_log": true'
     if [[ "$LOGROTATE_ENABLED" == "yes" ]]; then
         local log_path="${EFFECTIVE_LOG_DIR}/${kind}.log"
         cat <<JSON
@@ -604,10 +622,10 @@ _build_log_block() {
         "backup_count": ${LOGROTATE_KEEP},
         "compress":     ${LOGROTATE_COMPRESS}
     },
-    "log_levels": {"default": "${LOG_LEVEL}"}
+    "log_levels": {"default": "${LOG_LEVEL}"}${access_extra}
 JSON
     else
-        echo "\"log\": {\"format\": \"${LOG_FORMAT}\"}, \"log_levels\": {\"default\": \"${LOG_LEVEL}\"}"
+        echo "\"log\": {\"format\": \"${LOG_FORMAT}\"}, \"log_levels\": {\"default\": \"${LOG_LEVEL}\"}${access_extra}"
     fi
 }
 
@@ -776,6 +794,19 @@ write_client_config() {
             ;;
         custom) routing_json='{"default": "proxy", "rules": []}' ;;
     esac
+
+    # WebRTC 防泄漏：把 STUN 关键字域名规则注入 rules 顶部（高优先级）
+    if [[ "$WEBRTC_BLOCK" == "yes" ]]; then
+        routing_json=$(python3 - "$routing_json" <<'PY'
+import json, sys
+r = json.loads(sys.argv[1])
+rules = r.get("rules") or []
+stun_rule = {"domain_keyword": ["stun"], "outbound": "block"}
+r["rules"] = [stun_rule] + rules
+print(json.dumps(r, ensure_ascii=False, indent=4))
+PY
+)
+    fi
 
     # DNS section：使用 ask_dns_details 的值（带兜底默认）
     case $dns_preset in
@@ -1510,6 +1541,18 @@ install_client() {
         4) routing_preset="custom" ;;
     esac
 
+    # ── WebRTC 防泄漏（STUN 域名 → block） ──
+    echo
+    info "WebRTC 防泄漏（DNS 层拦截 STUN 域名 → NXDOMAIN）"
+    info "  原理：把 *stun* 关键字域名路由到 block，浏览器拿不到 STUN IP → 不发起 UDP STUN"
+    info "  注意：仅当系统 DNS 走 mirage forwarder 时生效；浏览器开 DoH 会绕过"
+    if ask_yn "启用 STUN 拦截规则？（除浏览器配置外的额外一层）" n; then
+        WEBRTC_BLOCK="yes"
+        info "已启用"
+    else
+        WEBRTC_BLOCK="no"
+    fi
+
     # ── DNS 方案 ──
     echo
     info "DNS 方案：决定 DNS 查询怎么走"
@@ -1595,6 +1638,17 @@ EOF
         echo "$(_c 32 "✓ Clash API") 监听 127.0.0.1:9090"
         echo "    secret: $api_secret"
     fi
+    if [[ "$WEBRTC_BLOCK" == "yes" ]]; then
+        echo "$(_c 32 "✓ WebRTC") 路由规则已注入：domain_keyword=[stun] → block"
+        if [[ "$dns_preset" == "off" ]]; then
+            warn "  注意：你没启用 mirage DNS forwarder，规则只对 SOCKS5/TProxy 域名连接生效，STUN UDP 仍能直发"
+        else
+            echo "    DNS 拦截生效条件：系统 DNS 指向 ${DNS_LISTEN_HOST}:${DNS_LISTEN_PORT}"
+        fi
+        echo "    浏览器侧建议同步配置（双保险，根治泄漏）："
+        echo "      Chrome:  chrome://flags → \"WebRTC IP Handling Policy\" → \"disable_non_proxied_udp\""
+        echo "      Firefox: about:config → media.peerconnection.enabled = false"
+    fi
     cat <<EOF
 
 应用层用法（mixed 入口同时支持 SOCKS5 + HTTP）：
@@ -1673,6 +1727,34 @@ _uninstall_service_one() {
     done
 }
 
+_uninstall_kill_stale_processes() {
+    # 兜底：service unit 没匹配到、或用户裸 (python3 server.py xxx) 起的进程
+    # 路径锚定到 INSTALL_PREFIX / LEGACY_INSTALL_PREFIX / WORK_DIR (inplace 部署)，
+    # 避免误伤其他 python
+    local prefixes="${INSTALL_PREFIX}|${LEGACY_INSTALL_PREFIX}"
+    # WORK_DIR 含 server.py/client.py 时说明是项目源/inplace 部署目录，加入匹配
+    if [[ -f "${WORK_DIR}/server.py" && -f "${WORK_DIR}/client.py" \
+          && "$WORK_DIR" != "$INSTALL_PREFIX" \
+          && "$WORK_DIR" != "$LEGACY_INSTALL_PREFIX" ]]; then
+        prefixes="${prefixes}|${WORK_DIR}"
+    fi
+    local pattern="python3[^ ]* (${prefixes})/(server|client)\\.py"
+    local pids
+    pids=$(pgrep -af "$pattern" 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
+    [[ -z "$pids" ]] && return
+    warn "检测到裸 Mirage 进程 (PID: ${pids})——service unit 之外起的"
+    pkill -TERM -f "$pattern" 2>/dev/null || true
+    sleep 2
+    local remaining
+    remaining=$(pgrep -af "$pattern" 2>/dev/null | awk '{print $1}' | tr '\n' ' ')
+    if [[ -n "$remaining" ]]; then
+        warn "SIGTERM 后仍存活 (${remaining})，发 SIGKILL"
+        pkill -KILL -f "$pattern" 2>/dev/null || true
+        sleep 1
+    fi
+    ok "已终止裸进程"
+}
+
 uninstall() {
     title "Mirage 卸载"
 
@@ -1680,6 +1762,9 @@ uninstall() {
     _uninstall_service_one server
     _uninstall_service_one client
     [[ "$INIT_SYSTEM" == "systemd" ]] && systemctl daemon-reload 2>/dev/null
+
+    # 兜底：清掉裸进程（service 没起、跑在其他模式、或 unit 名漏匹配）
+    _uninstall_kill_stale_processes
 
     # shim（含 legacy pyrealiy-* shim）
     local removed_shim=no
