@@ -413,3 +413,222 @@ pub async fn delete(Json(req): Json<DeleteReq>) -> Response {
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("删除失败: {e}")),
     }
 }
+
+#[derive(Deserialize)]
+pub struct TreeReq {
+    #[serde(default)]
+    pub path: String,
+}
+
+pub async fn tree_list(Query(req): Query<TreeReq>) -> Response {
+    let path = if req.path.trim().is_empty() {
+        // 返回常用起始目录
+        let mut roots = Vec::new();
+        for candidate in ["/", "/srv", "/mnt", "/data", "/home", "/var", "/opt", "/root"] {
+            if Path::new(candidate).is_dir() {
+                roots.push(candidate.to_string());
+            }
+        }
+        return Json(json!({ "path": "", "dirs": roots })).into_response();
+    } else {
+        req.path.trim().to_string()
+    };
+
+    if !path.starts_with('/') || path.contains("..") || path.contains('\0') {
+        return err_json(StatusCode::BAD_REQUEST, "非法路径");
+    }
+
+    let p = Path::new(&path);
+    let mut dirs = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(p).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Ok(ft) = entry.file_type().await {
+                if ft.is_dir() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if !name.starts_with('.') {
+                        dirs.push(name);
+                    }
+                }
+            }
+        }
+    }
+    dirs.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    Json(json!({ "path": path, "dirs": dirs })).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct TreeMkdirReq {
+    pub path: String,
+    pub name: String,
+}
+
+pub async fn tree_mkdir(Json(req): Json<TreeMkdirReq>) -> Response {
+    if !req.path.starts_with('/') || req.path.contains("..") || req.path.contains('\0') {
+        return err_json(StatusCode::BAD_REQUEST, "非法路径");
+    }
+    let Some(name) = sanitize_filename(&req.name) else {
+        return err_json(StatusCode::BAD_REQUEST, "非法目录名");
+    };
+    let full = Path::new(&req.path).join(&name);
+    match tokio::fs::create_dir_all(&full).await {
+        Ok(_) => Json(json!({ "ok": true, "path": full.to_string_lossy() })).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, &format!("创建目录失败: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CopyMoveReq {
+    pub src_share: String,
+    pub src_path: String,
+    pub dst_share: String,
+    pub dst_path: String,
+}
+
+pub async fn copy_file(Json(req): Json<CopyMoveReq>) -> Response {
+    let (_, src) = match resolve(&req.src_share, &req.src_path).await {
+        Ok(v) => v,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, &e),
+    };
+    let (_, dst_parent) = match resolve(&req.dst_share, &req.dst_path).await {
+        Ok(v) => v,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, &e),
+    };
+    let file_name = match src.file_name() {
+        Some(n) => n,
+        None => return err_json(StatusCode::BAD_REQUEST, "无效源文件名"),
+    };
+    let dst = dst_parent.join(file_name);
+    if src == dst {
+        return err_json(StatusCode::BAD_REQUEST, "源和目标路径相同");
+    }
+    let out = tokio::process::Command::new("cp")
+        .args(["-a", "--", src.to_str().unwrap_or(""), dst.to_str().unwrap_or("")])
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => Json(json!({ "ok": true })).into_response(),
+        Ok(o) => err_json(StatusCode::BAD_REQUEST, &format!("复制失败: {}", String::from_utf8_lossy(&o.stderr))),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("cp 命令执行失败: {e}")),
+    }
+}
+
+pub async fn move_file(Json(req): Json<CopyMoveReq>) -> Response {
+    let (src_base, src) = match resolve(&req.src_share, &req.src_path).await {
+        Ok(v) => v,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, &e),
+    };
+    if src == src_base {
+        return err_json(StatusCode::BAD_REQUEST, "不能移动/剪切共享根目录");
+    }
+    let (_, dst_parent) = match resolve(&req.dst_share, &req.dst_path).await {
+        Ok(v) => v,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, &e),
+    };
+    let file_name = match src.file_name() {
+        Some(n) => n,
+        None => return err_json(StatusCode::BAD_REQUEST, "无效源文件名"),
+    };
+    let dst = dst_parent.join(file_name);
+    if src == dst {
+        return err_json(StatusCode::BAD_REQUEST, "源和目标路径相同");
+    }
+    if tokio::fs::rename(&src, &dst).await.is_ok() {
+        return Json(json!({ "ok": true })).into_response();
+    }
+    let out = tokio::process::Command::new("cp")
+        .args(["-a", "--", src.to_str().unwrap_or(""), dst.to_str().unwrap_or("")])
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => {
+            let _ = if src.is_dir() {
+                tokio::fs::remove_dir_all(&src).await
+            } else {
+                tokio::fs::remove_file(&src).await
+            };
+            Json(json!({ "ok": true })).into_response()
+        }
+        Ok(o) => err_json(StatusCode::BAD_REQUEST, &format!("移动失败: {}", String::from_utf8_lossy(&o.stderr))),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("移动执行失败: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ExtractReq {
+    pub share: String,
+    pub path: String,
+}
+
+pub async fn extract_archive(Json(req): Json<ExtractReq>) -> Response {
+    let (_, full) = match resolve(&req.share, &req.path).await {
+        Ok(v) => v,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, &e),
+    };
+    let parent = full.parent().unwrap_or(Path::new("/"));
+    let path_str = full.to_string_lossy().to_string();
+    let lower = path_str.to_lowercase();
+    let mut cmd = if lower.ends_with(".zip") {
+        let mut c = tokio::process::Command::new("unzip");
+        c.args(["-q", "-o", "--", &path_str]);
+        c
+    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        let mut c = tokio::process::Command::new("tar");
+        c.args(["-xzf", &path_str]);
+        c
+    } else if lower.ends_with(".tar.bz2") || lower.ends_with(".tbz2") {
+        let mut c = tokio::process::Command::new("tar");
+        c.args(["-xjf", &path_str]);
+        c
+    } else if lower.ends_with(".tar.xz") || lower.ends_with(".txz") {
+        let mut c = tokio::process::Command::new("tar");
+        c.args(["-xJf", &path_str]);
+        c
+    } else if lower.ends_with(".tar") {
+        let mut c = tokio::process::Command::new("tar");
+        c.args(["-xf", &path_str]);
+        c
+    } else {
+        return err_json(StatusCode::BAD_REQUEST, "暂不支持此格式的解压缩包");
+    };
+    cmd.current_dir(parent);
+    match cmd.output().await {
+        Ok(o) if o.status.success() => Json(json!({ "ok": true })).into_response(),
+        Ok(o) => err_json(StatusCode::BAD_REQUEST, &format!("解压错误: {}", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("解压工具不存在或执行失败: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ArchiveReq {
+    pub share: String,
+    pub path: String,
+    pub items: Vec<String>,
+    pub archive_name: String,
+}
+
+pub async fn create_archive(Json(req): Json<ArchiveReq>) -> Response {
+    if req.items.is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "未选择要打包的文件或目录");
+    }
+    let (_, dir) = match resolve(&req.share, &req.path).await {
+        Ok(v) => v,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, &e),
+    };
+    let Some(arch_name) = sanitize_filename(&req.archive_name) else {
+        return err_json(StatusCode::BAD_REQUEST, "非法打包文件名");
+    };
+    let mut args = vec!["-czf", &arch_name, "--"];
+    for item in &req.items {
+        if item.is_empty() || item.contains('/') || item == "." || item == ".." || item.contains('\0') {
+            return err_json(StatusCode::BAD_REQUEST, "包含非法选择项目");
+        }
+        args.push(item);
+    }
+    let mut cmd = tokio::process::Command::new("tar");
+    cmd.args(&args).current_dir(&dir);
+    match cmd.output().await {
+        Ok(o) if o.status.success() => Json(json!({ "ok": true })).into_response(),
+        Ok(o) => err_json(StatusCode::BAD_REQUEST, &format!("打包错误: {}", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("执行 tar 失败: {e}")),
+    }
+}

@@ -17,13 +17,30 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const SESSION_TTL: Duration = Duration::from_secs(24 * 3600);
 const CONFIG_PATH: &str = "data/config.json";
 const DEFAULT_PASSWORD: &str = "admin123";
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AppConfig {
+    pub password_hash: String,
+    #[serde(default = "default_listen")]
+    pub listen_addr: String,
+    #[serde(default = "default_ttl")]
+    pub session_ttl_hours: u64,
+    #[serde(default)]
+    pub guest_map_bad_user: bool,
+}
+
+fn default_listen() -> String {
+    std::env::var("SWG_LISTEN").unwrap_or_else(|_| "0.0.0.0:8686".into())
+}
+fn default_ttl() -> u64 {
+    24
+}
+
 pub struct AppState {
     sessions: Mutex<HashMap<String, Instant>>,
-    password_hash: Mutex<String>,
+    config: Mutex<AppConfig>,
     /// 每 IP 的 (窗口内失败次数, 窗口起点)：按来源限流，避免全局锁定被单一攻击者利用为 DoS
     login_fails: Mutex<HashMap<IpAddr, (u32, Instant)>>,
 }
@@ -49,24 +66,42 @@ fn verify_password(pw: &str, hash: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn load_or_init_config() -> String {
+fn load_or_init_config() -> AppConfig {
     if let Ok(text) = std::fs::read_to_string(CONFIG_PATH) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Ok(mut cfg) = serde_json::from_str::<AppConfig>(&text) {
+            if !cfg.password_hash.is_empty() {
+                if cfg.session_ttl_hours == 0 {
+                    cfg.session_ttl_hours = 24;
+                }
+                return cfg;
+            }
+        } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
             if let Some(h) = v.get("password_hash").and_then(|h| h.as_str()) {
-                return h.to_string();
+                return AppConfig {
+                    password_hash: h.to_string(),
+                    listen_addr: default_listen(),
+                    session_ttl_hours: default_ttl(),
+                    guest_map_bad_user: false,
+                };
             }
         }
     }
     let hash = hash_password(DEFAULT_PASSWORD);
+    let cfg = AppConfig {
+        password_hash: hash,
+        listen_addr: default_listen(),
+        session_ttl_hours: default_ttl(),
+        guest_map_bad_user: false,
+    };
     let _ = std::fs::create_dir_all("data");
-    let _ = std::fs::write(CONFIG_PATH, serde_json::to_string_pretty(&json!({ "password_hash": hash })).unwrap());
+    let _ = std::fs::write(CONFIG_PATH, serde_json::to_string_pretty(&cfg).unwrap());
     eprintln!("⚠ 已生成默认登录密码: {DEFAULT_PASSWORD}（请登录后立即修改）");
-    hash
+    cfg
 }
 
-fn save_config(hash: &str) {
+fn save_config(cfg: &AppConfig) {
     let _ = std::fs::create_dir_all("data");
-    let _ = std::fs::write(CONFIG_PATH, serde_json::to_string_pretty(&json!({ "password_hash": hash })).unwrap());
+    let _ = std::fs::write(CONFIG_PATH, serde_json::to_string_pretty(cfg).unwrap());
 }
 
 fn new_token() -> String {
@@ -85,9 +120,10 @@ fn get_cookie(req: &Request, name: &str) -> Option<String> {
 
 async fn require_auth(State(st): State<SharedState>, req: Request, next: Next) -> Response {
     let authed = get_cookie(&req, "sid").is_some_and(|tok| {
+        let ttl = Duration::from_secs(st.config.lock().unwrap().session_ttl_hours * 3600);
         let mut sessions = st.sessions.lock().unwrap();
         match sessions.get_mut(&tok) {
-            Some(exp) if exp.elapsed() < SESSION_TTL => {
+            Some(exp) if exp.elapsed() < ttl => {
                 *exp = Instant::now();
                 true
             }
@@ -129,7 +165,7 @@ async fn login(
             }
         }
     }
-    let hash = st.password_hash.lock().unwrap().clone();
+    let hash = st.config.lock().unwrap().password_hash.clone();
     if !verify_password(&req.password, &hash) {
         {
             let mut fails = st.login_fails.lock().unwrap();
@@ -145,9 +181,9 @@ async fn login(
     st.login_fails.lock().unwrap().remove(&ip);
     let tok = new_token();
     {
-        // 顺带清理过期会话，避免长期运行缓慢积累
+        let ttl = Duration::from_secs(st.config.lock().unwrap().session_ttl_hours * 3600);
         let mut sessions = st.sessions.lock().unwrap();
-        sessions.retain(|_, exp| exp.elapsed() < SESSION_TTL);
+        sessions.retain(|_, exp| exp.elapsed() < ttl);
         sessions.insert(tok.clone(), Instant::now());
     }
     Response::builder()
@@ -185,12 +221,12 @@ async fn change_password(State(st): State<SharedState>, Json(req): Json<ChangePw
     if req.new_password.len() < 6 {
         return err_json(StatusCode::BAD_REQUEST, "新密码至少 6 位");
     }
-    let mut hash = st.password_hash.lock().unwrap();
-    if !verify_password(&req.old_password, &hash) {
+    let mut cfg = st.config.lock().unwrap();
+    if !verify_password(&req.old_password, &cfg.password_hash) {
         return err_json(StatusCode::UNAUTHORIZED, "原密码错误");
     }
-    *hash = hash_password(&req.new_password);
-    save_config(&hash);
+    cfg.password_hash = hash_password(&req.new_password);
+    save_config(&cfg);
     Json(json!({ "ok": true })).into_response()
 }
 
@@ -323,6 +359,131 @@ async fn user_delete(AxPath(name): AxPath<String>) -> Response {
     }
 }
 
+#[derive(Deserialize)]
+struct ConfigUpdateReq {
+    listen_addr: String,
+    session_ttl_hours: u64,
+    guest_map_bad_user: bool,
+}
+
+async fn config_get(State(st): State<SharedState>) -> Response {
+    let cfg = st.config.lock().unwrap().clone();
+    Json(json!({
+        "listen_addr": cfg.listen_addr,
+        "session_ttl_hours": cfg.session_ttl_hours,
+        "guest_map_bad_user": cfg.guest_map_bad_user,
+    })).into_response()
+}
+
+async fn config_update(State(st): State<SharedState>, Json(req): Json<ConfigUpdateReq>) -> Response {
+    if req.session_ttl_hours < 1 || req.session_ttl_hours > 720 {
+        return err_json(StatusCode::BAD_REQUEST, "会话超时时长必须在 1~720 小时之间");
+    }
+    if req.listen_addr.trim().is_empty() {
+        return err_json(StatusCode::BAD_REQUEST, "监听地址不能为空");
+    }
+    let old_guest;
+    {
+        let mut cfg = st.config.lock().unwrap();
+        old_guest = cfg.guest_map_bad_user;
+        cfg.listen_addr = req.listen_addr.trim().to_string();
+        cfg.session_ttl_hours = req.session_ttl_hours;
+        cfg.guest_map_bad_user = req.guest_map_bad_user;
+        save_config(&cfg);
+    }
+
+    if old_guest != req.guest_map_bad_user {
+        if let Ok(conf) = std::fs::read_to_string(samba::SMB_CONF) {
+            let mut out = Vec::new();
+            let mut in_global = false;
+            let mut found = false;
+            for line in conf.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                    in_global = trimmed[1..trimmed.len() - 1].trim().eq_ignore_ascii_case("global");
+                }
+                if in_global && trimmed.to_lowercase().starts_with("map to guest") {
+                    let val = if req.guest_map_bad_user { "Bad User" } else { "Never" };
+                    out.push(format!("   map to guest = {val}"));
+                    found = true;
+                } else {
+                    out.push(line.to_string());
+                }
+            }
+            if !found {
+                let mut out2 = Vec::new();
+                for line in out {
+                    out2.push(line.clone());
+                    let trimmed = line.trim();
+                    if trimmed.starts_with('[') && trimmed.ends_with(']') && trimmed[1..trimmed.len()-1].trim().eq_ignore_ascii_case("global") {
+                        let val = if req.guest_map_bad_user { "Bad User" } else { "Never" };
+                        out2.push(format!("   map to guest = {val}"));
+                    }
+                }
+                out = out2;
+            }
+            let _ = std::fs::write(samba::SMB_CONF, out.join("\n"));
+            let _ = samba::service_action("reload").await;
+        }
+    }
+
+    Json(json!({ "ok": true })).into_response()
+}
+
+async fn status_get() -> Response {
+    Json(samba::get_dashboard_status().await).into_response()
+}
+
+#[derive(Deserialize)]
+struct DisconnectReq {
+    pid: u32,
+}
+
+async fn status_disconnect(Json(req): Json<DisconnectReq>) -> Response {
+    match samba::disconnect_client(req.pid).await {
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+#[derive(Deserialize)]
+struct ServiceReq {
+    action: String,
+}
+
+async fn status_service(Json(req): Json<ServiceReq>) -> Response {
+    match samba::service_action(&req.action).await {
+        Ok(msg) => Json(json!({ "ok": true, "msg": msg })).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+async fn share_migrate(AxPath(name): AxPath<String>) -> Response {
+    match samba::migrate_share_from_main(&name).await {
+        Ok(msg) => Json(json!({ "ok": true, "msg": msg })).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+async fn groups_list() -> Response {
+    match samba::list_groups().await {
+        Ok(g) => Json(g).into_response(),
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+#[derive(Deserialize)]
+struct UserGroupsReq {
+    groups: Vec<String>,
+}
+
+async fn user_groups_update(AxPath(name): AxPath<String>, Json(req): Json<UserGroupsReq>) -> Response {
+    match samba::set_user_groups(&name, &req.groups).await {
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
 // ---- 静态页面 ----
 
 async fn index() -> Html<&'static str> {
@@ -347,9 +508,16 @@ async fn main() {
         eprintln!("⚠ 无法接管 smb.conf include: {e}");
     }
 
+    let cfg = load_or_init_config();
+    let listen_str = if let Ok(env_addr) = std::env::var("SWG_LISTEN") {
+        env_addr
+    } else {
+        cfg.listen_addr.clone()
+    };
+
     let state: SharedState = Arc::new(AppState {
         sessions: Mutex::new(HashMap::new()),
-        password_hash: Mutex::new(load_or_init_config()),
+        config: Mutex::new(cfg),
         login_fails: Mutex::new(HashMap::new()),
     });
 
@@ -357,12 +525,19 @@ async fn main() {
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
         .route("/api/password", post(change_password))
+        .route("/api/config", get(config_get).post(config_update))
+        .route("/api/status", get(status_get))
+        .route("/api/status/disconnect", post(status_disconnect))
+        .route("/api/status/service", post(status_service))
         .route("/api/shares", get(shares_list).post(share_create))
         .route("/api/shares/{name}", put(share_update).delete(share_delete))
+        .route("/api/shares/migrate/{name}", post(share_migrate))
         .route("/api/users", get(users_list).post(user_create))
         .route("/api/users/{name}", axum::routing::delete(user_delete))
         .route("/api/users/{name}/password", put(user_password))
         .route("/api/users/{name}/enable", put(user_enable))
+        .route("/api/groups", get(groups_list))
+        .route("/api/users/{name}/groups", put(user_groups_update))
         .route("/api/files", get(files::list))
         .route("/api/files/download", get(files::download))
         .route(
@@ -372,6 +547,12 @@ async fn main() {
         .route("/api/files/mkdir", post(files::mkdir))
         .route("/api/files/delete", post(files::delete))
         .route("/api/files/acl", get(files::acl_get).post(files::acl_set))
+        .route("/api/files/tree", get(files::tree_list))
+        .route("/api/files/tree/mkdir", post(files::tree_mkdir))
+        .route("/api/files/copy", post(files::copy_file))
+        .route("/api/files/move", post(files::move_file))
+        .route("/api/files/extract", post(files::extract_archive))
+        .route("/api/files/archive", post(files::create_archive))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let app = Router::new()
@@ -382,9 +563,8 @@ async fn main() {
         .merge(protected)
         .with_state(state);
 
-    let addr = std::env::var("SWG_LISTEN").unwrap_or_else(|_| "0.0.0.0:8686".into());
-    let listener = tokio::net::TcpListener::bind(&addr).await.expect("端口绑定失败");
-    println!("Samba WebGUI 已启动: http://{addr}");
+    let listener = tokio::net::TcpListener::bind(&listen_str).await.expect("端口绑定失败");
+    println!("Samba WebGUI 已启动: http://{listen_str}");
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .await
         .unwrap();

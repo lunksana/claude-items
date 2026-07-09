@@ -28,6 +28,12 @@ pub struct Share {
     /// 只读共享中仍可写的用户列表
     #[serde(default)]
     pub write_list: String,
+    /// 是否开启网络回收站 (.recycle)
+    #[serde(default)]
+    pub recycle_bin: bool,
+    /// 是否开启 macOS/Time Machine 兼容
+    #[serde(default)]
+    pub fruit_time_machine: bool,
     /// 是否由本工具管理（false = 来自主配置，只读展示）
     #[serde(default)]
     pub managed: bool,
@@ -45,14 +51,19 @@ pub struct SmbUser {
     pub username: String,
     pub uid: String,
     pub disabled: bool,
+    pub groups: Vec<String>,
 }
 
 pub fn valid_section_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && !s.eq_ignore_ascii_case("global")
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '))
+        && !has_control_char(s)
+        && !s.contains('[')
+        && !s.contains(']')
+        && !s.contains('=')
+        && !s.contains('#')
+        && !s.contains(';')
         && !s.starts_with(' ')
         && !s.ends_with(' ')
 }
@@ -119,6 +130,9 @@ fn section_to_share(name: &str, kvs: &[(String, String)], managed: bool) -> Shar
     } else {
         as_bool(get(kvs, "read only"), true)
     };
+    let vfs = get(kvs, "vfs objects").unwrap_or("").to_lowercase();
+    let recycle_bin = vfs.contains("recycle");
+    let fruit_time_machine = vfs.contains("fruit") || as_bool(get(kvs, "fruit:time machine"), false);
     Share {
         name: name.to_string(),
         path: get(kvs, "path").unwrap_or("").to_string(),
@@ -128,6 +142,8 @@ fn section_to_share(name: &str, kvs: &[(String, String)], managed: bool) -> Shar
         browseable: as_bool(get(kvs, "browseable").or(get(kvs, "browsable")), true),
         valid_users: get(kvs, "valid users").unwrap_or("").to_string(),
         write_list: get(kvs, "write list").unwrap_or("").to_string(),
+        recycle_bin,
+        fruit_time_machine,
         managed,
         fix_perms: false,
     }
@@ -202,6 +218,23 @@ fn render_managed(shares: &[Share]) -> String {
         }
         // inherit acls: SMB 客户端新建的文件继承目录的默认 ACL
         out.push_str("   create mask = 0664\n   directory mask = 0775\n   inherit acls = yes\n");
+        if s.recycle_bin || s.fruit_time_machine {
+            let mut vfs_list = Vec::new();
+            if s.recycle_bin {
+                vfs_list.push("recycle");
+            }
+            if s.fruit_time_machine {
+                vfs_list.push("fruit");
+                vfs_list.push("streams_xattr");
+            }
+            out.push_str(&format!("   vfs objects = {}\n", vfs_list.join(" ")));
+            if s.recycle_bin {
+                out.push_str("   recycle:repository = .recycle\n   recycle:keeptree = yes\n   recycle:versions = yes\n");
+            }
+            if s.fruit_time_machine {
+                out.push_str("   fruit:time machine = yes\n");
+            }
+        }
     }
     out
 }
@@ -384,7 +417,12 @@ pub async fn list_users() -> Result<Vec<SmbUser>, String> {
             if let Some(u) = cur.take() {
                 users.push(u);
             }
-            cur = Some(SmbUser { username: v.trim().to_string(), uid: String::new(), disabled: false });
+            cur = Some(SmbUser {
+                username: v.trim().to_string(),
+                uid: String::new(),
+                disabled: false,
+                groups: Vec::new(),
+            });
         } else if let Some(v) = line.strip_prefix("User SID:") {
             if let Some(u) = cur.as_mut() {
                 u.uid = v.trim().rsplit('-').next().unwrap_or("").to_string();
@@ -398,7 +436,62 @@ pub async fn list_users() -> Result<Vec<SmbUser>, String> {
     if let Some(u) = cur {
         users.push(u);
     }
+    for u in &mut users {
+        u.groups = get_user_groups(&u.username).await;
+    }
     Ok(users)
+}
+
+async fn get_user_groups(name: &str) -> Vec<String> {
+    if let Ok(out) = Command::new("id").args(["-Gn", "--", name]).output().await {
+        if out.status.success() {
+            return String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+pub async fn list_groups() -> Result<Vec<String>, String> {
+    let out = match Command::new("getent").arg("group").output().await {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => std::fs::read_to_string("/etc/group").unwrap_or_default(),
+    };
+    let mut groups: Vec<String> = out
+        .lines()
+        .filter_map(|line| line.split(':').next())
+        .filter(|g| !g.is_empty() && !g.starts_with('+') && !g.starts_with('-'))
+        .map(|s| s.to_string())
+        .collect();
+    groups.sort();
+    groups.dedup();
+    Ok(groups)
+}
+
+pub async fn set_user_groups(name: &str, groups: &[String]) -> Result<(), String> {
+    if !valid_existing_username(name) {
+        return Err("非法用户名".into());
+    }
+    for g in groups {
+        if !valid_existing_username(g) {
+            return Err(format!("非法用户组名: {g}"));
+        }
+    }
+    let groups_arg = groups.join(",");
+    let mut cmd = Command::new("usermod");
+    if groups_arg.is_empty() {
+        cmd.args(["-G", "", "--", name]);
+    } else {
+        cmd.args(["-G", &groups_arg, "--", name]);
+    }
+    let out = cmd.output().await.map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
 }
 
 async fn smbpasswd_stdin(args: &[&str], password: &str) -> Result<(), String> {
@@ -493,6 +586,188 @@ pub async fn delete_user(name: &str) -> Result<(), String> {
     let out = Command::new("smbpasswd").args(["-x", name]).output().await.map_err(|e| e.to_string())?;
     if out.status.success() {
         Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SmbConnection {
+    pub pid: u32,
+    pub username: String,
+    pub group: String,
+    pub machine: String,
+    pub ip: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiskInfo {
+    pub mount: String,
+    pub total: u64,
+    pub used: u64,
+    pub avail: u64,
+    pub pct: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StatusDashboard {
+    pub smbd_active: bool,
+    pub nmbd_active: bool,
+    pub connections: Vec<SmbConnection>,
+    pub disks: Vec<DiskInfo>,
+}
+
+pub async fn migrate_share_from_main(name: &str) -> Result<String, String> {
+    let _guard = CONF_LOCK.lock().await;
+    let shares = list_all_shares().await?;
+    let target = shares
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case(name) && !s.managed)
+        .ok_or_else(|| "无法在主配置中找到该非托管共享".to_string())?;
+
+    let mut new_share = target.clone();
+    new_share.managed = true;
+
+    // 1. 在 /etc/samba/smb.conf 中注释掉该共享段
+    let conf = std::fs::read_to_string(SMB_CONF).map_err(|e| e.to_string())?;
+    let bak = format!("{SMB_CONF}.migrate.bak");
+    if !Path::new(&bak).exists() {
+        let _ = std::fs::copy(SMB_CONF, &bak);
+    }
+    let mut out_lines = Vec::new();
+    let mut in_target_sec = false;
+    for line in conf.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let sec_name = trimmed[1..trimmed.len() - 1].trim();
+            in_target_sec = sec_name.eq_ignore_ascii_case(name);
+            if in_target_sec {
+                out_lines.push(format!("# [migrated by webgui] {line}"));
+                continue;
+            }
+        }
+        if in_target_sec {
+            out_lines.push(format!("# {line}"));
+        } else {
+            out_lines.push(line.to_string());
+        }
+    }
+    let mut new_conf = out_lines.join("\n");
+    if !new_conf.ends_with('\n') {
+        new_conf.push('\n');
+    }
+    std::fs::write(SMB_CONF, new_conf).map_err(|e| e.to_string())?;
+
+    // 2. 添加到托管列表并保存
+    let mut managed = load_managed();
+    managed.push(new_share);
+    match save_managed(&managed).await {
+        Ok(msg) => {
+            invalidate_share_cache();
+            Ok(format!("接管迁移成功: {msg}"))
+        }
+        Err(e) => {
+            let _ = std::fs::write(SMB_CONF, conf);
+            Err(format!("接管保存失败已自动回滚: {e}"))
+        }
+    }
+}
+
+pub async fn get_dashboard_status() -> StatusDashboard {
+    let smbd_active = match Command::new("systemctl").args(["is-active", "smbd"]).output().await {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).trim() == "active",
+        Err(_) => false,
+    };
+    let nmbd_active = match Command::new("systemctl").args(["is-active", "nmbd"]).output().await {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).trim() == "active",
+        Err(_) => false,
+    };
+
+    let mut connections = Vec::new();
+    if let Ok(out) = Command::new("smbstatus").args(["-b", "-n"]).output().await {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut past_header = false;
+            for line in text.lines() {
+                if line.starts_with("------") {
+                    past_header = true;
+                    continue;
+                }
+                if past_header {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 4 {
+                        if let Ok(pid) = parts[0].parse::<u32>() {
+                            connections.push(SmbConnection {
+                                pid,
+                                username: parts[1].to_string(),
+                                group: parts[2].to_string(),
+                                machine: parts[3].to_string(),
+                                ip: parts.get(4).unwrap_or(&"").trim_matches(|c| c == '(' || c == ')').to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut disks = Vec::new();
+    if let Ok(out) = Command::new("df").args(["-P", "-B1"]).output().await {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for (i, line) in text.lines().enumerate() {
+                if i == 0 {
+                    continue;
+                }
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 6 {
+                    let mount = parts[5..].join(" ");
+                    if mount == "/" || mount.starts_with("/srv") || mount.starts_with("/mnt") || mount.starts_with("/data") || mount.starts_with("/home") {
+                        let total = parts[1].parse::<u64>().unwrap_or(0);
+                        let used = parts[2].parse::<u64>().unwrap_or(0);
+                        let avail = parts[3].parse::<u64>().unwrap_or(0);
+                        let pct = parts[4].trim_end_matches('%').parse::<u32>().unwrap_or(0);
+                        disks.push(DiskInfo {
+                            mount,
+                            total,
+                            used,
+                            avail,
+                            pct,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    StatusDashboard {
+        smbd_active,
+        nmbd_active,
+        connections,
+        disks,
+    }
+}
+
+pub async fn disconnect_client(pid: u32) -> Result<(), String> {
+    if pid <= 1 {
+        return Err("非法 PID".into());
+    }
+    let out = Command::new("kill").args(["-9", &pid.to_string()]).output().await.map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+pub async fn service_action(action: &str) -> Result<String, String> {
+    if !matches!(action, "restart" | "reload" | "start" | "stop") {
+        return Err("非法操作".into());
+    }
+    let out = Command::new("systemctl").args([action, "smbd"]).output().await.map_err(|e| e.to_string())?;
+    let _ = Command::new("systemctl").args([action, "nmbd"]).output().await;
+    if out.status.success() {
+        Ok(format!("smbd 和 nmbd 服务已执行 {action}"))
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
