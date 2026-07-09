@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Samba 管理台</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- 登录页 -->
+<div id="login-view" class="login-wrap hidden">
+  <form class="login-card" id="login-form">
+    <h1>Samba 管理台</h1>
+    <p class="muted">请输入管理密码登录</p>
+    <input type="password" id="login-password" placeholder="管理密码" autocomplete="current-password" required>
+    <button type="submit" class="btn primary wide">登 录</button>
+    <p id="login-error" class="error"></p>
+  </form>
+</div>
+
+<!-- 主界面 -->
+<div id="main-view" class="layout hidden">
+  <aside class="sidebar">
+    <div class="brand">🗂 Samba 管理台</div>
+    <nav>
+      <button class="nav-item active" data-tab="shares">📁 共享管理</button>
+      <button class="nav-item" data-tab="users">👤 用户管理</button>
+      <button class="nav-item" data-tab="files">🗄 文件浏览</button>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="btn ghost wide" id="btn-change-pw">修改密码</button>
+      <button class="btn ghost wide" id="btn-logout">退出登录</button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <!-- 共享管理 -->
+    <section id="tab-shares" class="tab">
+      <div class="toolbar">
+        <h2>共享文件夹</h2>
+        <div class="spacer"></div>
+        <button class="btn primary" id="btn-new-share">＋ 新建共享</button>
+      </div>
+      <table class="table">
+        <thead><tr>
+          <th>名称</th><th>路径</th><th>备注</th><th>写入</th><th>访客</th><th>可见</th><th>允许用户</th><th>来源</th><th class="ops">操作</th>
+        </tr></thead>
+        <tbody id="shares-tbody"></tbody>
+      </table>
+    </section>
+
+    <!-- 用户管理 -->
+    <section id="tab-users" class="tab hidden">
+      <div class="toolbar">
+        <h2>共享用户</h2>
+        <div class="spacer"></div>
+        <button class="btn primary" id="btn-new-user">＋ 新建用户</button>
+      </div>
+      <table class="table">
+        <thead><tr><th>用户名</th><th>UID/RID</th><th>状态</th><th class="ops">操作</th></tr></thead>
+        <tbody id="users-tbody"></tbody>
+      </table>
+    </section>
+
+    <!-- 文件浏览 -->
+    <section id="tab-files" class="tab hidden">
+      <div class="toolbar">
+        <h2>文件浏览</h2>
+        <select id="file-share"></select>
+        <div class="spacer"></div>
+        <button class="btn" id="btn-mkdir">新建文件夹</button>
+        <button class="btn" id="btn-upload">⬆ 上传文件</button>
+        <input type="file" id="upload-input" multiple hidden>
+      </div>
+      <div class="breadcrumb" id="breadcrumb"></div>
+      <div class="hint">单击选中 · 双击进入/预览 · ↑↓ 移动 · <b>长按空格键预览文件</b>，松开关闭</div>
+      <table class="table files">
+        <thead><tr><th>名称</th><th>大小</th><th>修改时间</th><th class="ops">操作</th></tr></thead>
+        <tbody id="files-tbody"></tbody>
+      </table>
+      <div id="upload-progress" class="hidden"><div class="bar"><div id="upload-bar-inner"></div></div><span id="upload-label"></span></div>
+    </section>
+  </main>
+</div>
+
+<!-- 共享编辑弹窗 -->
+<dialog id="share-dialog">
+  <form method="dialog" class="dialog-form" id="share-form">
+    <h3 id="share-dialog-title">新建共享</h3>
+    <label>共享名称 <input id="sh-name" required pattern="[A-Za-z0-9._\- ]+" maxlength="64"></label>
+    <label>目录路径 <input id="sh-path" required placeholder="/srv/share/xxx"></label>
+    <label>备注 <input id="sh-comment"></label>
+    <div class="check-row">
+      <label class="check"><input type="checkbox" id="sh-writable" checked> 允许写入</label>
+      <label class="check"><input type="checkbox" id="sh-guest"> 允许访客(免密)</label>
+      <label class="check"><input type="checkbox" id="sh-browseable" checked> 网络邻居可见</label>
+    </div>
+    <label>允许的用户 <input id="sh-valid-users" placeholder="留空=所有人；如 alice, bob, @staff"></label>
+    <label>额外可写用户 <input id="sh-write-list" placeholder="只读共享中仍可写的用户"></label>
+    <label class="check"><input type="checkbox" id="sh-fix-perms"> 自动修正目录属主/权限（使写入生效）</label>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="share-cancel">取消</button>
+      <button type="submit" class="btn primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 用户新建弹窗 -->
+<dialog id="user-dialog">
+  <form method="dialog" class="dialog-form" id="user-form">
+    <h3>新建共享用户</h3>
+    <label>用户名 <input id="u-name" required pattern="[a-z_][a-z0-9_\-]*" maxlength="32"></label>
+    <label>密码 <input id="u-password" type="password" required minlength="4"></label>
+    <p class="muted small">若系统用户不存在会自动创建（不允许 shell 登录）</p>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="user-cancel">取消</button>
+      <button type="submit" class="btn primary">创建</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 修改管理密码弹窗 -->
+<dialog id="pw-dialog">
+  <form method="dialog" class="dialog-form" id="pw-form">
+    <h3>修改管理密码</h3>
+    <label>原密码 <input id="pw-old" type="password" required></label>
+    <label>新密码 <input id="pw-new" type="password" required minlength="6"></label>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="pw-cancel">取消</button>
+      <button type="submit" class="btn primary">修改</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ACL 权限弹窗 -->
+<dialog id="acl-dialog">
+  <div class="dialog-form acl-form">
+    <h3 id="acl-title">访问控制 (ACL)</h3>
+    <p class="muted small" id="acl-ownerinfo"></p>
+    <table class="table acl-table">
+      <thead><tr><th>作用于</th><th>名称</th><th>读</th><th>写</th><th>执行</th><th>继承</th><th class="ops"></th></tr></thead>
+      <tbody id="acl-tbody"></tbody>
+    </table>
+    <div class="acl-add">
+      <select id="acl-tag"><option value="user">用户</option><option value="group">组</option></select>
+      <input id="acl-name" placeholder="用户/组名" list="acl-userlist" maxlength="32">
+      <datalist id="acl-userlist"></datalist>
+      <label class="check"><input type="checkbox" id="acl-r" checked> 读</label>
+      <label class="check"><input type="checkbox" id="acl-w"> 写</label>
+      <label class="check"><input type="checkbox" id="acl-x" checked> 执行</label>
+      <button class="btn primary mini" id="acl-add-btn">添加/更新</button>
+    </div>
+    <div class="check-row" id="acl-dir-opts">
+      <label class="check"><input type="checkbox" id="acl-default"> 同时设为默认 ACL（新建文件继承）</label>
+      <label class="check"><input type="checkbox" id="acl-recursive"> 递归应用到子项</label>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" class="btn danger" id="acl-clear">清除全部 ACL</button>
+      <div class="spacer"></div>
+      <button type="button" class="btn" id="acl-close">关闭</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- Quick Look 预览层 -->
+<div id="preview-overlay" class="preview-overlay hidden">
+  <div class="preview-box">
+    <div class="preview-title" id="preview-title"></div>
+    <div class="preview-body" id="preview-body"></div>
+    <div class="preview-foot">松开空格键或按 Esc 关闭</div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
