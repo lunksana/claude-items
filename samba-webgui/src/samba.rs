@@ -532,6 +532,10 @@ pub async fn create_user(name: &str, password: &str) -> Result<(), String> {
     if password.len() < 4 {
         return Err("密码至少 4 位".into());
     }
+    // 密码合法性提前校验：避免 useradd 成功后 smbpasswd 才失败，残留孤儿系统账号
+    if password.contains('\n') || password.contains('\r') {
+        return Err("密码不能包含换行符".into());
+    }
     // 系统/特权账号不允许开通 SMB（避免给 root 等开出网络口令）
     let exists = Command::new("id").arg("-u").arg(name).output().await;
     if let Ok(o) = &exists {
@@ -543,7 +547,8 @@ pub async fn create_user(name: &str, password: &str) -> Result<(), String> {
         }
     }
     // 对应 unix 用户不存在则创建（禁止登录 shell）
-    if !matches!(&exists, Ok(o) if o.status.success()) {
+    let created_unix = !matches!(&exists, Ok(o) if o.status.success());
+    if created_unix {
         let out = Command::new("useradd")
             .args(["-M", "-s", "/usr/sbin/nologin", name])
             .output()
@@ -553,7 +558,14 @@ pub async fn create_user(name: &str, password: &str) -> Result<(), String> {
             return Err(format!("创建系统用户失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
         }
     }
-    smbpasswd_stdin(&["-a", name], password).await
+    // smbpasswd 失败时回滚刚创建的 unix 用户，不留孤儿账号
+    if let Err(e) = smbpasswd_stdin(&["-a", name], password).await {
+        if created_unix {
+            let _ = Command::new("userdel").arg("--").arg(name).output().await;
+        }
+        return Err(e);
+    }
+    Ok(())
 }
 
 pub async fn set_user_password(name: &str, password: &str) -> Result<(), String> {
@@ -591,17 +603,21 @@ pub async fn delete_user(name: &str) -> Result<(), String> {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct SmbConnection {
     pub pid: u32,
     pub username: String,
+    #[serde(rename = "groupname")]
     pub group: String,
     pub machine: String,
+    #[serde(rename = "ip_addr")]
     pub ip: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct DiskInfo {
+    pub fs: String,
+    #[serde(rename = "mounted_on")]
     pub mount: String,
     pub total: u64,
     pub used: u64,
@@ -609,7 +625,7 @@ pub struct DiskInfo {
     pub pct: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct StatusDashboard {
     pub smbd_active: bool,
     pub nmbd_active: bool,
@@ -697,12 +713,25 @@ pub async fn get_dashboard_status() -> StatusDashboard {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 4 {
                         if let Ok(pid) = parts[0].parse::<u32>() {
+                            let username = parts[1].to_string();
+                            let group = parts[2].to_string();
+                            let machine = parts[3].to_string();
+                            let mut ip = String::new();
+                            for p in &parts[4..] {
+                                if p.contains("ipv4:") || p.contains("ipv6:") || (p.starts_with('(') && p.ends_with(')')) {
+                                    ip = p.trim_matches(|c| c == '(' || c == ')').to_string();
+                                    break;
+                                }
+                            }
+                            if ip.is_empty() && parts.len() > 4 {
+                                ip = parts[4].trim_matches(|c| c == '(' || c == ')').to_string();
+                            }
                             connections.push(SmbConnection {
                                 pid,
-                                username: parts[1].to_string(),
-                                group: parts[2].to_string(),
-                                machine: parts[3].to_string(),
-                                ip: parts.get(4).unwrap_or(&"").trim_matches(|c| c == '(' || c == ')').to_string(),
+                                username,
+                                group,
+                                machine,
+                                ip,
                             });
                         }
                     }
@@ -721,13 +750,26 @@ pub async fn get_dashboard_status() -> StatusDashboard {
                 }
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 6 {
+                    let fs = parts[0].to_string();
                     let mount = parts[5..].join(" ");
-                    if mount == "/" || mount.starts_with("/srv") || mount.starts_with("/mnt") || mount.starts_with("/data") || mount.starts_with("/home") {
+                    if !fs.starts_with("tmpfs")
+                        && !fs.starts_with("devtmpfs")
+                        && !fs.starts_with("sysfs")
+                        && !fs.starts_with("proc")
+                        && !fs.starts_with("cgroup")
+                        && !fs.starts_with("overlay")
+                        && !fs.starts_with("shm")
+                        && !fs.starts_with("nsfs")
+                        && !mount.starts_with("/dev")
+                        && !mount.starts_with("/sys")
+                        && !mount.starts_with("/proc")
+                    {
                         let total = parts[1].parse::<u64>().unwrap_or(0);
                         let used = parts[2].parse::<u64>().unwrap_or(0);
                         let avail = parts[3].parse::<u64>().unwrap_or(0);
                         let pct = parts[4].trim_end_matches('%').parse::<u32>().unwrap_or(0);
                         disks.push(DiskInfo {
+                            fs,
                             mount,
                             total,
                             used,

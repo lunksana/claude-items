@@ -467,7 +467,7 @@ async fn share_migrate(AxPath(name): AxPath<String>) -> Response {
 
 async fn groups_list() -> Response {
     match samba::list_groups().await {
-        Ok(g) => Json(g).into_response(),
+        Ok(g) => Json(json!({ "groups": g })).into_response(),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
     }
 }
@@ -557,6 +557,9 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(index))
+        // index.html 引用的是根路径；同时保留 /static/ 别名向后兼容
+        .route("/app.js", get(app_js))
+        .route("/style.css", get(style_css))
         .route("/static/app.js", get(app_js))
         .route("/static/style.css", get(style_css))
         .route("/api/login", post(login))

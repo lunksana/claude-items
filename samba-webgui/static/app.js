@@ -70,13 +70,13 @@ document.querySelectorAll(".toggle-pw").forEach((btn) => {
 
 // ---------- 视图与导航切换 ----------
 function showLogin() {
-  $("login-view").classList.remove("hidden");
-  $("main-view").classList.add("hidden");
+  $("login-view")?.classList.remove("hidden");
+  $("main-view")?.classList.add("hidden");
 }
 
 function showMain() {
-  $("login-view").classList.add("hidden");
-  $("main-view").classList.remove("hidden");
+  $("login-view")?.classList.add("hidden");
+  $("main-view")?.classList.remove("hidden");
   loadStatus();
   loadShares();
   loadUsers();
@@ -89,6 +89,15 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
     document.querySelectorAll(".nav-item").forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
     activeTab = btn.dataset.tab;
+    const titles = {
+      status: "监控大盘",
+      shares: "共享目录管理",
+      users: "Samba 账号与权限组",
+      files: "系统文件资源管理器",
+      settings: "全局配置与监听参数"
+    };
+    if ($("page-heading")) $("page-heading").textContent = titles[activeTab] || activeTab;
+
     ["status", "shares", "users", "files", "settings"].forEach((t) => {
       const sec = $("tab-" + t);
       if (sec) sec.classList.toggle("hidden", t !== activeTab);
@@ -102,42 +111,42 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
 });
 
 // ---------- 登录与退出 ----------
-$("login-form").addEventListener("submit", async (e) => {
+$("login-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
-  $("login-error").textContent = "";
+  if ($("login-error")) $("login-error").textContent = "";
   try {
     await api("/api/login", { json: { password: $("login-password").value } });
     $("login-password").value = "";
     showMain();
   } catch (err) {
-    $("login-error").textContent = err.message;
+    if ($("login-error")) $("login-error").textContent = err.message;
   }
 });
 
-$("btn-logout").addEventListener("click", async () => {
-  if (!confirm("确定要退出 Samba 管理平台？")) return;
+$("btn-logout")?.addEventListener("click", async () => {
+  if (!confirm("确定要退出 Samba 管理后台？")) return;
   try { await api("/api/logout", { method: "POST" }); } catch (_) {}
   showLogin();
 });
 
 // 修改 WebGUI 管理密码
-$("btn-change-pw").addEventListener("click", () => {
+$("btn-change-pw")?.addEventListener("click", () => {
   $("pw-form").reset();
   $("pw-dialog").showModal();
 });
-$("pw-cancel").addEventListener("click", () => $("pw-dialog").close());
-$("pw-close").addEventListener("click", () => $("pw-dialog").close());
-$("pw-form").addEventListener("submit", async (e) => {
+$("pw-cancel")?.addEventListener("click", () => $("pw-dialog").close());
+$("pw-close")?.addEventListener("click", () => $("pw-dialog").close());
+$("pw-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   if ($("pw-new").value !== $("pw-confirm").value) {
-    toast("两次输入的新密码不一致，请核对！", true);
+    toast("两次输入的新密码不一致，请仔细核对！", true);
     return;
   }
   try {
     await api("/api/password", { json: { old_password: $("pw-old").value, new_password: $("pw-new").value } });
     $("pw-dialog").close();
     $("pw-form").reset();
-    toast("管理密码已成功更新");
+    toast("WebGUI 管理后台密码已更新成功");
   } catch (err) { toast(err.message, true); }
 });
 
@@ -147,53 +156,59 @@ async function loadStatus() {
     const data = await api("/api/status");
     const smbdBadge = $("badge-smbd");
     if (smbdBadge) {
-      smbdBadge.textContent = data.smbd_active ? "正常运行 (Active)" : "未启动 (Stopped)";
+      smbdBadge.textContent = data.smbd_active ? "运行中 (Active)" : "未启动 (Stopped)";
       smbdBadge.className = "status-pill " + (data.smbd_active ? "active" : "stopped");
     }
     const nmbdBadge = $("badge-nmbd");
     if (nmbdBadge) {
-      nmbdBadge.textContent = data.nmbd_active ? "正常运行 (Active)" : "未启动 (Stopped)";
+      nmbdBadge.textContent = data.nmbd_active ? "运行中 (Active)" : "未启动 (Stopped)";
       nmbdBadge.className = "status-pill " + (data.nmbd_active ? "active" : "stopped");
     }
 
     const diskBox = $("status-disks-list");
     if (diskBox && data.disks) {
       diskBox.innerHTML = data.disks.length ? data.disks.map((d) => {
-        const pct = Math.min(Math.max(d.percent || 0, 0), 100);
+        const pct = Math.min(Math.max(d.pct || 0, 0), 100);
         const cls = pct > 88 ? "danger" : pct > 75 ? "warn" : "ok";
+        const mountName = d.mounted_on || d.mount || "-";
+        const fsName = d.fs || "-";
         return `
           <div class="disk-item">
             <div class="disk-header">
-              <span><b>${esc(d.mounted_on)}</b> <small class="muted">(${esc(d.fs)})</small></span>
+              <span><b>${esc(mountName)}</b> <small class="muted">(${esc(fsName)})</small></span>
               <span>${fmtSize(d.used)} / ${fmtSize(d.total)} (${pct}%)</span>
             </div>
             <div class="disk-bar-wrap"><div class="disk-bar ${cls}" style="width: ${pct}%"></div></div>
           </div>`;
-      }).join("") : '<p class="muted">暂无存储分区信息</p>';
+      }).join("") : '<p class="muted text-center py-4">未检测到有效的数据存储分区</p>';
     }
 
     const connsTbody = $("status-conns-tbody");
     if (connsTbody && data.connections) {
-      $("conn-count-badge").textContent = `${data.connections.length} 在线`;
-      connsTbody.innerHTML = data.connections.length ? data.connections.map((c) => `
-        <tr>
-          <td><code class="primary">${c.pid}</code></td>
-          <td><b>${esc(c.username)}</b></td>
-          <td><span class="badge info">${esc(c.groupname)}</span></td>
-          <td>${esc(c.machine)}</td>
-          <td class="muted">${esc(c.ip_addr)}</td>
-          <td class="ops">
-            <button class="btn mini danger" data-kick="${c.pid}">踢出断开</button>
-          </td>
-        </tr>`).join("") : '<tr><td colspan="6" class="muted">当前无活跃客户端连接</td></tr>';
+      if ($("conn-count-badge")) $("conn-count-badge").textContent = `${data.connections.length} 在线`;
+      connsTbody.innerHTML = data.connections.length ? data.connections.map((c) => {
+        const groupName = c.groupname || c.group || "-";
+        const ipAddr = c.ip_addr || c.ip || "-";
+        return `
+          <tr>
+            <td><code style="color:var(--primary);font-weight:600">${c.pid}</code></td>
+            <td><b>${esc(c.username || "-")}</b></td>
+            <td><span class="badge info">${esc(groupName)}</span></td>
+            <td>${esc(c.machine || "-")}</td>
+            <td class="muted font-mono">${esc(ipAddr)}</td>
+            <td class="ops">
+              <button class="btn mini danger" data-kick="${c.pid}">断开连接</button>
+            </td>
+          </tr>`;
+      }).join("") : '<tr><td colspan="6" class="muted text-center p-4">当前没有活跃的客户端访问连接</td></tr>';
 
       connsTbody.querySelectorAll("[data-kick]").forEach((b) => {
         b.addEventListener("click", async () => {
           const pid = +b.dataset.kick;
-          if (!confirm(`确定强制断开 PID 为 ${pid} 的客户端连接？`)) return;
+          if (!confirm(`确定要强制断开 PID 为 ${pid} 的客户端会话连接？`)) return;
           try {
-            const r = await api("/api/status/disconnect", { json: { pid } });
-            toast("连接已断开");
+            await api("/api/status/disconnect", { json: { pid } });
+            toast("客户端会话已成功断开");
             loadStatus();
           } catch (err) { toast(err.message, true); }
         });
@@ -203,7 +218,7 @@ async function loadStatus() {
 }
 
 $("btn-refresh-status")?.addEventListener("click", () => {
-  toast("正在刷新监控状态...");
+  toast("正在更新系统状态大盘...");
   loadStatus();
 });
 
@@ -211,11 +226,11 @@ document.querySelectorAll(".service-actions button[data-action]").forEach((btn) 
   btn.addEventListener("click", async () => {
     const act = btn.dataset.action;
     const labels = { restart: "重启服务", reload: "热加载配置", stop: "停止服务", start: "启动服务" };
-    if (act === "stop" && !confirm("警告：停止服务将导致所有正在进行的 SMB 文件传输断开，确定停止？")) return;
+    if (act === "stop" && !confirm("警告：停止 Samba 服务将断开所有在线连接和传输，确定执行吗？")) return;
     try {
       toast(`正在${labels[act] || act}...`);
       const r = await api("/api/status/service", { json: { action: act } });
-      toast(r.msg || `${labels[act]}完成`);
+      toast(r.msg || `${labels[act]}执行完成`);
       loadStatus();
     } catch (err) { toast(err.message, true); }
   });
@@ -232,7 +247,7 @@ async function loadShares() {
     tbody.innerHTML = shares.map((s) => `
       <tr>
         <td><b>${esc(s.name)}</b></td>
-        <td class="muted"><code>${esc(s.path)}</code></td>
+        <td class="muted"><code style="color:#334155">${esc(s.path)}</code></td>
         <td>${esc(s.comment || "-")}</td>
         <td>
           <span class="badge ${s.read_only ? 'off' : 'on'}">${s.read_only ? '只读' : '可写'}</span>
@@ -240,15 +255,15 @@ async function loadShares() {
         </td>
         <td>
           ${s.recycle ? '<span class="badge info" title="网络回收站开启">♻️ 回收站</span> ' : ''}
-          ${s.fruit ? '<span class="badge info" title="Apple/macOS 兼容开启">🍎 macOS/TimeMachine</span>' : ''}
+          ${s.fruit ? '<span class="badge info" title="macOS 原生兼容开启">🍎 macOS</span>' : ''}
           ${!s.recycle && !s.fruit ? '<span class="muted small">默认</span>' : ''}
         </td>
         <td class="muted small">${esc(s.valid_users || "所有人/任意有效用户")}</td>
-        <td>${s.managed ? '<span class="badge on">本工具托管</span>' : '<span class="badge off">原 smb.conf 主配置</span>'}</td>
+        <td>${s.managed ? '<span class="badge on">管理后台建立</span>' : '<span class="badge off">原主配置导入</span>'}</td>
         <td class="ops">${s.managed ? `
-          <button class="btn mini" data-edit="${esc(s.name)}">⚙️ 编辑</button>
-          <button class="btn mini danger" data-del="${esc(s.name)}">🗑️ 删除</button>` : `
-          <button class="btn mini success" data-migrate="${esc(s.name)}" title="接管到 WebGUI 中托管编辑">✨ 接管编辑</button>`}
+          <button class="btn mini" data-edit="${esc(s.name)}">编辑</button>
+          <button class="btn mini danger" data-del="${esc(s.name)}">删除</button>` : `
+          <button class="btn mini success" data-migrate="${esc(s.name)}" title="迁移至 WebGUI 管理后台中进行全面管理">✨ 接管编辑</button>`}
         </td>
       </tr>`).join("");
 
@@ -257,7 +272,7 @@ async function loadShares() {
 
     tbody.querySelectorAll("[data-del]").forEach((b) =>
       b.addEventListener("click", async () => {
-        if (!confirm(`确定要从 Samba 中删除共享「${b.dataset.del}」？（物理磁盘上的文件和目录不会被删除）`)) return;
+        if (!confirm(`确定要从 Samba 配置中删除共享项目「${b.dataset.del}」吗？（提示：宿主物理磁盘上的文件或文件夹不会被任何删除）`)) return;
         try {
           const r = await api("/api/shares/" + encodeURIComponent(b.dataset.del), { method: "DELETE" });
           toast(r.message || "共享目录已删除");
@@ -268,7 +283,7 @@ async function loadShares() {
     tbody.querySelectorAll("[data-migrate]").forEach((b) =>
       b.addEventListener("click", async () => {
         const name = b.dataset.migrate;
-        if (!confirm(`将共享「${name}」接管至本管理工具托管？\n接管后原 smb.conf 中的对应段落将被注释保留，您可以随时在 WebGUI 中灵活修改所有参数及扩展。`)) return;
+        if (!confirm(`确定将原主配置中的共享「${name}」接管至 WebGUI 管理平台中托管吗？\n接管后原 smb.conf 中的配置项将被注释保留，您随后即可直接对该目录配置所有读写及高级兼容参数！`)) return;
         try {
           const r = await api("/api/shares/migrate/" + encodeURIComponent(name), { method: "POST" });
           toast(r.msg || "接管成功");
@@ -280,7 +295,7 @@ async function loadShares() {
 
 function openShareDialog(share) {
   editingShare = share || null;
-  $("share-dialog-title").textContent = share ? `编辑共享：${share.name}` : "新建共享文件夹";
+  $("share-dialog-title").textContent = share ? `编辑共享文件夹：${share.name}` : "新建共享文件夹";
   $("sh-name").value = share?.name || "";
   $("sh-name").disabled = !!share;
   $("sh-path").value = share?.path || "";
@@ -320,45 +335,56 @@ $("share-form")?.addEventListener("submit", async (e) => {
       ? await api("/api/shares/" + encodeURIComponent(editingShare.name), { method: "PUT", json: body })
       : await api("/api/shares", { json: body });
     $("share-dialog").close();
-    toast(r.message || "共享设置已成功生效");
+    toast(r.message || "共享设置保存成功");
     loadShares(); refreshShareSelect();
   } catch (err) { toast(err.message, true); }
 });
 
-// ---------- 树形目录浏览/新建对话框 ----------
-let treeCurrentPath = "/";
+// ---------- 树形目录浏览/新建路径 ----------
+let treeCurrentPath = "";
 let treeTargetInputId = "sh-path";
 
-async function openTreeDialog(targetInputId, initPath = "/") {
+async function openTreeDialog(targetInputId) {
   treeTargetInputId = targetInputId;
-  treeCurrentPath = $(targetInputId)?.value || initPath || "/";
-  if (!treeCurrentPath.startsWith("/")) treeCurrentPath = "/";
+  const inputVal = $(targetInputId)?.value || "";
+  treeCurrentPath = inputVal.trim() || "";
   $("tree-dialog").showModal();
   await loadTreeDir(treeCurrentPath);
 }
 
 async function loadTreeDir(path) {
   treeCurrentPath = path;
-  $("tree-current-path").textContent = path;
+  $("tree-current-path").textContent = path ? path : "（快捷根目录候选 / 存储卷选项）";
   $("tree-new-dirname").value = "";
   try {
     const data = await api(`/api/files/tree?path=${encodeURIComponent(path)}`);
+    const actualPath = data.path || "";
+    const list = Array.isArray(data.dirs) ? data.dirs : [];
+    treeCurrentPath = actualPath;
+    if ($("tree-current-path")) $("tree-current-path").textContent = actualPath ? actualPath : "（快捷根挂载点选择）";
+
     const box = $("tree-list-box");
-    box.innerHTML = data.entries.length ? data.entries.map((d) => `
-      <div class="tree-dir-item" data-dirname="${esc(d.name)}">
-        <span>📁</span>
-        <b>${esc(d.name)}</b>
-      </div>`).join("") : '<div class="p-4 muted text-center">当前目录下暂无子文件夹</div>';
+    box.innerHTML = list.length ? list.map((d) => `
+      <div class="tree-dir-item" data-dirname="${esc(d)}">
+        <span style="font-size:16px">📁</span>
+        <b>${esc(d)}</b>
+      </div>`).join("") : '<div class="p-4 muted text-center">当前文件夹下无子目录</div>';
 
     box.querySelectorAll(".tree-dir-item").forEach((item) => {
       item.addEventListener("click", () => {
-        const next = joinPath(treeCurrentPath, item.dataset.dirname);
+        const dirname = item.dataset.dirname;
+        let next = dirname;
+        if (actualPath !== "" && actualPath !== "/") {
+          next = joinPath(actualPath, dirname);
+        } else if (actualPath === "/") {
+          next = "/" + dirname;
+        }
         loadTreeDir(next);
       });
     });
   } catch (err) {
-    toast("无法读取路径：" + err.message, true);
-    if (path !== "/") loadTreeDir("/");
+    toast("载入该目录失败：" + err.message, true);
+    if (path !== "" && path !== "/") loadTreeDir("");
   }
 }
 
@@ -367,7 +393,10 @@ $("tree-close")?.addEventListener("click", () => $("tree-dialog").close());
 $("tree-cancel-btn")?.addEventListener("click", () => $("tree-dialog").close());
 
 $("tree-up-btn")?.addEventListener("click", () => {
-  if (treeCurrentPath === "/") return;
+  if (!treeCurrentPath || treeCurrentPath === "/") {
+    loadTreeDir("");
+    return;
+  }
   const parts = treeCurrentPath.split("/").filter(Boolean);
   parts.pop();
   const up = parts.length ? "/" + parts.join("/") : "/";
@@ -375,22 +404,29 @@ $("tree-up-btn")?.addEventListener("click", () => {
 });
 
 $("tree-mkdir-do-btn")?.addEventListener("click", async () => {
+  if (!treeCurrentPath || treeCurrentPath === "") {
+    return toast("请先点击选择一个具体物理父级路径（如 /srv 或 /mnt），然后再建立子文件夹", true);
+  }
   const name = $("tree-new-dirname").value.trim();
-  if (!name) return toast("请输入新文件夹名称", true);
+  if (!name) return toast("请填写要新建的子文件夹名称", true);
   try {
-    await api("/api/files/tree/mkdir", { json: { path: treeCurrentPath, name } });
-    toast("文件夹建立成功");
+    const r = await api("/api/files/tree/mkdir", { json: { path: treeCurrentPath, name } });
+    toast("目录建立成功");
+    if (r.path) treeCurrentPath = r.path;
     loadTreeDir(treeCurrentPath);
   } catch (err) { toast(err.message, true); }
 });
 
 $("tree-confirm-btn")?.addEventListener("click", () => {
+  if (!treeCurrentPath || treeCurrentPath === "") {
+    return toast("请点击具体候选目录（例如 /srv /mnt /data）或具体子路径确认", true);
+  }
   const target = $(treeTargetInputId);
   if (target) target.value = treeCurrentPath;
   $("tree-dialog").close();
 });
 
-// ---------- 多选弹窗 (用户/组选择) ----------
+// ---------- 系统用户/组选择多选器弹窗 ----------
 let multiSelectTargetInput = "sh-valid-users";
 async function openMultiSelectDialog(targetInputId, title) {
   multiSelectTargetInput = targetInputId;
@@ -399,17 +435,21 @@ async function openMultiSelectDialog(targetInputId, title) {
     const [usersRes, groupsRes] = await Promise.all([api("/api/users"), api("/api/groups")]);
     const currentList = ($(targetInputId)?.value || "").split(",").map((s) => s.trim()).filter(Boolean);
     const box = $("multi-select-list");
-    let html = `<div class="muted small mb-2">可勾选单个用户或以 @ 开头的 POSIX 用户组：</div>`;
+    let html = `<div class="muted small mb-2">您可以自由勾选指定访问用户，或勾选以 @ 开头的整个用户组：</div>`;
 
-    usersRes.users.forEach((u) => {
+    const users = Array.isArray(usersRes.users) ? usersRes.users : [];
+    users.forEach((u) => {
       const checked = currentList.includes(u.username) ? "checked" : "";
-      html += `<label class="check"><input type="checkbox" value="${esc(u.username)}" ${checked}> 👤 ${esc(u.username)} <small class="muted">(${esc(u.uid)})</small></label>`;
+      html += `<label class="check"><input type="checkbox" value="${esc(u.username)}" ${checked}> 👤 ${esc(u.username)} <small class="muted">(${esc(u.uid || "")})</small></label>`;
     });
 
-    groupsRes.groups.forEach((g) => {
-      const val = "@" + g.groupname;
+    const groups = Array.isArray(groupsRes.groups) ? groupsRes.groups : (Array.isArray(groupsRes) ? groupsRes : []);
+    groups.forEach((g) => {
+      const gName = typeof g === "string" ? g : (g.groupname || "");
+      if (!gName) return;
+      const val = "@" + gName;
       const checked = currentList.includes(val) ? "checked" : "";
-      html += `<label class="check"><input type="checkbox" value="${esc(val)}" ${checked}> 👥 @${esc(g.groupname)} <small class="muted">(用户组 GID: ${g.gid})</small></label>`;
+      html += `<label class="check"><input type="checkbox" value="${esc(val)}" ${checked}> 👥 @${esc(gName)} <small class="muted">(整个系统用户组)</small></label>`;
     });
 
     box.innerHTML = html;
@@ -417,8 +457,8 @@ async function openMultiSelectDialog(targetInputId, title) {
   } catch (err) { toast(err.message, true); }
 }
 
-$("sh-pick-valid-users")?.addEventListener("click", () => openMultiSelectDialog("sh-valid-users", "选择允许访问的用户/组"));
-$("sh-pick-write-list")?.addEventListener("click", () => openMultiSelectDialog("sh-write-list", "选择额外有写入权限的用户/组"));
+$("sh-pick-valid-users")?.addEventListener("click", () => openMultiSelectDialog("sh-valid-users", "勾选允许访问的用户/组"));
+$("sh-pick-write-list")?.addEventListener("click", () => openMultiSelectDialog("sh-write-list", "勾选拥有可写权限的用户/组"));
 $("multi-select-close")?.addEventListener("click", () => $("multi-select-dialog").close());
 $("multi-select-cancel")?.addEventListener("click", () => $("multi-select-dialog").close());
 $("multi-select-confirm")?.addEventListener("click", () => {
@@ -436,7 +476,8 @@ async function loadUsers() {
     const tbody = $("users-tbody");
     if (!tbody) return;
     tbody.innerHTML = users.length ? users.map((u) => {
-      const groupsStr = (u.groups || []).map((g) => `<span class="badge info">${esc(g)}</span>`).join(" ");
+      const groupsList = Array.isArray(u.groups) ? u.groups : [];
+      const groupsStr = groupsList.map((g) => `<span class="badge info">${esc(g)}</span>`).join(" ");
       return `
         <tr>
           <td><b>${esc(u.username)}</b></td>
@@ -445,17 +486,17 @@ async function loadUsers() {
           <td>${u.disabled ? '<span class="badge danger">已禁用</span>' : '<span class="badge on">正常启用</span>'}</td>
           <td class="ops">
             <button class="btn mini" data-pw="${esc(u.username)}">🔑 改密</button>
-            <button class="btn mini" data-groups="${esc(u.username)}" data-curgroups="${esc((u.groups||[]).join(','))}">👥 调整组</button>
+            <button class="btn mini outline" data-groups="${esc(u.username)}" data-curgroups="${esc(groupsList.join(','))}">👥 调整组</button>
             <button class="btn mini" data-toggle="${esc(u.username)}" data-enabled="${u.disabled ? 1 : 0}">${u.disabled ? "🟢 启用" : "🔴 禁用"}</button>
             <button class="btn mini danger" data-deluser="${esc(u.username)}">🗑️ 删除</button>
           </td>
         </tr>`;
-    }).join("") : '<tr><td colspan="5" class="muted">暂无共享用户</td></tr>';
+    }).join("") : '<tr><td colspan="5" class="muted text-center p-4">暂无共享用户</td></tr>';
 
     tbody.querySelectorAll("[data-pw]").forEach((b) =>
       b.addEventListener("click", () => {
         $("user-pw-form").reset();
-        $("user-pw-title").textContent = `重置密码：${b.dataset.pw}`;
+        $("user-pw-title").textContent = `重置口令：${b.dataset.pw}`;
         $("user-pw-form").dataset.username = b.dataset.pw;
         $("user-pw-dialog").showModal();
       }));
@@ -464,14 +505,17 @@ async function loadUsers() {
       b.addEventListener("click", async () => {
         const username = b.dataset.groups;
         const curGroups = b.dataset.curgroups.split(",").filter(Boolean);
-        $("user-group-title").textContent = `调整所属组：${username}`;
+        $("user-group-title").textContent = `调整用户组归属：${username}`;
         $("user-group-form").dataset.username = username;
         try {
-          const { groups } = await api("/api/groups");
+          const res = await api("/api/groups");
+          const groups = Array.isArray(res.groups) ? res.groups : (Array.isArray(res) ? res : []);
           const box = $("user-group-list");
           box.innerHTML = groups.map((g) => {
-            const checked = curGroups.includes(g.groupname) ? "checked" : "";
-            return `<label class="check"><input type="checkbox" value="${esc(g.groupname)}" ${checked}> 👥 ${esc(g.groupname)} <small class="muted">(GID: ${g.gid})</small></label>`;
+            const gName = typeof g === "string" ? g : (g.groupname || "");
+            if (!gName) return "";
+            const checked = curGroups.includes(gName) ? "checked" : "";
+            return `<label class="check"><input type="checkbox" value="${esc(gName)}" ${checked}> 👥 ${esc(gName)}</label>`;
           }).join("");
           $("user-group-dialog").showModal();
         } catch (err) { toast(err.message, true); }
@@ -482,14 +526,14 @@ async function loadUsers() {
         try {
           await api(`/api/users/${encodeURIComponent(b.dataset.toggle)}/enable`,
             { method: "PUT", json: { enabled: b.dataset.enabled === "1" } });
-          toast(b.dataset.enabled === "1" ? "用户已启用" : "用户已禁用");
+          toast(b.dataset.enabled === "1" ? "账号已启用" : "账号已禁用");
           loadUsers();
         } catch (err) { toast(err.message, true); }
       }));
 
     tbody.querySelectorAll("[data-deluser]").forEach((b) =>
       b.addEventListener("click", async () => {
-        if (!confirm(`确定要彻底删除共享用户「${b.dataset.deluser}」？`)) return;
+        if (!confirm(`确定要从 Samba 数据库中删除用户「${b.dataset.deluser}」吗？`)) return;
         try {
           await api("/api/users/" + encodeURIComponent(b.dataset.deluser), { method: "DELETE" });
           toast("用户已删除"); loadUsers();
@@ -498,20 +542,20 @@ async function loadUsers() {
   } catch (err) { toast(err.message, true); }
 }
 
-// 新建用户
+// 新建账号
 $("btn-new-user")?.addEventListener("click", () => { $("user-form").reset(); $("user-dialog").showModal(); });
 $("user-cancel")?.addEventListener("click", () => $("user-dialog").close());
 $("user-close")?.addEventListener("click", () => $("user-dialog").close());
 $("user-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   if ($("u-password").value !== $("u-password-confirm").value) {
-    toast("两次输入的密码不一致，请核对！", true);
+    toast("两次输入的密码不一致，请仔细检查！", true);
     return;
   }
   try {
     await api("/api/users", { json: { username: $("u-name").value.trim(), password: $("u-password").value } });
     $("user-dialog").close();
-    toast("Samba 用户创建成功"); loadUsers();
+    toast("Samba 用户账号创建成功"); loadUsers();
   } catch (err) { toast(err.message, true); }
 });
 
@@ -521,14 +565,14 @@ $("user-pw-close")?.addEventListener("click", () => $("user-pw-dialog").close())
 $("user-pw-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   if ($("upw-new").value !== $("upw-confirm").value) {
-    toast("两次输入的新密码不一致！", true);
+    toast("两次确认的新口令不一致！", true);
     return;
   }
   const username = $("user-pw-form").dataset.username;
   try {
     await api(`/api/users/${encodeURIComponent(username)}/password`, { method: "PUT", json: { password: $("upw-new").value } });
     $("user-pw-dialog").close();
-    toast(`用户 ${username} 密码已重置`);
+    toast(`用户 ${username} 访问口令重置成功`);
   } catch (err) { toast(err.message, true); }
 });
 
@@ -543,12 +587,12 @@ $("user-group-form")?.addEventListener("submit", async (e) => {
   try {
     await api(`/api/users/${encodeURIComponent(username)}/groups`, { method: "PUT", json: { groups: selected } });
     $("user-group-dialog").close();
-    toast(`用户 ${username} 的组成员资格已生效`);
+    toast(`账号 ${username} 组成员资格已更新并立刻生效`);
     loadUsers();
   } catch (err) { toast(err.message, true); }
 });
 
-// ---------- 全局设置 ----------
+// ---------- 全局系统配置 ----------
 async function loadSettings() {
   try {
     const cfg = await api("/api/config");
@@ -567,11 +611,11 @@ $("settings-form")?.addEventListener("submit", async (e) => {
       guest_map_bad_user: $("set-guest-map").checked,
     };
     await api("/api/config", { json: body });
-    toast("全局参数与监听设置已生效保存！");
+    toast("全局参数已保存成功（网络监听修改将在下一次重启后生效）");
   } catch (err) { toast(err.message, true); }
 });
 
-// ---------- 文件资源管理器及多选批量操作 ----------
+// ---------- 文件资源管理器及批量操作 ----------
 let curShare = "", curPath = "", curEntries = [], selectedIdx = -1;
 let filesReqSeq = 0;
 
@@ -581,7 +625,7 @@ async function refreshShareSelect() {
     const sel = $("file-share");
     if (!sel) return;
     const prev = sel.value;
-    sel.innerHTML = shares.map((s) => `<option value="${esc(s.name)}">${esc(s.name)} （${esc(s.path)}）</option>`).join("");
+    sel.innerHTML = shares.map((s) => `<option value="${esc(s.name)}">${esc(s.name)} (${esc(s.path)})</option>`).join("");
     if (shares.some((s) => s.name === prev)) sel.value = prev;
     if (sel.value && sel.value !== curShare) { curShare = sel.value; curPath = ""; }
     if (curShare && activeTab === "files") loadFiles();
@@ -634,18 +678,18 @@ async function loadFiles() {
       const isArchive = !e.is_dir && /\.(tar|gz|bz2|xz|zip)$/i.test(e.name);
       return `
         <tr data-idx="${i}">
-          <td class="check-col"><input type="checkbox" class="file-chk" data-name="${esc(e.name)}"></td>
-          <td class="file-name"><span class="file-icon">${fileIcon(e)}</span>${esc(e.name)}</td>
+          <td style="width:40px"><input type="checkbox" class="file-chk" data-name="${esc(e.name)}"></td>
+          <td class="file-name"><span style="margin-right:8px">${fileIcon(e)}</span>${esc(e.name)}</td>
           <td class="muted">${e.is_dir ? "-" : fmtSize(e.size)}</td>
           <td class="muted">${fmtTime(e.mtime)}</td>
           <td class="ops">
-            ${isArchive ? `<button class="btn mini success" data-extract="${i}" title="在线解压缩到当前文件夹">📦 解压</button>` : ""}
+            ${isArchive ? `<button class="btn mini success" data-extract="${i}" title="直接在当前文件夹下解压包内容">解压</button>` : ""}
             ${e.is_dir ? "" : `<button class="btn mini" data-dl="${i}">下载</button>`}
-            <button class="btn mini" data-acl="${i}">权限</button>
+            <button class="btn mini outline" data-acl="${i}">权限</button>
             <button class="btn mini danger" data-rm="${i}">删除</button>
           </td>
         </tr>`;
-    }).join("") : '<tr><td colspan="5" class="muted p-6 text-center">当前文件夹下无任何项目</td></tr>';
+    }).join("") : '<tr><td colspan="5" class="muted text-center p-6">当前目录为空</td></tr>';
 
     tbody.querySelectorAll("tr[data-idx]").forEach((tr) => {
       const i = +tr.dataset.idx;
@@ -667,11 +711,11 @@ async function loadFiles() {
       b.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         const e = curEntries[+b.dataset.extract];
-        if (!confirm(`正在解压「${e.name}」到当前路径下，是否继续？`)) return;
+        if (!confirm(`确定要直接在当前位置解压文件包「${e.name}」吗？`)) return;
         try {
-          toast("正在执行解压包...");
+          toast("正在解压，请耐心等待...");
           await api("/api/files/extract", { json: { share: curShare, path: joinPath(curPath, e.name) } });
-          toast("解压缩完成"); loadFiles();
+          toast("解压缩全部完成！"); loadFiles();
         } catch (err) { toast(err.message, true); }
       }));
 
@@ -682,10 +726,10 @@ async function loadFiles() {
       b.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         const e = curEntries[+b.dataset.rm];
-        if (!confirm(`确定要删除「${e.name}」？${e.is_dir ? "（⚠️ 将递归删除该目录下的所有子文件夹及内容）" : ""}`)) return;
+        if (!confirm(`确定删除项目「${e.name}」吗？${e.is_dir ? "（⚠️ 警告：目录及其下全部子文件均将被递归清除）" : ""}`)) return;
         try {
           await api("/api/files/delete", { json: { share: curShare, path: joinPath(curPath, e.name) } });
-          toast("项目已成功删除"); loadFiles();
+          toast("项目已成功彻底删除"); loadFiles();
         } catch (err) { toast(err.message, true); }
       }));
   } catch (err) { toast(err.message, true); }
@@ -724,12 +768,12 @@ function getCheckedFileNames() {
 // 批量复制/剪切移动
 $("btn-batch-copy")?.addEventListener("click", async () => {
   const items = getCheckedFileNames();
-  if (!items.length) return toast("请至少勾选一个要操作的文件或文件夹！", true);
+  if (!items.length) return toast("请先在表格左侧勾选要转移或复制的项目！", true);
   try {
     const { shares } = await api("/api/shares");
     $("cm-target-share").innerHTML = shares.map((s) => `<option value="${esc(s.name)}">${esc(s.name)}</option>`).join("");
     $("cm-target-share").value = curShare;
-    $("copy-move-hint").textContent = `您已勾选 ${items.length} 个项目，请选择它们的目标存储位置：`;
+    $("copy-move-hint").textContent = `已选定 ${items.length} 个项目，选择它们的目标位置：`;
     $("copy-move-dialog").showModal();
   } catch (err) { toast(err.message, true); }
 });
@@ -742,15 +786,16 @@ $("cm-do-copy")?.addEventListener("click", async () => {
   const dstShare = $("cm-target-share").value;
   const dstPath = $("cm-target-path").value.trim();
   $("copy-move-dialog").close();
-  toast(`正在进行 ${items.length} 个项目的复制...`);
+  toast(`正在批量复制 ${items.length} 个项目，请稍候...`);
   try {
     for (const name of items) {
+      // dst_path 是目标「目录」，后端会自动拼接源文件名
       await api("/api/files/copy", { json: {
         src_share: curShare, src_path: joinPath(curPath, name),
-        dst_share: dstShare, dst_path: joinPath(dstPath, name)
+        dst_share: dstShare, dst_path: dstPath
       }});
     }
-    toast("复制全部完成！"); loadFiles();
+    toast("全量复制操作已完成！"); loadFiles();
   } catch (err) { toast(err.message, true); }
 });
 
@@ -758,46 +803,47 @@ $("cm-do-move")?.addEventListener("click", async () => {
   const items = getCheckedFileNames();
   const dstShare = $("cm-target-share").value;
   const dstPath = $("cm-target-path").value.trim();
-  if (!confirm(`确定将选中的 ${items.length} 个项目剪切移动到 ${dstShare}/${dstPath} 吗？`)) return;
+  if (!confirm(`确定将勾选的 ${items.length} 个项目剪切移动到 ${dstShare}/${dstPath} 吗？`)) return;
   $("copy-move-dialog").close();
-  toast(`正在移动 ${items.length} 个项目...`);
+  toast(`正在批量移动 ${items.length} 个项目...`);
   try {
     for (const name of items) {
+      // dst_path 是目标「目录」，后端会自动拼接源文件名
       await api("/api/files/move", { json: {
         src_share: curShare, src_path: joinPath(curPath, name),
-        dst_share: dstShare, dst_path: joinPath(dstPath, name)
+        dst_share: dstShare, dst_path: dstPath
       }});
     }
-    toast("移动（剪切）全部完成！"); loadFiles();
+    toast("剪切移动已全部完成！"); loadFiles();
   } catch (err) { toast(err.message, true); }
 });
 
-// 选定项打包压缩包
+// 选定项打包归档为 .tar.gz
 $("btn-batch-archive")?.addEventListener("click", async () => {
   const items = getCheckedFileNames();
-  if (!items.length) return toast("请勾选需要打包压缩的文件或文件夹", true);
-  const name = prompt("为您生成的新压缩包名称（以 .tar.gz 结尾）：", "archive_data.tar.gz");
+  if (!items.length) return toast("请先勾选需要打包下载的项目", true);
+  const name = prompt("设定生成的压缩文件名称 (须以 .tar.gz 结尾)：", "archive_files.tar.gz");
   if (!name) return;
   const archiveName = name.endsWith(".tar.gz") ? name : name + ".tar.gz";
-  toast("正在打包压缩中，请稍候...");
+  toast("服务端正在打包压缩中，请耐心等候...");
   try {
     const r = await api("/api/files/archive", { json: { share: curShare, path: curPath, items, archive_name: archiveName } });
-    toast(r.message || "打包压缩完成！"); loadFiles();
+    toast(r.message || "打包完成，可在当前目录下下载！"); loadFiles();
   } catch (err) { toast(err.message, true); }
 });
 
 // 新建文件夹
 $("btn-mkdir")?.addEventListener("click", async () => {
-  if (!curShare) return toast("请先选择共享目录", true);
-  const name = prompt("请输入新文件夹名称：");
+  if (!curShare) return toast("请先在上方下拉菜单选择目标共享目录", true);
+  const name = prompt("新文件夹名称：");
   if (!name) return;
   try {
     await api("/api/files/mkdir", { json: { share: curShare, path: curPath, name } });
-    toast("文件夹建立成功"); loadFiles();
+    toast("文件夹创建成功"); loadFiles();
   } catch (err) { toast(err.message, true); }
 });
 
-// ---------- 浮动上传任务管理器 Drawer ----------
+// ---------- 右下角浮动上传任务栏 Drawer ----------
 let uploadTasks = [];
 
 $("upload-drawer-close")?.addEventListener("click", () => {
@@ -808,16 +854,18 @@ function renderUploadTasks() {
   const box = $("upload-tasks-list");
   if (!box) return;
   if (!uploadTasks.length) {
-    box.innerHTML = '<p class="muted text-center py-4">当前无上传任务</p>';
-    $("upload-summary").textContent = "0 个任务";
+    box.innerHTML = '<p class="muted text-center py-4">无上传任务</p>';
+    if ($("upload-summary")) $("upload-summary").textContent = "0 任务";
     return;
   }
   const activeCount = uploadTasks.filter((t) => t.status === "uploading").length;
-  $("upload-summary").textContent = activeCount > 0 ? `${activeCount} 个正在上传` : `全部完成 (${uploadTasks.length})`;
+  if ($("upload-summary")) {
+    $("upload-summary").textContent = activeCount > 0 ? `${activeCount} 正在传输` : `全部就绪 (${uploadTasks.length})`;
+  }
 
   box.innerHTML = uploadTasks.map((t) => {
     const color = t.status === "done" ? "var(--ok)" : t.status === "err" ? "var(--danger)" : "var(--primary)";
-    const label = t.status === "done" ? "100% (完成)" : t.status === "err" ? "上传出错或取消" : `${t.pct || 0}%`;
+    const label = t.status === "done" ? "100% 完成" : t.status === "err" ? "错误或已取消" : `${t.pct || 0}%`;
     return `
       <div class="upload-task-item">
         <div class="upload-task-header">
@@ -828,7 +876,7 @@ function renderUploadTasks() {
           <div class="upload-task-bar" style="width:${t.pct || 0}%;background:${color}"></div>
         </div>
         <div class="flex justify-end mt-1">
-          ${t.status === "uploading" ? `<button class="btn mini danger" onclick="cancelUploadTask('${t.id}')">取消任务</button>` : ''}
+          ${t.status === "uploading" ? `<button class="btn mini danger" onclick="cancelUploadTask('${t.id}')">中止</button>` : ''}
         </div>
       </div>`;
   }).join("");
@@ -844,14 +892,14 @@ window.cancelUploadTask = function(id) {
 };
 
 $("btn-upload")?.addEventListener("click", () => {
-  if (!curShare) return toast("请先选择要上传到的共享文件夹", true);
+  if (!curShare) return toast("请先选定具体的共享文件夹", true);
   $("upload-input").click();
 });
 
 $("upload-input")?.addEventListener("change", () => {
   const files = $("upload-input").files;
   if (!files.length) return;
-  $("upload-modal").classList.remove("hidden");
+  $("upload-modal")?.classList.remove("hidden");
 
   for (const f of files) {
     const task = {
@@ -885,7 +933,7 @@ $("upload-input")?.addEventListener("change", () => {
       }
       renderUploadTasks();
       if (uploadTasks.every((item) => item.status !== "uploading") && activeTab === "files") {
-        toast("本批次文件上传操作处理完毕！");
+        toast("全部文件上传处理完毕！");
         loadFiles();
       }
     };
@@ -898,19 +946,19 @@ $("upload-input")?.addEventListener("change", () => {
   $("upload-input").value = "";
 });
 
-// ---------- ACL 权限管理 ----------
+// ---------- 访问控制权限 (ACL) ----------
 let aclEntry = null;
 const TAG_LABEL = { user: "用户", group: "组", mask: "掩码", other: "其他人" };
 
 async function openAclDialog(e) {
   aclEntry = e;
-  $("acl-title").textContent = `访问控制列表 (ACL)：${e.name}`;
-  $("acl-dir-opts").style.display = e.is_dir ? "" : "none";
-  $("acl-default").checked = false;
-  $("acl-recursive").checked = false;
+  $("acl-title").textContent = `访问控制权限 (ACL)：${e.name}`;
+  if ($("acl-dir-opts")) $("acl-dir-opts").style.display = e.is_dir ? "" : "none";
+  if ($("acl-default")) $("acl-default").checked = false;
+  if ($("acl-recursive")) $("acl-recursive").checked = false;
   try {
     const { users } = await api("/api/users");
-    $("acl-userlist").innerHTML = users.map((u) => `<option value="${esc(u.username)}">`).join("");
+    if ($("acl-userlist")) $("acl-userlist").innerHTML = users.map((u) => `<option value="${esc(u.username)}">`).join("");
   } catch (_) {}
   $("acl-dialog").showModal();
   await loadAcl();
@@ -920,39 +968,42 @@ async function loadAcl() {
   const e = aclEntry;
   try {
     const data = await api(`/api/files/acl?share=${encodeURIComponent(curShare)}&path=${encodeURIComponent(joinPath(curPath, e.name))}`);
-    $("acl-ownerinfo").textContent = `物理文件属主 (Owner): ${data.owner} · 属组 (Group): ${data.group}`;
-    $("acl-tbody").innerHTML = data.entries.map((en, i) => {
-      const label = TAG_LABEL[en.tag] || en.tag;
-      const name = en.qualifier || (en.tag === "user" ? `(属主 ${data.owner})` : en.tag === "group" ? `(属组 ${data.group})` : "-");
-      const p = (c) => !en.perms.includes(c) ? ""
-        : (en.effective && !en.effective.includes(c))
-          ? '<span class="acl-clip" title="被网络掩码裁剪">✔</span>' : "✔";
-      const removable = en.qualifier && (en.tag === "user" || en.tag === "group");
-      return `<tr>
-        <td>${esc(label)}</td><td>${esc(name)}</td>
-        <td class="acl-perm">${p("r")}</td><td class="acl-perm">${p("w")}</td><td class="acl-perm">${p("x")}</td>
-        <td>${en.default ? '<span class="badge on">继承默认</span>' : ""}</td>
-        <td class="ops">${removable ? `<button class="btn mini danger" data-aclrm="${i}">删除</button>` : ""}</td>
-      </tr>`;
-    }).join("") || '<tr><td colspan="7" class="muted text-center">当前无额外 ACL 条目</td></tr>';
+    if ($("acl-ownerinfo")) $("acl-ownerinfo").textContent = `文件/目录属主: ${data.owner} · 所属组: ${data.group}`;
+    const tbody = $("acl-tbody");
+    if (tbody) {
+      tbody.innerHTML = data.entries.map((en, i) => {
+        const label = TAG_LABEL[en.tag] || en.tag;
+        const name = en.qualifier || (en.tag === "user" ? `(属主 ${data.owner})` : en.tag === "group" ? `(属组 ${data.group})` : "-");
+        const p = (c) => !en.perms.includes(c) ? ""
+          : (en.effective && !en.effective.includes(c))
+            ? '<span class="acl-clip" title="被最高掩码 Mask 裁剪">✔</span>' : "✔";
+        const removable = en.qualifier && (en.tag === "user" || en.tag === "group");
+        return `<tr>
+          <td>${esc(label)}</td><td>${esc(name)}</td>
+          <td class="acl-perm">${p("r")}</td><td class="acl-perm">${p("w")}</td><td class="acl-perm">${p("x")}</td>
+          <td>${en.default ? '<span class="badge on">继承默认</span>' : ""}</td>
+          <td class="ops">${removable ? `<button class="btn mini danger" data-aclrm="${i}">删除</button>` : ""}</td>
+        </tr>`;
+      }).join("") || '<tr><td colspan="7" class="muted text-center p-4">无扩展 ACL 条目</td></tr>';
 
-    $("acl-tbody").querySelectorAll("[data-aclrm]").forEach((b) =>
-      b.addEventListener("click", async () => {
-        const en = data.entries[+b.dataset.aclrm];
-        try {
-          await api("/api/files/acl", { json: {
-            share: curShare, path: joinPath(curPath, e.name),
-            action: "remove", tag: en.tag, qualifier: en.qualifier, default_acl: en.default,
-          }});
-          loadAcl();
-        } catch (err) { toast(err.message, true); }
-      }));
+      tbody.querySelectorAll("[data-aclrm]").forEach((b) =>
+        b.addEventListener("click", async () => {
+          const en = data.entries[+b.dataset.aclrm];
+          try {
+            await api("/api/files/acl", { json: {
+              share: curShare, path: joinPath(curPath, e.name),
+              action: "remove", tag: en.tag, qualifier: en.qualifier, default_acl: en.default,
+            }});
+            loadAcl();
+          } catch (err) { toast(err.message, true); }
+        }));
+    }
   } catch (err) { toast(err.message, true); }
 }
 
 $("acl-add-btn")?.addEventListener("click", async () => {
   const name = $("acl-name").value.trim();
-  if (!name) return toast("请指定或选择目标实体名称", true);
+  if (!name) return toast("请指定目标用户或组名", true);
   const perms = ($("acl-r").checked ? "r" : "-") + ($("acl-w").checked ? "w" : "-") + ($("acl-x").checked ? "x" : "-");
   const base = {
     share: curShare, path: joinPath(curPath, aclEntry.name),
@@ -964,19 +1015,19 @@ $("acl-add-btn")?.addEventListener("click", async () => {
     if ($("acl-default").checked && aclEntry.is_dir) {
       await api("/api/files/acl", { json: { ...base, default_acl: true } });
     }
-    toast("访问控制 ACL 权限已更新成功！");
+    toast("访问控制权限设置已更新！");
     loadAcl();
   } catch (err) { toast(err.message, true); }
 });
 
 $("acl-clear")?.addEventListener("click", async () => {
-  if (!confirm("确定彻底清除该项目及其下所有扩展 ACL，恢复为基础 Unix 权限？")) return;
+  if (!confirm("确定清除该项目全部扩展 ACL 规则，恢复为 Linux 基础 Unix 权限吗？")) return;
   try {
     await api("/api/files/acl", { json: {
       share: curShare, path: joinPath(curPath, aclEntry.name),
       action: "clear", recursive: $("acl-recursive").checked,
     }});
-    toast("扩展 ACL 权限已清除");
+    toast("扩展 ACL 规则已清空");
     loadAcl();
   } catch (err) { toast(err.message, true); }
 });
@@ -984,7 +1035,7 @@ $("acl-clear")?.addEventListener("click", async () => {
 $("acl-close")?.addEventListener("click", () => $("acl-dialog").close());
 $("acl-close-top")?.addEventListener("click", () => $("acl-dialog").close());
 
-// ---------- Quick Look 长按空格预览 ----------
+// ---------- 快速预览 Quick Look (长按空格超大超清晰体验) ----------
 const TEXT_EXT = /\.(txt|md|markdown|log|json|js|ts|jsx|tsx|rs|py|c|cpp|cc|h|hpp|java|go|rb|php|sh|bash|zsh|yml|yaml|toml|ini|cfg|conf|xml|html|htm|css|scss|csv|sql|dockerfile|makefile|gitignore|env|properties|lua|kt|swift|pl|vim)$/i;
 const IMG_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|ico|avif)$/i;
 const VIDEO_EXT = /\.(mp4|webm|mov|m4v)$/i;
@@ -997,9 +1048,10 @@ let spaceDown = false;
 async function openPreview(e) {
   if (!e || e.is_dir) return;
   const body = $("preview-body");
-  $("preview-title").textContent = `${e.name} （${fmtSize(e.size)}）`;
+  if (!body) return;
+  $("preview-title").textContent = `${e.name} (${fmtSize(e.size)})`;
   body.innerHTML = "";
-  $("preview-overlay").classList.remove("hidden");
+  $("preview-overlay")?.classList.remove("hidden");
   previewOpen = true;
 
   const url = fileUrl(e, true);
@@ -1019,26 +1071,28 @@ async function openPreview(e) {
     const a = document.createElement("audio");
     a.src = url; a.controls = true; a.autoplay = true;
     body.appendChild(a);
-  } else if (TEXT_EXT.test(e.name) && e.size <= 2 * 1024 * 1024) {
+  } else if (TEXT_EXT.test(e.name) && e.size <= 3 * 1024 * 1024) {
     const pre = document.createElement("pre");
-    pre.textContent = "正在快速读取文件内容…";
+    pre.textContent = "正在快速读取并加载文件内容…";
     body.appendChild(pre);
     try {
       const res = await fetch(url);
       pre.textContent = await res.text();
-    } catch (_) { pre.textContent = "在线预览读取失败"; }
+    } catch (_) { pre.textContent = "预览失败：无法读取文件内容"; }
   } else {
-    body.innerHTML = `<div class="p-8 text-center muted">此类型文件体积较大或格式需专用工具查看<br><br>
-      <button class="btn primary glow-btn" id="preview-dl">立即下载源文件</button></div>`;
-    $("preview-dl").addEventListener("click", () => downloadEntry(e));
+    body.innerHTML = `<div class="p-8 text-center muted" style="padding:40px">
+      <p style="font-size:15px;margin-bottom:20px">当前文件格式或超大体积不受在线快速预览支持</p>
+      <button class="btn primary" id="preview-dl" style="padding:10px 24px">立即直接下载</button>
+    </div>`;
+    $("preview-dl")?.addEventListener("click", () => downloadEntry(e));
   }
 }
 
-function closePreview() {
-  $("preview-overlay").classList.add("hidden");
-  $("preview-body").innerHTML = "";
+window.closePreview = function() {
+  $("preview-overlay")?.classList.add("hidden");
+  if ($("preview-body")) $("preview-body").innerHTML = "";
   previewOpen = false;
-}
+};
 
 $("preview-overlay")?.addEventListener("click", (ev) => {
   if (ev.target === $("preview-overlay")) closePreview();
@@ -1057,7 +1111,7 @@ document.addEventListener("keydown", (ev) => {
     spaceDown = true;
     const e = curEntries[selectedIdx];
     if (e && !e.is_dir && !previewOpen) {
-      spaceHoldTimer = setTimeout(() => openPreview(e), 300);
+      spaceHoldTimer = setTimeout(() => openPreview(e), 280);
     }
   } else if (ev.code === "ArrowDown" || ev.code === "ArrowUp") {
     ev.preventDefault();
@@ -1085,7 +1139,7 @@ document.addEventListener("keyup", (ev) => {
   if (previewOpen) closePreview();
 });
 
-// ---------- 系统初始化 ----------
+// ---------- 系统启动 ----------
 (async () => {
   try {
     await api("/api/me");
