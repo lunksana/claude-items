@@ -581,6 +581,7 @@ async fn main() {
         .route("/api/groups", get(groups_list).post(group_create))
         .route("/api/users/{name}/groups", put(user_groups_update))
         .route("/api/files", get(files::list))
+        .route("/api/files/stat", get(files::stat))
         .route("/api/files/download", get(files::download))
         .route(
             "/api/files/upload",

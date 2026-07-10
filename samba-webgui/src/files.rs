@@ -85,6 +85,40 @@ fn sanitize_filename(name: &str) -> Option<String> {
     }
 }
 
+/// 单个文件/目录的详细属性（供文件管理器右侧属性面板）
+pub async fn stat(Query(q): Query<FsQuery>) -> Response {
+    let (_, path) = match resolve(&q.share, &q.path).await {
+        Ok(v) => v,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, &e),
+    };
+    // 一次 stat 拿到 属主|属组|权限串|八进制|大小|mtime|类型
+    let out = tokio::process::Command::new("stat")
+        .args(["-c", "%U|%G|%A|%a|%s|%Y|%F", "--"])
+        .arg(&path)
+        .output()
+        .await;
+    let out = match out {
+        Ok(o) if o.status.success() => o,
+        _ => return err_json(StatusCode::NOT_FOUND, "无法读取属性"),
+    };
+    let line = String::from_utf8_lossy(&out.stdout);
+    let f: Vec<&str> = line.trim().split('|').collect();
+    if f.len() < 7 {
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, "属性解析失败");
+    }
+    let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let is_dir = f[6].contains("directory");
+    let mime = if is_dir { "inode/directory".to_string() } else { mime_guess::from_path(&path).first_or_octet_stream().to_string() };
+    Json(json!({
+        "name": name,
+        "owner": f[0], "group": f[1],
+        "perms": f[2], "mode": f[3],
+        "size": f[4].parse::<u64>().unwrap_or(0),
+        "mtime": f[5].parse::<u64>().unwrap_or(0),
+        "ftype": f[6], "is_dir": is_dir, "mime": mime,
+    })).into_response()
+}
+
 pub async fn list(Query(q): Query<FsQuery>) -> Response {
     let (_, dir) = match resolve(&q.share, &q.path).await {
         Ok(v) => v,

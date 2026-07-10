@@ -744,6 +744,7 @@ async function loadFiles() {
     if (seq !== filesReqSeq || reqShare !== curShare || reqPath !== curPath) return;
     curEntries = entries; selectedIdx = -1;
     if ($("files-select-all")) $("files-select-all").checked = false;
+    resetFileProps();
     renderBreadcrumb();
 
     const tbody = $("files-tbody");
@@ -813,6 +814,47 @@ function selectRow(i) {
   selectedIdx = i;
   document.querySelectorAll("#files-tbody tr").forEach((tr) =>
     tr.classList.toggle("selected", +tr.dataset.idx === i));
+  loadFileProps(i);
+}
+
+let propsSeq = 0;
+function resetFileProps() {
+  const box = $("file-props");
+  if (box) box.innerHTML = '<div class="fp-empty muted text-center">单击左侧文件或文件夹<br>查看详细属性</div>';
+}
+async function loadFileProps(i) {
+  const e = curEntries[i];
+  const box = $("file-props");
+  if (!e || !box) return;
+  const seq = ++propsSeq;
+  try {
+    const d = await api(`/api/files/stat?share=${encodeURIComponent(curShare)}&path=${encodeURIComponent(joinPath(curPath, e.name))}`);
+    if (seq !== propsSeq) return; // 已选别的，丢弃过期结果
+    const kind = d.is_dir ? "文件夹" : (d.mime || "文件");
+    box.innerHTML = `
+      <div class="fp-head">
+        <div class="fp-icon">${fileIcon(e)}</div>
+        <div class="fp-name">${esc(d.name)}</div>
+      </div>
+      <div class="fp-list">
+        <div class="fp-row"><span class="k">类型</span><span class="v">${esc(kind)}</span></div>
+        <div class="fp-row"><span class="k">大小</span><span class="v">${d.is_dir ? "-" : fmtSize(d.size)}</span></div>
+        <div class="fp-row"><span class="k">修改时间</span><span class="v">${fmtTime(d.mtime)}</span></div>
+        <div class="fp-row"><span class="k">属主</span><span class="v">${esc(d.owner)}</span></div>
+        <div class="fp-row"><span class="k">属组</span><span class="v">${esc(d.group)}</span></div>
+        <div class="fp-row"><span class="k">权限</span><span class="v mono">${esc(d.perms)} (${esc(d.mode)})</span></div>
+      </div>
+      <div class="fp-actions">
+        ${d.is_dir ? "" : '<button class="btn mini" id="fp-preview">👁 预览</button>'}
+        ${d.is_dir ? "" : '<button class="btn mini" id="fp-dl">⬇ 下载</button>'}
+        <button class="btn mini outline" id="fp-acl">🔑 权限 (ACL)</button>
+      </div>`;
+    $("fp-preview")?.addEventListener("click", () => openPreview(e));
+    $("fp-dl")?.addEventListener("click", () => downloadEntry(e));
+    $("fp-acl")?.addEventListener("click", () => openAclDialog(e));
+  } catch (err) {
+    if (seq === propsSeq) box.innerHTML = `<div class="fp-empty muted text-center">${esc(err.message)}</div>`;
+  }
 }
 
 function fileUrl(e, inline) {

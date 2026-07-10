@@ -302,6 +302,27 @@ td b { color: var(--text); }
 .disk-bar.warn { background: linear-gradient(90deg, #f59e0b, #d97706); }
 .disk-bar.danger { background: linear-gradient(90deg, #ef4444, #dc2626); }
 
+/* ---------------- 文件属性面板 ---------------- */
+.files-layout { display: flex; align-items: stretch; }
+.files-table-wrap { flex: 1; min-width: 0; }
+.file-props {
+  width: 288px; flex-shrink: 0;
+  border-left: 1px solid var(--border);
+  padding: 18px 18px 22px;
+  background: var(--panel-2);
+}
+.fp-empty { padding: 40px 12px; font-size: 13px; line-height: 1.9; }
+.fp-head { text-align: center; margin-bottom: 16px; }
+.fp-icon { font-size: 44px; line-height: 1; margin-bottom: 8px; }
+.fp-name { font-weight: 600; word-break: break-all; font-size: 14px; color: var(--text); }
+.fp-list { display: flex; flex-direction: column; gap: 0; margin-bottom: 16px; }
+.fp-row { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.fp-row:last-child { border-bottom: 0; }
+.fp-row .k { color: var(--muted); flex-shrink: 0; }
+.fp-row .v { color: var(--text); text-align: right; word-break: break-all; }
+.fp-row .v.mono { font-family: var(--mono); font-size: 12px; }
+.fp-actions { display: flex; flex-direction: column; gap: 8px; }
+
 /* ---------------- 面包屑 ---------------- */
 #breadcrumb { font-size: 13px; color: var(--muted); flex-wrap: wrap; }
 #breadcrumb a { color: var(--primary); padding: 2px 5px; border-radius: 5px; }

@@ -198,21 +198,26 @@
           <div class="card-body" style="background:#fafbfd;border-bottom:1px solid var(--border);padding:10px 20px">
             <div id="breadcrumb" class="flex align-center gap-2 font-mono"></div>
           </div>
-          <div class="table-responsive">
-            <table>
-              <thead>
-                <tr>
-                  <th style="width:40px"><input type="checkbox" id="files-select-all"></th>
-                  <th>项目名称 <small class="muted">(双击打开/长按空格超大清晰预览)</small></th>
-                  <th>文件大小</th>
-                  <th>修改时间</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody id="files-tbody">
-                <tr><td colspan="5" class="muted text-center p-4">正在扫描该目录…</td></tr>
-              </tbody>
-            </table>
+          <div class="files-layout">
+            <div class="table-responsive files-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width:40px"><input type="checkbox" id="files-select-all"></th>
+                    <th>项目名称 <small class="muted">(单击查看属性 / 双击打开 / 长按空格预览)</small></th>
+                    <th>文件大小</th>
+                    <th>修改时间</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="files-tbody">
+                  <tr><td colspan="5" class="muted text-center p-4">正在扫描该目录…</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <aside id="file-props" class="file-props">
+              <div class="fp-empty muted text-center">单击左侧文件或文件夹<br>查看详细属性</div>
+            </aside>
           </div>
         </div>
       </section>
