@@ -476,12 +476,39 @@ dialog::backdrop { background: rgba(12, 18, 32, .55); backdrop-filter: blur(3px)
 ::-webkit-scrollbar-thumb:hover { background: #b4bdcc; background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
 
+.nav-ico { font-size: 15px; line-height: 1; }
+
 /* ---------------- 响应式 ---------------- */
-@media (max-width: 820px) {
-  .sidebar { width: 60px; }
-  .sidebar-brand span, .nav-item { font-size: 0; }
+/* 平板 / 窄屏：侧栏收成图标栏（图标保留，文字隐藏）*/
+@media (max-width: 860px) {
+  .sidebar { width: 58px; }
+  .brand-txt, .app-version, .nav-label, .sidebar-footer .btn-label { display: none; }
   .sidebar-brand { justify-content: center; padding: 18px 0; }
-  .nav-item { justify-content: center; padding: 13px 0; }
-  .sidebar-footer .btn { font-size: 0; padding: 12px 0; }
+  .nav-item { justify-content: center; padding: 13px 0; gap: 0; }
+  .sidebar-footer .btn { padding: 12px 0; }
   .main-content { padding: 20px 16px 40px; }
+}
+
+/* 手机：布局堆叠、表格横向滚动、属性面板移到表格下方 */
+@media (max-width: 640px) {
+  .top-bar { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .top-bar h2 { font-size: 19px; }
+  .card-header { flex-wrap: wrap; }
+  .card { margin-bottom: 16px; }
+  /* 文件管理器：表格与属性面板改上下堆叠 */
+  .files-layout { flex-direction: column; }
+  .file-props { width: auto; border-left: 0; border-top: 1px solid var(--border); }
+  .fp-empty { padding: 20px 12px; }
+  /* 弹窗更贴合小屏 */
+  dialog, .modal-dialog, #acl-dialog, #tree-dialog, #copy-move-dialog, #multi-select-dialog { width: 96vw; }
+  .dialog-body { padding: 16px; }
+  .dialog-header, .dialog-footer { padding: 13px 16px; }
+  /* 权限矩阵单选列收紧 */
+  .pm-opts label { width: 40px; }
+  .perm-matrix { max-height: 240px; }
+  /* 文件工具栏里的共享下拉占满宽 */
+  #file-share { width: 100% !important; }
+  /* 触摸目标略放大 */
+  .btn { padding: 9px 14px; }
+  .btn.mini { padding: 7px 11px; }
 }

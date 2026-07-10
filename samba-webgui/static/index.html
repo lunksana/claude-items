@@ -34,19 +34,20 @@
     <!-- 侧边导航栏 -->
     <aside class="sidebar">
       <div class="sidebar-brand">
-        <span>📁 Samba 控制中心</span>
+        <span class="brand-ico">📁</span>
+        <span class="brand-txt">Samba 控制中心</span>
         <span class="app-version">v{{VERSION}}</span>
       </div>
       <nav class="sidebar-nav">
-        <button class="nav-item active" data-tab="status">📊 监控大盘</button>
-        <button class="nav-item" data-tab="shares">📂 共享管理</button>
-        <button class="nav-item" data-tab="users">👥 用户与组</button>
-        <button class="nav-item" data-tab="files">🗂️ 文件资源管理器</button>
-        <button class="nav-item" data-tab="settings">⚙️ 全局设置</button>
+        <button class="nav-item active" data-tab="status"><span class="nav-ico">📊</span><span class="nav-label">监控大盘</span></button>
+        <button class="nav-item" data-tab="shares"><span class="nav-ico">📂</span><span class="nav-label">共享管理</span></button>
+        <button class="nav-item" data-tab="users"><span class="nav-ico">👥</span><span class="nav-label">用户与组</span></button>
+        <button class="nav-item" data-tab="files"><span class="nav-ico">🗂️</span><span class="nav-label">文件资源管理器</span></button>
+        <button class="nav-item" data-tab="settings"><span class="nav-ico">⚙️</span><span class="nav-label">全局设置</span></button>
       </nav>
       <div class="sidebar-footer">
-        <button class="btn outline" id="btn-change-pw" style="width:100%;color:#fff;border-color:rgba(255,255,255,0.2)">🔑 修改管理密码</button>
-        <button class="btn danger" id="btn-logout" style="width:100%">🚪 退出登录</button>
+        <button class="btn outline" id="btn-change-pw" style="width:100%;color:#fff;border-color:rgba(255,255,255,0.2)">🔑 <span class="btn-label">修改管理密码</span></button>
+        <button class="btn danger" id="btn-logout" style="width:100%">🚪 <span class="btn-label">退出登录</span></button>
       </div>
     </aside>
 
