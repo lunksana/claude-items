@@ -312,8 +312,12 @@ td b { color: var(--text); }
 .pm-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pm-name .tag { color: var(--muted); font-size: 11px; margin-left: 5px; }
 .pm-opts { display: flex; gap: 6px; flex-shrink: 0; }
-.pm-opts label { display: flex; align-items: center; gap: 4px; cursor: pointer; width: 52px; justify-content: center; color: var(--text-soft); }
+/* 表头文字列与下方单选列同宽同居中，保证对齐 */
+.pm-opts > span, .pm-opts > label { width: 52px; text-align: center; display: flex; align-items: center; justify-content: center; }
+.pm-opts label { gap: 4px; cursor: pointer; color: var(--text-soft); }
 .pm-opts input { accent-color: var(--primary); cursor: pointer; }
+.pm-custom-btn { border: 0; background: transparent; cursor: pointer; font-size: 15px; line-height: 1; padding: 2px 6px; border-radius: 5px; }
+.pm-custom-btn:hover { background: var(--primary-soft); }
 .pm-empty { padding: 20px; text-align: center; color: var(--muted); font-size: 13px; }
 
 /* ---------------- 文件属性面板 ---------------- */

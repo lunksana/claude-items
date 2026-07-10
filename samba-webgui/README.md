@@ -12,6 +12,8 @@ Rust 编写的单二进制 Samba Web 管理工具：通过浏览器管理共享�
 | 用户管理 | 新建/删除 Samba 用户（自动创建 nologin 系统用户）、改密、禁用/启用 |
 | 文件浏览 | 按共享浏览目录，上传（带进度条）、下载、新建文件夹、删除 |
 | 文件预览 | **选中文件后长按空格键（≥350ms）弹出预览，松开即关**；支持图片 / PDF / 文本代码 / 音频 / 视频 |
+| 权限矩阵 | 群晖式「用户/组 × 无权限/只读/读写」勾选授权（→ valid users/write list/read list）；"自定义"列的 ⚙ 打开 POSIX ACL 编辑器对该用户/组做精细 rwx 授权 |
+| 限制删除 | 共享级"限制删除（粘滞位）"：用户只能删除自己创建的文件（`chmod +t`，从目录 mode 反推回显）。注：per-user"可写不可删"非 Samba 原生能力，粘滞位是标准可行的实现 |
 | ACL 控制 | 文件/目录级 POSIX ACL：按用户/组精细授权 rwx，支持默认 ACL（新建文件继承）与递归应用，Samba 侧 `inherit acls = yes` 保证 SMB 客户端新建文件同样继承 |
 | 全局设置 | 监听地址、会话有效期、访客映射策略、**SMB 协议版本范围**（server min/max protocol，可禁用不安全的 SMB1）；写入前 testparm 校验、失败回滚 |
 | 登录认证 | 管理密码登录（Argon2 哈希），HttpOnly + SameSite=Strict 会话 Cookie（24h），60 秒内失败 5 次全局锁定，可在线改密 |

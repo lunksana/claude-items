@@ -41,6 +41,10 @@ pub struct Share {
     /// 是否开启 macOS/Time Machine 兼容。前端字段名为 fruit
     #[serde(default, rename = "fruit")]
     pub fruit_time_machine: bool,
+    /// 限制删除（目录粘滞位 +t）：用户只能删除自己创建的文件。
+    /// 属文件系统层设置，不落 smb.conf；加载时由目录 mode 反推
+    #[serde(default)]
+    pub sticky: bool,
     /// 是否由本工具管理（false = 来自主配置，只读展示）
     #[serde(default)]
     pub managed: bool,
@@ -130,6 +134,17 @@ fn as_bool(v: Option<&str>, default: bool) -> bool {
     }
 }
 
+/// 目录是否带粘滞位（+t）
+fn dir_has_sticky(path: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if path.is_empty() {
+        return false;
+    }
+    std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o1000 != 0)
+        .unwrap_or(false)
+}
+
 fn section_to_share(name: &str, kvs: &[(String, String)], managed: bool) -> Share {
     // samba 里 "writable/writeable" 是 "read only" 的反义别名
     let read_only = if let Some(w) = get(kvs, "writable").or(get(kvs, "writeable")) {
@@ -140,9 +155,12 @@ fn section_to_share(name: &str, kvs: &[(String, String)], managed: bool) -> Shar
     let vfs = get(kvs, "vfs objects").unwrap_or("").to_lowercase();
     let recycle_bin = vfs.contains("recycle");
     let fruit_time_machine = vfs.contains("fruit") || as_bool(get(kvs, "fruit:time machine"), false);
+    let path = get(kvs, "path").unwrap_or("").to_string();
+    // 粘滞位是文件系统层设置，不在 smb.conf 里；从目录 mode 反推
+    let sticky = dir_has_sticky(&path);
     Share {
         name: name.to_string(),
-        path: get(kvs, "path").unwrap_or("").to_string(),
+        path,
         comment: get(kvs, "comment").unwrap_or("").to_string(),
         read_only,
         guest_ok: as_bool(get(kvs, "guest ok"), false),
@@ -152,6 +170,7 @@ fn section_to_share(name: &str, kvs: &[(String, String)], managed: bool) -> Shar
         read_list: get(kvs, "read list").unwrap_or("").to_string(),
         recycle_bin,
         fruit_time_machine,
+        sticky,
         managed,
         fix_perms: false,
     }
@@ -715,14 +734,16 @@ pub async fn fix_share_perms(share: &Share) -> Result<String, String> {
         .find(|s| s.starts_with('@'))
         .map(|s| s.trim_start_matches('@').to_string());
 
-    // 有协作组时用 setgid 位（前导 2），使新建文件继承目录组
-    let mode = match (&group, share.guest_ok && !share.read_only) {
-        (Some(_), true) => "2777",
-        (Some(_), false) => "2775",
-        (None, true) => "0777",
-        (None, false) => "0775",
-    };
-    let out = Command::new("chmod").args([mode, "--", &path]).output().await.map_err(|e| e.to_string())?;
+    // 基础位 + setgid(0o2000，有协作组) + sticky(0o1000，限制删除)
+    let mut mode_num: u32 = if share.guest_ok && !share.read_only { 0o777 } else { 0o775 };
+    if group.is_some() {
+        mode_num |= 0o2000;
+    }
+    if share.sticky {
+        mode_num |= 0o1000;
+    }
+    let mode = format!("{mode_num:o}");
+    let out = Command::new("chmod").args([mode.as_str(), "--", &path]).output().await.map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!("chmod 失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }

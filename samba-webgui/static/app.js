@@ -306,6 +306,7 @@ async function openShareDialog(share) {
   $("sh-browseable").checked = share ? share.browseable : true;
   $("sh-recycle").checked = share?.recycle || false;
   $("sh-fruit").checked = share?.fruit || false;
+  $("sh-sticky").checked = share?.sticky || false;
   $("sh-valid-users").value = share?.valid_users || "";
   $("sh-write-list").value = share?.write_list || "";
   $("sh-read-list").value = share?.read_list || "";
@@ -333,6 +334,7 @@ $("share-form")?.addEventListener("submit", async (e) => {
     browseable: $("sh-browseable").checked,
     recycle: $("sh-recycle").checked,
     fruit: $("sh-fruit").checked,
+    sticky: $("sh-sticky").checked,
     valid_users: $("sh-valid-users").value.trim(),
     write_list: $("sh-write-list").value.trim(),
     read_list: $("sh-read-list").value.trim(),
@@ -466,15 +468,20 @@ async function buildPermMatrix(validUsers, writeList, readList) {
     : (validSet.has(token) || readSet.has(token)) ? "ro" : "none";
 
   box.innerHTML =
-    `<div class="pm-head"><span class="pm-name">用户 / 用户组</span><div class="pm-opts"><span>无</span><span>只读</span><span>读写</span></div></div>` +
+    `<div class="pm-head"><span class="pm-name">用户 / 用户组</span><div class="pm-opts"><span>无</span><span>只读</span><span>读写</span><span>自定义</span></div></div>` +
     (entities.length ? entities.map((e, i) => {
       const st = stateOf(e.token);
       const radio = (val) => `<label><input type="radio" name="pm-${i}" value="${val}" ${st === val ? "checked" : ""}></label>`;
       return `<div class="pm-row" data-token="${esc(e.token)}" data-label="${esc(e.label.toLowerCase())}">
         <span class="pm-name">${esc(e.label)}<span class="tag">${e.tag}</span></span>
-        <div class="pm-opts">${radio("none")}${radio("ro")}${radio("rw")}</div>
+        <div class="pm-opts">${radio("none")}${radio("ro")}${radio("rw")}<span><button type="button" class="pm-custom-btn" data-token="${esc(e.token)}" title="高级：自定义 POSIX ACL 精细权限">⚙</button></span></div>
       </div>`;
     }).join("") : `<div class="pm-empty">系统暂无用户 / 用户组</div>`);
+
+  box.querySelectorAll(".pm-custom-btn").forEach((b) => b.addEventListener("click", () => {
+    if (!editingShare) { toast("请先保存共享，再对其配置自定义 ACL 高级权限", true); return; }
+    openShareAclDialog(editingShare.name, b.dataset.token);
+  }));
 }
 
 function syncMatrixToHidden() {
@@ -1138,7 +1145,15 @@ $("upload-input")?.addEventListener("change", () => {
 let aclEntry = null;
 const TAG_LABEL = { user: "用户", group: "组", mask: "掩码", other: "其他人" };
 
+// ACL 操作目标：默认取文件管理器当前项；aclOverride 非空时改指定 share+path
+// （用于共享对话框"自定义"直接编辑共享根目录 ACL）
+let aclOverride = null;
+function aclTarget() {
+  return aclOverride || { share: curShare, path: joinPath(curPath, aclEntry.name) };
+}
+
 async function openAclDialog(e) {
+  aclOverride = null;
   aclEntry = e;
   $("acl-title").textContent = `访问控制权限 (ACL)：${e.name}`;
   if ($("acl-dir-opts")) $("acl-dir-opts").style.display = e.is_dir ? "" : "none";
@@ -1152,10 +1167,32 @@ async function openAclDialog(e) {
   await loadAcl();
 }
 
-async function loadAcl() {
-  const e = aclEntry;
+// 直接对共享根目录配置某用户/组的自定义 ACL（矩阵"自定义"入口，仅限已存在的共享）
+async function openShareAclDialog(shareName, token) {
+  aclEntry = { name: shareName, is_dir: true };
+  $("acl-title").textContent = `自定义权限 (POSIX ACL)：${shareName}`;
+  if ($("acl-dir-opts")) $("acl-dir-opts").style.display = "";
+  if ($("acl-default")) $("acl-default").checked = true; // 目录默认勾选继承
+  if ($("acl-recursive")) $("acl-recursive").checked = false;
   try {
-    const data = await api(`/api/files/acl?share=${encodeURIComponent(curShare)}&path=${encodeURIComponent(joinPath(curPath, e.name))}`);
+    const { users } = await api("/api/users");
+    if ($("acl-userlist")) $("acl-userlist").innerHTML = users.map((u) => `<option value="${esc(u.username)}">`).join("");
+  } catch (_) {}
+  // 预填目标实体（@组 → 组，去掉 @ 填名字）
+  if (token) {
+    const isGroup = token.startsWith("@");
+    if ($("acl-tag")) $("acl-tag").value = isGroup ? "group" : "user";
+    if ($("acl-name")) $("acl-name").value = isGroup ? token.slice(1) : token;
+  }
+  $("acl-dialog").showModal();
+  aclOverride = { share: shareName, path: "" }; // loadAcl 之前设，指向共享根
+  await loadAcl();
+}
+
+async function loadAcl() {
+  const t = aclTarget();
+  try {
+    const data = await api(`/api/files/acl?share=${encodeURIComponent(t.share)}&path=${encodeURIComponent(t.path)}`);
     if ($("acl-ownerinfo")) $("acl-ownerinfo").textContent = `文件/目录属主: ${data.owner} · 所属组: ${data.group}`;
     const tbody = $("acl-tbody");
     if (tbody) {
@@ -1177,9 +1214,10 @@ async function loadAcl() {
       tbody.querySelectorAll("[data-aclrm]").forEach((b) =>
         b.addEventListener("click", async () => {
           const en = data.entries[+b.dataset.aclrm];
+          const t = aclTarget();
           try {
             await api("/api/files/acl", { json: {
-              share: curShare, path: joinPath(curPath, e.name),
+              share: t.share, path: t.path,
               action: "remove", tag: en.tag, qualifier: en.qualifier, default_acl: en.default,
             }});
             loadAcl();
@@ -1193,8 +1231,9 @@ $("acl-add-btn")?.addEventListener("click", async () => {
   const name = $("acl-name").value.trim();
   if (!name) return toast("请指定目标用户或组名", true);
   const perms = ($("acl-r").checked ? "r" : "-") + ($("acl-w").checked ? "w" : "-") + ($("acl-x").checked ? "x" : "-");
+  const t = aclTarget();
   const base = {
-    share: curShare, path: joinPath(curPath, aclEntry.name),
+    share: t.share, path: t.path,
     action: "set", tag: $("acl-tag").value, qualifier: name, perms,
     recursive: $("acl-recursive").checked,
   };
@@ -1210,9 +1249,10 @@ $("acl-add-btn")?.addEventListener("click", async () => {
 
 $("acl-clear")?.addEventListener("click", async () => {
   if (!confirm("确定清除该项目全部扩展 ACL 规则，恢复为 Linux 基础 Unix 权限吗？")) return;
+  const t = aclTarget();
   try {
     await api("/api/files/acl", { json: {
-      share: curShare, path: joinPath(curPath, aclEntry.name),
+      share: t.share, path: t.path,
       action: "clear", recursive: $("acl-recursive").checked,
     }});
     toast("扩展 ACL 规则已清空");

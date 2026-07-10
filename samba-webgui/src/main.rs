@@ -262,7 +262,8 @@ async fn share_create(Json(mut share): Json<samba::Share>) -> Response {
 }
 
 async fn apply_fix_perms(share: &samba::Share, msg: String) -> String {
-    if !share.fix_perms {
+    // 粘滞位需要 chmod 才能生效，故 sticky 也触发权限修正
+    if !share.fix_perms && !share.sticky {
         return msg;
     }
     match samba::fix_share_perms(share).await {
