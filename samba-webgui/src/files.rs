@@ -91,9 +91,10 @@ pub async fn stat(Query(q): Query<FsQuery>) -> Response {
         Ok(v) => v,
         Err(e) => return err_json(StatusCode::BAD_REQUEST, &e),
     };
-    // 一次 stat 拿到 属主|属组|权限串|八进制|大小|mtime|类型
+    // 一次 stat 拿到 属主/属组/权限串/八进制/大小/mtime/类型；
+    // 用 NUL(\0) 分隔（--printf 才会解释转义），避免用户名/组名含分隔符导致错位
     let out = tokio::process::Command::new("stat")
-        .args(["-c", "%U|%G|%A|%a|%s|%Y|%F", "--"])
+        .args(["--printf", "%U\\0%G\\0%A\\0%a\\0%s\\0%Y\\0%F", "--"])
         .arg(&path)
         .output()
         .await;
@@ -102,7 +103,7 @@ pub async fn stat(Query(q): Query<FsQuery>) -> Response {
         _ => return err_json(StatusCode::NOT_FOUND, "无法读取属性"),
     };
     let line = String::from_utf8_lossy(&out.stdout);
-    let f: Vec<&str> = line.trim().split('|').collect();
+    let f: Vec<&str> = line.split('\0').collect();
     if f.len() < 7 {
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, "属性解析失败");
     }

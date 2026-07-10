@@ -315,7 +315,6 @@ async function openShareDialog(share) {
   $("sh-matrix-filter").value = "";
   $("share-dialog").showModal();
   await buildPermMatrix(share?.valid_users || "", share?.write_list || "", share?.read_list || "");
-  updateMatrixEnabled();
 }
 
 $("btn-new-share")?.addEventListener("click", () => openShareDialog(null));
@@ -479,32 +478,21 @@ async function buildPermMatrix(validUsers, writeList, readList) {
 }
 
 function syncMatrixToHidden() {
-  // 未启用访问控制：清空三者，所有有效用户按共享默认访问
-  if (!$("sh-access-control").checked) {
-    $("sh-valid-users").value = "";
-    $("sh-write-list").value = "";
-    $("sh-read-list").value = "";
-    return;
-  }
-  const valid = [], write = [], read = [];
+  const restrict = $("sh-access-control").checked;
+  const listed = [], write = [], read = [];
   $("sh-perm-matrix").querySelectorAll(".pm-row").forEach((row) => {
     const token = row.dataset.token;
     const sel = row.querySelector("input[type=radio]:checked");
     const st = sel ? sel.value : "none";
-    if (st === "rw") { valid.push(token); write.push(token); }
-    else if (st === "ro") { valid.push(token); read.push(token); }
+    if (st === "rw") { listed.push(token); write.push(token); }
+    else if (st === "ro") { listed.push(token); read.push(token); }
   });
-  $("sh-valid-users").value = valid.join(", ");
+  // 读写→write list、只读→read list：始终按矩阵生成，不因"访问控制"关闭而抹掉旧授权。
+  // valid users 仅在启用访问控制时限制为名单，否则留空=所有有效用户可访问。
+  $("sh-valid-users").value = restrict ? listed.join(", ") : "";
   $("sh-write-list").value = write.join(", ");
   $("sh-read-list").value = read.join(", ");
 }
-
-function updateMatrixEnabled() {
-  const on = $("sh-access-control").checked;
-  $("sh-perm-matrix")?.classList.toggle("disabled", !on);
-  $("sh-matrix-group").style.opacity = on ? "1" : ".55";
-}
-$("sh-access-control")?.addEventListener("change", updateMatrixEnabled);
 $("sh-matrix-filter")?.addEventListener("input", (e) => {
   const q = e.target.value.trim().toLowerCase();
   $("sh-perm-matrix").querySelectorAll(".pm-row").forEach((row) => {

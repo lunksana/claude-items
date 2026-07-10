@@ -314,7 +314,6 @@ td b { color: var(--text); }
 .pm-opts { display: flex; gap: 6px; flex-shrink: 0; }
 .pm-opts label { display: flex; align-items: center; gap: 4px; cursor: pointer; width: 52px; justify-content: center; color: var(--text-soft); }
 .pm-opts input { accent-color: var(--primary); cursor: pointer; }
-.perm-matrix.disabled { opacity: .5; pointer-events: none; }
 .pm-empty { padding: 20px; text-align: center; color: var(--muted); font-size: 13px; }
 
 /* ---------------- 文件属性面板 ---------------- */

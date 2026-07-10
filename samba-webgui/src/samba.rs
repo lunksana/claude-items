@@ -698,7 +698,11 @@ pub async fn fix_share_perms(share: &Share) -> Result<String, String> {
     let split = |s: &str| -> Vec<String> {
         s.split(&[',', ' '][..]).map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
     };
-    let entries: Vec<String> = split(&share.write_list).into_iter().chain(split(&share.valid_users)).collect();
+    let entries: Vec<String> = split(&share.write_list)
+        .into_iter()
+        .chain(split(&share.valid_users))
+        .chain(split(&share.read_list))
+        .collect();
     // 第一个普通用户作属主
     let owner = entries
         .iter()
