@@ -81,6 +81,7 @@ function showMain() {
   loadShares();
   loadUsers();
   refreshShareSelect();
+  loadSettings(); // 让"还原上次配置"按钮尽早知道是否有备份
 }
 
 let activeTab = "status";
@@ -632,6 +633,20 @@ $("user-group-form")?.addEventListener("submit", async (e) => {
   } catch (err) { toast(err.message, true); }
 });
 
+// ---------- 配置还原（单级撤销）----------
+let lastBackupTs = null;
+async function restoreConfig() {
+  const when = lastBackupTs ? `（备份于 ${fmtTime(lastBackupTs)}）` : "";
+  if (!confirm(`确定还原到最近一次修改前的配置吗？${when}\n这会撤销你上一次对共享/全局配置的改动，并重新加载 Samba。`)) return;
+  try {
+    const r = await api("/api/config/restore", { method: "POST" });
+    toast(r.message || "已还原上次配置");
+    loadShares(); refreshShareSelect(); loadSettings(); loadStatus();
+  } catch (err) { toast(err.message, true); }
+}
+$("btn-restore-config")?.addEventListener("click", restoreConfig);
+$("btn-restore-config-2")?.addEventListener("click", restoreConfig);
+
 // ---------- 全局系统配置 ----------
 async function loadSettings() {
   try {
@@ -639,7 +654,18 @@ async function loadSettings() {
     if ($("set-listen-addr")) $("set-listen-addr").value = cfg.listen_addr || "0.0.0.0:8686";
     if ($("set-session-ttl")) $("set-session-ttl").value = cfg.session_ttl_hours || 24;
     if ($("set-guest-map")) $("set-guest-map").checked = !!cfg.guest_map_bad_user;
+    lastBackupTs = cfg.backup_ts || null;
+    updateRestoreButtons();
   } catch (err) { toast(err.message, true); }
+}
+
+function updateRestoreButtons() {
+  const has = !!lastBackupTs;
+  const tip = has ? `还原到 ${fmtTime(lastBackupTs)} 的配置` : "暂无可还原的配置（尚未修改过）";
+  ["btn-restore-config", "btn-restore-config-2"].forEach((id) => {
+    const b = $(id);
+    if (b) { b.disabled = !has; b.title = tip; }
+  });
 }
 
 $("settings-form")?.addEventListener("submit", async (e) => {

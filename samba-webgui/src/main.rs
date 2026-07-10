@@ -254,6 +254,7 @@ async fn share_create(Json(mut share): Json<samba::Share>) -> Response {
     }
     let mut managed = samba::load_managed();
     managed.push(share.clone());
+    samba::backup_config(); // 改动前快照，供"还原上次配置"
     match samba::save_managed(&managed).await {
         Ok(msg) => Json(json!({ "ok": true, "message": apply_fix_perms(&share, msg).await })).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
@@ -286,6 +287,7 @@ async fn share_update(AxPath(name): AxPath<String>, Json(mut share): Json<samba:
         return err_json(StatusCode::BAD_REQUEST, &e);
     }
     managed[idx] = share.clone();
+    samba::backup_config(); // 改动前快照，供"还原上次配置"
     match samba::save_managed(&managed).await {
         Ok(msg) => Json(json!({ "ok": true, "message": apply_fix_perms(&share, msg).await })).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
@@ -300,6 +302,7 @@ async fn share_delete(AxPath(name): AxPath<String>) -> Response {
     if managed.len() == before {
         return err_json(StatusCode::NOT_FOUND, "共享不存在或不由本工具管理");
     }
+    samba::backup_config(); // 改动前快照，供"还原上次配置"
     match samba::save_managed(&managed).await {
         Ok(msg) => Json(json!({ "ok": true, "message": msg })).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
@@ -398,6 +401,7 @@ async fn config_get(State(st): State<SharedState>) -> Response {
         "listen_addr": cfg.listen_addr,
         "session_ttl_hours": cfg.session_ttl_hours,
         "guest_map_bad_user": cfg.guest_map_bad_user,
+        "backup_ts": samba::backup_timestamp(),
     })).into_response()
 }
 
@@ -448,6 +452,7 @@ async fn config_update(State(st): State<SharedState>, Json(req): Json<ConfigUpda
                 }
                 out = out2;
             }
+            samba::backup_config(); // 改动 smb.conf 前快照，供"还原上次配置"
             let _ = std::fs::write(samba::SMB_CONF, out.join("\n"));
             let _ = samba::service_action("reload").await;
         }
@@ -485,8 +490,18 @@ async fn status_service(Json(req): Json<ServiceReq>) -> Response {
 }
 
 async fn share_migrate(AxPath(name): AxPath<String>) -> Response {
+    let _guard = samba::CONF_LOCK.lock().await;
+    samba::backup_config(); // 接管会改 smb.conf + 片段，改动前快照
     match samba::migrate_share_from_main(&name).await {
         Ok(msg) => Json(json!({ "ok": true, "msg": msg })).into_response(),
+        Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
+    }
+}
+
+async fn config_restore() -> Response {
+    let _guard = samba::CONF_LOCK.lock().await;
+    match samba::restore_config().await {
+        Ok(msg) => Json(json!({ "ok": true, "message": msg })).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -552,6 +567,7 @@ async fn main() {
         .route("/api/me", get(me))
         .route("/api/password", post(change_password))
         .route("/api/config", get(config_get).post(config_update))
+        .route("/api/config/restore", post(config_restore))
         .route("/api/status", get(status_get))
         .route("/api/status/disconnect", post(status_disconnect))
         .route("/api/status/service", post(status_service))

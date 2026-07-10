@@ -125,7 +125,10 @@
         <div class="card">
           <div class="card-header">
             <h3>📂 已设定的共享目录列表</h3>
-            <button class="btn primary" id="btn-new-share">＋ 新建共享文件夹</button>
+            <div class="flex gap-2 align-center">
+              <button class="btn outline" id="btn-restore-config" title="还原到最近一次修改前的配置">↩ 还原上次配置</button>
+              <button class="btn primary" id="btn-new-share">＋ 新建共享文件夹</button>
+            </div>
           </div>
           <div class="table-responsive">
             <table>
@@ -240,6 +243,7 @@
               </div>
             </div>
             <div class="card-footer">
+              <button type="button" class="btn outline" id="btn-restore-config-2" title="还原到最近一次修改前的配置">↩ 还原上次配置</button>
               <button type="submit" class="btn primary">保存全局设置</button>
             </div>
           </form>

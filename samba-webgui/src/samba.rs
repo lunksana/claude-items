@@ -8,6 +8,8 @@ pub const SMB_CONF: &str = "/etc/samba/smb.conf";
 pub const MANAGED_CONF: &str = "/etc/samba/webgui-shares.conf";
 /// 每个共享一个片段文件的目录；MANAGED_CONF 退化为只含 include 行的聚合文件
 pub const MANAGED_DIR: &str = "/etc/samba/webgui-shares.d";
+/// 单级配置备份目录：每次改配置前快照，供"还原上次配置"使用
+pub const BACKUP_DIR: &str = "/etc/samba/webgui-backup";
 
 /// 串行化共享配置的读-改-写，防并发覆盖
 pub static CONF_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -417,6 +419,82 @@ pub async fn save_managed(shares: &[Share]) -> Result<String, String> {
     }
     invalidate_share_cache();
     Ok(reload_smbd().await)
+}
+
+/// 改配置前调用：把当前 smb.conf + 聚合文件 + 全部片段快照到备份目录（单级，覆盖旧备份）。
+/// 尽力而为——失败不阻断编辑，只是届时无备份可还原。
+pub fn backup_config() {
+    let bdir = Path::new(BACKUP_DIR);
+    let bshares = bdir.join("shares.d");
+    // 清空旧片段备份
+    if let Ok(rd) = std::fs::read_dir(&bshares) {
+        for e in rd.flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    if std::fs::create_dir_all(&bshares).is_err() {
+        return;
+    }
+    let _ = std::fs::copy(SMB_CONF, bdir.join("smb.conf"));
+    let _ = std::fs::copy(MANAGED_CONF, bdir.join("webgui-shares.conf"));
+    if let Ok(rd) = std::fs::read_dir(MANAGED_DIR) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().map_or(false, |x| x == "conf") {
+                if let Some(name) = p.file_name() {
+                    let _ = std::fs::copy(&p, bshares.join(name));
+                }
+            }
+        }
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = std::fs::write(bdir.join("timestamp"), ts.to_string());
+}
+
+/// 备份时间戳（unix 秒），无备份返回 None
+pub fn backup_timestamp() -> Option<u64> {
+    std::fs::read_to_string(Path::new(BACKUP_DIR).join("timestamp"))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// 还原到上次备份的配置：恢复 smb.conf + 聚合文件 + 片段，然后热加载。
+pub async fn restore_config() -> Result<String, String> {
+    let bdir = Path::new(BACKUP_DIR);
+    if backup_timestamp().is_none() {
+        return Err("没有可还原的配置备份（尚未进行过配置修改）".into());
+    }
+    let bsmb = bdir.join("smb.conf");
+    if bsmb.exists() {
+        std::fs::copy(&bsmb, SMB_CONF).map_err(|e| e.to_string())?;
+    }
+    let bagg = bdir.join("webgui-shares.conf");
+    if bagg.exists() {
+        std::fs::copy(&bagg, MANAGED_CONF).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(MANAGED_DIR).map_err(|e| e.to_string())?;
+    // 清空当前片段后从备份恢复
+    if let Ok(rd) = std::fs::read_dir(MANAGED_DIR) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().map_or(false, |x| x == "conf") {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    if let Ok(rd) = std::fs::read_dir(bdir.join("shares.d")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if let Some(name) = p.file_name() {
+                let _ = std::fs::copy(&p, Path::new(MANAGED_DIR).join(name));
+            }
+        }
+    }
+    invalidate_share_cache();
+    Ok(format!("已还原到上次配置；{}", reload_smbd().await))
 }
 
 async fn reload_smbd() -> String {

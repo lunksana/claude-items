@@ -207,6 +207,7 @@ b { font-weight: 600; }
 .btn.outline:hover { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
 
 .btn.mini { padding: 5px 10px; font-size: 12px; border-radius: 6px; }
+.btn:disabled { opacity: .5; cursor: not-allowed; pointer-events: none; }
 
 /* ---------------- 表单控件 ---------------- */
 .form-group { margin-bottom: 16px; }
