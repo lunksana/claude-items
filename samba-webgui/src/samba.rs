@@ -480,9 +480,11 @@ fn apply_global_params(conf: &str, pairs: &[(&str, Option<String>)]) -> String {
         if in_global {
             if let Some((lhs, _)) = t.split_once('=') {
                 if let Some((k, v)) = matches(lhs) {
-                    handled.insert(k);
-                    if let Some(val) = v {
-                        out.push(format!("   {k} = {val}"));
+                    // 仅首次出现写入替换值；后续重复同名行直接剔除（顺带清洗历史冗余）
+                    if handled.insert(k) {
+                        if let Some(val) = v {
+                            out.push(format!("   {k} = {val}"));
+                        }
                     }
                     // None：删除该行（不 push）
                     continue;
@@ -787,7 +789,8 @@ async fn getent_id_map(db: &str) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
     for line in text.lines() {
         let cols: Vec<&str> = line.split(':').collect();
-        if cols.len() >= 3 && !cols[0].is_empty() {
+        // 第 3 列必须是数字 uid/gid（跳过异常行，避免非法 id 污染映射）
+        if cols.len() >= 3 && !cols[0].is_empty() && cols[2].parse::<u32>().is_ok() {
             // 同一个 id 可能有多个名字，保留第一个即可
             map.entry(cols[2].to_string()).or_insert_with(|| cols[0].to_string());
         }

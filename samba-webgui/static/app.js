@@ -22,13 +22,13 @@ async function api(path, opts = {}) {
 }
 
 let toastTimer = null;
-function toast(msg, isErr = false) {
+function toast(msg, isErr = false, ms = 3500) {
   const t = $("toast");
   if (!t) return;
   t.textContent = msg;
   t.className = "toast" + (isErr ? " err" : "");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.add("hidden"), 3500);
+  toastTimer = setTimeout(() => t.classList.add("hidden"), ms);
 }
 
 function esc(s) {
@@ -596,7 +596,10 @@ $("user-form")?.addEventListener("submit", async (e) => {
   try {
     const r = await api("/api/users", { json: { username: $("u-name").value.trim(), password: $("u-password").value, groups } });
     $("user-dialog").close();
-    toast(r.message || "Samba 用户账号创建成功"); loadUsers();
+    // 半成功（用户建了但组没配好）用醒目红色 + 长停留，便于排查是哪一步
+    if (r.warn) toast(r.message, true, 8000);
+    else toast(r.message || "Samba 用户账号创建成功");
+    loadUsers();
   } catch (err) { toast(err.message, true); }
 });
 

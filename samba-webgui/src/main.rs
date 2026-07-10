@@ -335,11 +335,11 @@ async fn user_create(Json(req): Json<UserCreateReq>) -> Response {
     if !req.groups.is_empty() {
         for g in &req.groups {
             if let Err(e) = samba::create_group(g).await {
-                return Json(json!({ "ok": true, "message": format!("用户已创建，但用户组 {g} 处理失败: {e}") })).into_response();
+                return Json(json!({ "ok": true, "warn": true, "message": format!("用户已创建，但用户组 {g} 处理失败: {e}") })).into_response();
             }
         }
         if let Err(e) = samba::set_user_groups(&req.username, &req.groups).await {
-            return Json(json!({ "ok": true, "message": format!("用户已创建，但设置用户组失败: {e}") })).into_response();
+            return Json(json!({ "ok": true, "warn": true, "message": format!("用户已创建，但设置用户组失败: {e}") })).into_response();
         }
     }
     Json(json!({ "ok": true })).into_response()
