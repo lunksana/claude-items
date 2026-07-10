@@ -14,7 +14,7 @@
   <div id="login-view" class="login-container">
     <div class="login-card">
       <h1>📁 Samba WebGUI</h1>
-      <p class="subtitle">轻量级网络文件共享与系统权限控制中心</p>
+      <p class="subtitle">轻量级网络文件共享与系统权限控制中心 · v{{VERSION}}</p>
       <form id="login-form">
         <div class="form-group">
           <label for="login-password">管理会话密码</label>
@@ -35,6 +35,7 @@
     <aside class="sidebar">
       <div class="sidebar-brand">
         <span>📁 Samba 控制中心</span>
+        <span class="app-version">v{{VERSION}}</span>
       </div>
       <nav class="sidebar-nav">
         <button class="nav-item active" data-tab="status">📊 监控大盘</button>
@@ -359,7 +360,7 @@
           <label class="check"><input type="checkbox" id="sh-browseable" checked> 👀 允许在网络邻居可见 (Browseable)</label>
           <label class="check"><input type="checkbox" id="sh-recycle"> ♻️ 开启网络回收站 (.recycle)</label>
           <label class="check"><input type="checkbox" id="sh-fruit"> 🍎 macOS / TimeMachine 原生兼容</label>
-          <label class="check"><input type="checkbox" id="sh-fix-perms" checked> 🔧 自动修正宿主目录读写权限</label>
+          <label class="check"><input type="checkbox" id="sh-fix-perms" checked> 🔧 自动修正宿主目录读写权限（若授权了 @用户组，自动设 setgid 实现多用户协作）</label>
         </div>
       </div>
       <div class="dialog-footer">

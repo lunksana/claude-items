@@ -687,41 +687,64 @@ pub fn check_share_path(path: &str) -> Result<std::path::PathBuf, String> {
 pub async fn fix_share_perms(share: &Share) -> Result<String, String> {
     let canon = check_share_path(&share.path)?;
     let path = canon.to_string_lossy().to_string();
-    // 取 write_list / valid_users 中第一个普通用户作为属主
-    let owner = share
-        .write_list
-        .split(&[',', ' '][..])
-        .chain(share.valid_users.split(&[',', ' '][..]))
-        .map(|s| s.trim())
-        .find(|s| !s.is_empty() && !s.starts_with('@') && !s.starts_with('+'))
-        .map(|s| s.to_string())
+    let split = |s: &str| -> Vec<String> {
+        s.split(&[',', ' '][..]).map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
+    };
+    let entries: Vec<String> = split(&share.write_list).into_iter().chain(split(&share.valid_users)).collect();
+    // 第一个普通用户作属主
+    let owner = entries
+        .iter()
+        .find(|s| !s.starts_with('@') && !s.starts_with('+'))
+        .cloned()
         .or_else(|| share.guest_ok.then(|| "nobody".to_string()));
+    // 第一个 @组 作为多用户协作组：设 setgid + 组属主，组内成员协作互通
+    let group = entries
+        .iter()
+        .find(|s| s.starts_with('@'))
+        .map(|s| s.trim_start_matches('@').to_string());
 
-    let mode = if share.guest_ok && !share.read_only { "0777" } else { "0775" };
-    let out = Command::new("chmod")
-        .args([mode, "--", &path])
-        .output()
-        .await
-        .map_err(|e| e.to_string())?;
+    // 有协作组时用 setgid 位（前导 2），使新建文件继承目录组
+    let mode = match (&group, share.guest_ok && !share.read_only) {
+        (Some(_), true) => "2777",
+        (Some(_), false) => "2775",
+        (None, true) => "0777",
+        (None, false) => "0775",
+    };
+    let out = Command::new("chmod").args([mode, "--", &path]).output().await.map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!("chmod 失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+
+    // chown 目标：属主[:组]
+    if let Some(g) = &group {
+        if !valid_existing_username(g) {
+            return Err(format!("无法确定合法用户组: {g}"));
+        }
     }
     if let Some(owner) = &owner {
         if !valid_username(owner) && owner != "nobody" {
             return Err(format!("无法确定合法属主: {owner}"));
         }
-        let out = Command::new("chown")
-            .args([owner.as_str(), "--", &path])
-            .output()
-            .await
-            .map_err(|e| e.to_string())?;
+    }
+    let spec = match (&owner, &group) {
+        (Some(o), Some(g)) => format!("{o}:{g}"),
+        (Some(o), None) => o.clone(),
+        (None, Some(g)) => format!(":{g}"),
+        (None, None) => String::new(),
+    };
+    if !spec.is_empty() {
+        let out = Command::new("chown").args([spec.as_str(), "--", &path]).output().await.map_err(|e| e.to_string())?;
         if !out.status.success() {
             return Err(format!("chown 失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
         }
-        Ok(format!("目录权限已修正（属主 {owner}，权限 {mode}）"))
-    } else {
-        Ok(format!("目录权限已修正（{mode}）"))
     }
+    Ok(match &group {
+        Some(g) => format!("目录权限已修正（多用户协作：组 {g} + setgid，权限 {mode}）"),
+        None => match &owner {
+            Some(o) => format!("目录权限已修正（属主 {o}，权限 {mode}）"),
+            None => format!("目录权限已修正（{mode}）"),
+        },
+    })
 }
 
 pub async fn list_users() -> Result<Vec<SmbUser>, String> {

@@ -526,8 +526,9 @@ async fn user_groups_update(AxPath(name): AxPath<String>, Json(req): Json<UserGr
 
 // ---- 静态页面 ----
 
-async fn index() -> Html<&'static str> {
-    Html(include_str!("../static/index.html"))
+async fn index() -> Html<String> {
+    // 把版本号注入到页面占位符，前端无需额外请求
+    Html(include_str!("../static/index.html").replace("{{VERSION}}", env!("CARGO_PKG_VERSION")))
 }
 
 async fn app_js() -> Response {
