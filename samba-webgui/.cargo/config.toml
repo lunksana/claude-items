@@ -1,0 +1,8 @@
+# musl 静态构建配置（仅作用于 musl 目标，不影响默认 glibc 开发构建）
+# 显式要求静态链接 CRT，产出不依赖任何系统动态库的单文件二进制，
+# 可直接部署到低版本 / glibc 缺失的 Linux 主机。
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]

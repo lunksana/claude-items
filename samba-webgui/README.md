@@ -46,18 +46,23 @@ SWG_LISTEN=127.0.0.1:9000 sudo -E ./target/release/samba-webgui   # 自定义监
 若需要在较老或低版本 Linux（如 CentOS 7/8、旧款 Debian/Ubuntu 或 Alpine、OpenWRT 等低/无 glibc 系统）上运行，请使用 `musl` 编译出完全静态链接、独立无依赖的单二进制文件：
 
 ```bash
-# 方法一：使用内置构建脚本（自动检查并编译生成 dist/samba-webgui-x86_64-musl）
-./build-musl.sh
+# 方法一：内置构建脚本（自动加目标、编译、校验静态链接并生成 sha256）
+./build-musl.sh                                   # x86_64
+TARGET=aarch64-unknown-linux-musl ./build-musl.sh # ARM64
 
-# 方法二：使用 Makefile
-make build-musl
+# 方法二：Makefile
+make build-musl          # x86_64 musl 静态版
+make build-musl-arm64    # ARM64 musl 静态版
+make release             # 本机 glibc release + x86_64 musl 静态版一起产出
 
 # 方法三：手动执行 Cargo 构建
 rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
 ```
 
-编译出的静态二进制位于 `dist/samba-webgui-x86_64-musl`（以及 `target/x86_64-unknown-linux-musl/release/samba-webgui`），可以直接直接分发至目标低版本服务器上通过 `sudo ./samba-webgui-x86_64-musl` 运行。
+`.cargo/config.toml` 已为 musl 目标显式开启 `+crt-static`（仅作用于 musl 目标，不影响默认 glibc 开发构建）。编译产物位于 `dist/samba-webgui-<arch>-musl`，并附带同名 `.sha256` 校验文件；`file`/`ldd` 会确认其为 `statically linked`（无任何动态库依赖），可直接分发至目标低版本服务器 `sudo ./samba-webgui-x86_64-musl` 运行。
+
+> 说明：本工具通过调用外部命令（`smbpasswd`/`pdbedit`/`getent`/`id` 等独立进程）完成用户与组操作，不在进程内做 glibc NSS 查询，因此 musl 静态版在功能上与 glibc 版完全一致。
 
 ---
 
