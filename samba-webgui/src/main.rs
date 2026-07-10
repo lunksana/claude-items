@@ -319,10 +319,36 @@ async fn users_list() -> Response {
 struct UserCreateReq {
     username: String,
     password: String,
+    #[serde(default)]
+    groups: Vec<String>,
 }
 
 async fn user_create(Json(req): Json<UserCreateReq>) -> Response {
-    match samba::create_user(&req.username, &req.password).await {
+    if let Err(e) = samba::create_user(&req.username, &req.password).await {
+        return err_json(StatusCode::BAD_REQUEST, &e);
+    }
+    // 用户已建成；再补充组成员资格（缺失的组自动创建）。
+    // 组这步失败不回滚用户，只在消息里提示。
+    if !req.groups.is_empty() {
+        for g in &req.groups {
+            if let Err(e) = samba::create_group(g).await {
+                return Json(json!({ "ok": true, "message": format!("用户已创建，但用户组 {g} 处理失败: {e}") })).into_response();
+            }
+        }
+        if let Err(e) = samba::set_user_groups(&req.username, &req.groups).await {
+            return Json(json!({ "ok": true, "message": format!("用户已创建，但设置用户组失败: {e}") })).into_response();
+        }
+    }
+    Json(json!({ "ok": true })).into_response()
+}
+
+#[derive(Deserialize)]
+struct GroupCreateReq {
+    name: String,
+}
+
+async fn group_create(Json(req): Json<GroupCreateReq>) -> Response {
+    match samba::create_group(&req.name).await {
         Ok(_) => Json(json!({ "ok": true })).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
@@ -536,7 +562,7 @@ async fn main() {
         .route("/api/users/{name}", axum::routing::delete(user_delete))
         .route("/api/users/{name}/password", put(user_password))
         .route("/api/users/{name}/enable", put(user_enable))
-        .route("/api/groups", get(groups_list))
+        .route("/api/groups", get(groups_list).post(group_create))
         .route("/api/users/{name}/groups", put(user_groups_update))
         .route("/api/files", get(files::list))
         .route("/api/files/download", get(files::download))

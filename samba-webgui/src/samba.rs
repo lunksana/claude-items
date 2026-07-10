@@ -454,6 +454,25 @@ async fn get_user_groups(name: &str) -> Vec<String> {
     Vec::new()
 }
 
+/// 从 getent passwd/group 构造 "数字id → 名字" 映射（用于把 smbstatus 的数字解析成名字）。
+/// passwd/group 每行格式：name:x:id:...，第 3 列是 uid/gid。
+async fn getent_id_map(db: &str) -> std::collections::HashMap<String, String> {
+    let file = if db == "group" { "/etc/group" } else { "/etc/passwd" };
+    let text = match Command::new("getent").arg(db).output().await {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => std::fs::read_to_string(file).unwrap_or_default(),
+    };
+    let mut map = std::collections::HashMap::new();
+    for line in text.lines() {
+        let cols: Vec<&str> = line.split(':').collect();
+        if cols.len() >= 3 && !cols[0].is_empty() {
+            // 同一个 id 可能有多个名字，保留第一个即可
+            map.entry(cols[2].to_string()).or_insert_with(|| cols[0].to_string());
+        }
+    }
+    map
+}
+
 pub async fn list_groups() -> Result<Vec<String>, String> {
     let out = match Command::new("getent").arg("group").output().await {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
@@ -468,6 +487,30 @@ pub async fn list_groups() -> Result<Vec<String>, String> {
     groups.sort();
     groups.dedup();
     Ok(groups)
+}
+
+/// 创建系统用户组（幂等：已存在则视为成功）
+pub async fn create_group(name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if !valid_existing_username(name) {
+        return Err(format!("非法用户组名: {name}"));
+    }
+    // 已存在则直接成功
+    let exists = Command::new("getent").args(["group", name]).output().await;
+    if matches!(&exists, Ok(o) if o.status.success()) {
+        return Ok(());
+    }
+    let out = Command::new("groupadd")
+        .arg("--")
+        .arg(name)
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("创建用户组失败: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
 }
 
 pub async fn set_user_groups(name: &str, groups: &[String]) -> Result<(), String> {
@@ -699,6 +742,11 @@ pub async fn get_dashboard_status() -> StatusDashboard {
         Err(_) => false,
     };
 
+    // smbstatus -n 输出的是数字 uid/gid（避免其反向解析主机名可能卡住）；
+    // 用 getent 一次性拉全量映射，自行把 uid→用户名、gid→组名 解析出来
+    let uid_map = getent_id_map("passwd").await;
+    let gid_map = getent_id_map("group").await;
+
     let mut connections = Vec::new();
     if let Ok(out) = Command::new("smbstatus").args(["-b", "-n"]).output().await {
         if out.status.success() {
@@ -713,8 +761,9 @@ pub async fn get_dashboard_status() -> StatusDashboard {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 4 {
                         if let Ok(pid) = parts[0].parse::<u32>() {
-                            let username = parts[1].to_string();
-                            let group = parts[2].to_string();
+                            // parts[1]/parts[2] 是数字 uid/gid，映射回名字；映射不到则原样显示
+                            let username = uid_map.get(parts[1]).cloned().unwrap_or_else(|| parts[1].to_string());
+                            let group = gid_map.get(parts[2]).cloned().unwrap_or_else(|| parts[2].to_string());
                             let machine = parts[3].to_string();
                             let mut ip = String::new();
                             for p in &parts[4..] {
@@ -726,6 +775,12 @@ pub async fn get_dashboard_status() -> StatusDashboard {
                             if ip.is_empty() && parts.len() > 4 {
                                 ip = parts[4].trim_matches(|c| c == '(' || c == ')').to_string();
                             }
+                            // 去掉 ipv4:/ipv6: 前缀，展示干净的地址（保留端口）
+                            ip = ip
+                                .strip_prefix("ipv4:")
+                                .or_else(|| ip.strip_prefix("ipv6:"))
+                                .unwrap_or(&ip)
+                                .to_string();
                             connections.push(SmbConnection {
                                 pid,
                                 username,

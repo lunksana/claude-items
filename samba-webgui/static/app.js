@@ -542,20 +542,60 @@ async function loadUsers() {
   } catch (err) { toast(err.message, true); }
 }
 
-// 新建账号
-$("btn-new-user")?.addEventListener("click", () => { $("user-form").reset(); $("user-dialog").showModal(); });
+// 新建账号（含用户组选择 / 新建）
+async function renderNewUserGroups(checkedSet) {
+  const box = $("u-groups-list");
+  if (!box) return;
+  try {
+    const res = await api("/api/groups");
+    const groups = Array.isArray(res.groups) ? res.groups : (Array.isArray(res) ? res : []);
+    box.innerHTML = groups.length ? groups.map((g) => {
+      const gName = typeof g === "string" ? g : (g.groupname || "");
+      const checked = checkedSet.has(gName) ? "checked" : "";
+      return `<label class="check"><input type="checkbox" value="${esc(gName)}" ${checked}> 👥 ${esc(gName)}</label>`;
+    }).join("") : '<span class="muted small">系统暂无用户组</span>';
+  } catch (err) { toast(err.message, true); }
+}
+function currentCheckedGroups() {
+  const s = new Set();
+  $("u-groups-list")?.querySelectorAll("input[type=checkbox]:checked").forEach((c) => s.add(c.value));
+  return s;
+}
+
+$("btn-new-user")?.addEventListener("click", async () => {
+  $("user-form").reset();
+  $("u-groups-list").innerHTML = "";
+  await renderNewUserGroups(new Set());
+  $("user-dialog").showModal();
+});
 $("user-cancel")?.addEventListener("click", () => $("user-dialog").close());
 $("user-close")?.addEventListener("click", () => $("user-dialog").close());
+
+// 新建组：创建后刷新清单并自动勾选，保留已勾选项
+$("u-add-group-btn")?.addEventListener("click", async () => {
+  const name = $("u-new-group").value.trim();
+  if (!name) return toast("请输入要新建的用户组名称", true);
+  try {
+    await api("/api/groups", { json: { name } });
+    const checked = currentCheckedGroups();
+    checked.add(name);
+    await renderNewUserGroups(checked);
+    $("u-new-group").value = "";
+    toast(`用户组 ${name} 已就绪`);
+  } catch (err) { toast(err.message, true); }
+});
+
 $("user-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   if ($("u-password").value !== $("u-password-confirm").value) {
     toast("两次输入的密码不一致，请仔细检查！", true);
     return;
   }
+  const groups = [...currentCheckedGroups()];
   try {
-    await api("/api/users", { json: { username: $("u-name").value.trim(), password: $("u-password").value } });
+    const r = await api("/api/users", { json: { username: $("u-name").value.trim(), password: $("u-password").value, groups } });
     $("user-dialog").close();
-    toast("Samba 用户账号创建成功"); loadUsers();
+    toast(r.message || "Samba 用户账号创建成功"); loadUsers();
   } catch (err) { toast(err.message, true); }
 });
 

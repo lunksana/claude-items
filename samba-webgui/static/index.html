@@ -405,6 +405,14 @@
             <button type="button" class="toggle-pw" data-target="u-password-confirm">👁️</button>
           </div>
         </div>
+        <div class="form-group">
+          <label>加入用户组 <small class="muted">(可多选，可留空)</small></label>
+          <div id="u-groups-list" style="max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;padding:10px"></div>
+          <div class="flex gap-2 mt-2">
+            <input type="text" id="u-new-group" class="form-control" placeholder="新建用户组名称（不存在则自动创建）">
+            <button type="button" class="btn outline" id="u-add-group-btn" style="white-space:nowrap">＋ 新建组</button>
+          </div>
+        </div>
       </div>
       <div class="dialog-footer">
         <button type="button" class="btn" id="user-cancel">取消</button>
