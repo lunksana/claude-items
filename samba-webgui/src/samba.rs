@@ -32,11 +32,11 @@ pub struct Share {
     /// 只读共享中仍可写的用户列表
     #[serde(default)]
     pub write_list: String,
-    /// 是否开启网络回收站 (.recycle)
-    #[serde(default)]
+    /// 是否开启网络回收站 (.recycle)。前端字段名为 recycle
+    #[serde(default, rename = "recycle")]
     pub recycle_bin: bool,
-    /// 是否开启 macOS/Time Machine 兼容
-    #[serde(default)]
+    /// 是否开启 macOS/Time Machine 兼容。前端字段名为 fruit
+    #[serde(default, rename = "fruit")]
     pub fruit_time_machine: bool,
     /// 是否由本工具管理（false = 来自主配置，只读展示）
     #[serde(default)]
