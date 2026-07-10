@@ -346,19 +346,19 @@
           <input type="text" id="sh-comment" class="form-control" placeholder="例如: 公司部门公用文稿">
         </div>
         <div class="form-group">
-          <div class="flex justify-between align-center">
-            <label for="sh-valid-users">授权允许访问用户 / 组 <small class="muted">(留空则为所有人)</small></label>
-            <button type="button" class="btn mini outline" id="sh-pick-valid-users">＋ 从系统选择勾选</button>
-          </div>
-          <input type="text" id="sh-valid-users" class="form-control" placeholder="例如: user1, user2, @group1">
+          <label class="check"><input type="checkbox" id="sh-access-control"> 🔒 启用访问控制（仅下列勾选的用户 / 组可访问；不启用=所有有效用户可访问）</label>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="sh-matrix-group">
           <div class="flex justify-between align-center">
-            <label for="sh-write-list">额外拥有可写权限用户 / 组 <small class="muted">(针对只读共享放行特定人员)</small></label>
-            <button type="button" class="btn mini outline" id="sh-pick-write-list">＋ 从系统选择勾选</button>
+            <label>访问权限（按用户 / 组分别授权）</label>
+            <input type="text" id="sh-matrix-filter" class="form-control" placeholder="🔍 过滤名称" style="width:160px;padding:5px 10px">
           </div>
-          <input type="text" id="sh-write-list" class="form-control" placeholder="例如: admin, @staff">
+          <div class="perm-matrix" id="sh-perm-matrix"></div>
         </div>
+        <!-- 由权限矩阵生成，提交时读取 -->
+        <input type="hidden" id="sh-valid-users">
+        <input type="hidden" id="sh-write-list">
+        <input type="hidden" id="sh-read-list">
         <div class="grid-2 mt-4">
           <label class="check"><input type="checkbox" id="sh-writable" checked> ✍️ 允许写入数据 (Writable)</label>
           <label class="check"><input type="checkbox" id="sh-guest"> 🔓 允许访客免密登录 (Guest Ok)</label>

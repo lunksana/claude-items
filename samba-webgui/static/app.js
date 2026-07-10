@@ -294,7 +294,7 @@ async function loadShares() {
   } catch (err) { toast(err.message, true); }
 }
 
-function openShareDialog(share) {
+async function openShareDialog(share) {
   editingShare = share || null;
   $("share-dialog-title").textContent = share ? `编辑共享文件夹：${share.name}` : "新建共享文件夹";
   $("sh-name").value = share?.name || "";
@@ -308,8 +308,14 @@ function openShareDialog(share) {
   $("sh-fruit").checked = share?.fruit || false;
   $("sh-valid-users").value = share?.valid_users || "";
   $("sh-write-list").value = share?.write_list || "";
+  $("sh-read-list").value = share?.read_list || "";
   $("sh-fix-perms").checked = !share;
+  // 启用访问控制 = 原本 valid users 非空
+  $("sh-access-control").checked = !!(share?.valid_users || "").trim();
+  $("sh-matrix-filter").value = "";
   $("share-dialog").showModal();
+  await buildPermMatrix(share?.valid_users || "", share?.write_list || "", share?.read_list || "");
+  updateMatrixEnabled();
 }
 
 $("btn-new-share")?.addEventListener("click", () => openShareDialog(null));
@@ -318,6 +324,7 @@ $("share-close")?.addEventListener("click", () => $("share-dialog").close());
 
 $("share-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
+  syncMatrixToHidden(); // 权限矩阵 → valid_users/write_list/read_list 隐藏字段
   const body = {
     name: $("sh-name").value.trim(),
     path: $("sh-path").value.trim(),
@@ -329,6 +336,7 @@ $("share-form")?.addEventListener("submit", async (e) => {
     fruit: $("sh-fruit").checked,
     valid_users: $("sh-valid-users").value.trim(),
     write_list: $("sh-write-list").value.trim(),
+    read_list: $("sh-read-list").value.trim(),
     fix_perms: $("sh-fix-perms").checked,
   };
   try {
@@ -428,6 +436,82 @@ $("tree-confirm-btn")?.addEventListener("click", () => {
 });
 
 // ---------- 系统用户/组选择多选器弹窗 ----------
+// ---------- 权限矩阵（群晖式：用户/组 × 无权限/只读/读写）----------
+function parseList(s) {
+  return (s || "").split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
+}
+
+async function buildPermMatrix(validUsers, writeList, readList) {
+  const box = $("sh-perm-matrix");
+  if (!box) return;
+  const validSet = new Set(parseList(validUsers));
+  const writeSet = new Set(parseList(writeList));
+  const readSet = new Set(parseList(readList));
+  let entities = [];
+  try {
+    const [ur, gr] = await Promise.all([api("/api/users"), api("/api/groups")]);
+    (ur.users || []).forEach((u) => entities.push({ token: u.username, label: u.username, tag: "用户" }));
+    const groups = Array.isArray(gr.groups) ? gr.groups : [];
+    groups.forEach((g) => {
+      const name = typeof g === "string" ? g : g.groupname;
+      if (name) entities.push({ token: "@" + name, label: "@" + name, tag: "组" });
+    });
+  } catch (err) { toast(err.message, true); }
+  // 配置里出现但系统列表没有的条目（自定义/历史），补进来不丢失
+  const known = new Set(entities.map((e) => e.token));
+  [...validSet, ...writeSet, ...readSet].forEach((t) => {
+    if (!known.has(t)) { entities.push({ token: t, label: t, tag: "自定义" }); known.add(t); }
+  });
+
+  const stateOf = (token) => writeSet.has(token) ? "rw"
+    : (validSet.has(token) || readSet.has(token)) ? "ro" : "none";
+
+  box.innerHTML =
+    `<div class="pm-head"><span class="pm-name">用户 / 用户组</span><div class="pm-opts"><span>无</span><span>只读</span><span>读写</span></div></div>` +
+    (entities.length ? entities.map((e, i) => {
+      const st = stateOf(e.token);
+      const radio = (val) => `<label><input type="radio" name="pm-${i}" value="${val}" ${st === val ? "checked" : ""}></label>`;
+      return `<div class="pm-row" data-token="${esc(e.token)}" data-label="${esc(e.label.toLowerCase())}">
+        <span class="pm-name">${esc(e.label)}<span class="tag">${e.tag}</span></span>
+        <div class="pm-opts">${radio("none")}${radio("ro")}${radio("rw")}</div>
+      </div>`;
+    }).join("") : `<div class="pm-empty">系统暂无用户 / 用户组</div>`);
+}
+
+function syncMatrixToHidden() {
+  // 未启用访问控制：清空三者，所有有效用户按共享默认访问
+  if (!$("sh-access-control").checked) {
+    $("sh-valid-users").value = "";
+    $("sh-write-list").value = "";
+    $("sh-read-list").value = "";
+    return;
+  }
+  const valid = [], write = [], read = [];
+  $("sh-perm-matrix").querySelectorAll(".pm-row").forEach((row) => {
+    const token = row.dataset.token;
+    const sel = row.querySelector("input[type=radio]:checked");
+    const st = sel ? sel.value : "none";
+    if (st === "rw") { valid.push(token); write.push(token); }
+    else if (st === "ro") { valid.push(token); read.push(token); }
+  });
+  $("sh-valid-users").value = valid.join(", ");
+  $("sh-write-list").value = write.join(", ");
+  $("sh-read-list").value = read.join(", ");
+}
+
+function updateMatrixEnabled() {
+  const on = $("sh-access-control").checked;
+  $("sh-perm-matrix")?.classList.toggle("disabled", !on);
+  $("sh-matrix-group").style.opacity = on ? "1" : ".55";
+}
+$("sh-access-control")?.addEventListener("change", updateMatrixEnabled);
+$("sh-matrix-filter")?.addEventListener("input", (e) => {
+  const q = e.target.value.trim().toLowerCase();
+  $("sh-perm-matrix").querySelectorAll(".pm-row").forEach((row) => {
+    row.style.display = !q || row.dataset.label.includes(q) ? "" : "none";
+  });
+});
+
 let multiSelectTargetInput = "sh-valid-users";
 async function openMultiSelectDialog(targetInputId, title) {
   multiSelectTargetInput = targetInputId;

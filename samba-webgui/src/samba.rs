@@ -32,6 +32,9 @@ pub struct Share {
     /// 只读共享中仍可写的用户列表
     #[serde(default)]
     pub write_list: String,
+    /// 强制只读的用户列表（可写共享中把特定用户限制为只读）
+    #[serde(default)]
+    pub read_list: String,
     /// 是否开启网络回收站 (.recycle)。前端字段名为 recycle
     #[serde(default, rename = "recycle")]
     pub recycle_bin: bool,
@@ -146,6 +149,7 @@ fn section_to_share(name: &str, kvs: &[(String, String)], managed: bool) -> Shar
         browseable: as_bool(get(kvs, "browseable").or(get(kvs, "browsable")), true),
         valid_users: get(kvs, "valid users").unwrap_or("").to_string(),
         write_list: get(kvs, "write list").unwrap_or("").to_string(),
+        read_list: get(kvs, "read list").unwrap_or("").to_string(),
         recycle_bin,
         fruit_time_machine,
         managed,
@@ -245,6 +249,9 @@ fn render_fragment(s: &Share) -> String {
     }
     if !s.write_list.trim().is_empty() {
         out.push_str(&format!("   write list = {}\n", s.write_list.trim()));
+    }
+    if !s.read_list.trim().is_empty() {
+        out.push_str(&format!("   read list = {}\n", s.read_list.trim()));
     }
     // inherit acls: SMB 客户端新建的文件继承目录的默认 ACL
     out.push_str("   create mask = 0664\n   directory mask = 0775\n   inherit acls = yes\n");
@@ -357,6 +364,7 @@ pub async fn save_managed(shares: &[Share]) -> Result<String, String> {
         if has_control_char(&s.comment)
             || has_control_char(&s.valid_users)
             || has_control_char(&s.write_list)
+            || has_control_char(&s.read_list)
         {
             return Err("字段中不允许控制字符".into());
         }
