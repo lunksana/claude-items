@@ -17,7 +17,7 @@ Rust 编写的单二进制 Samba Web 管理工具：通过浏览器管理共享�
 
 ## 安全设计
 
-- 共享配置写入独立文件 `/etc/samba/webgui-shares.conf`，只在主配置 `[global]` 注入一行 `include`，不改动其它内容（首次注入前自动备份为 `smb.conf.webgui.bak`）
+- 分层配置结构：主 `smb.conf` 只管全局参数并在**文件末尾**注入一行 `include = /etc/samba/webgui-shares.conf`（首次注入前自动备份为 `smb.conf.webgui.bak`）；该聚合文件本身只含一串 `include` 行，**每个共享单独一个片段文件** `webgui-shares.d/<共享名>.conf`。改/删单个共享只动它自己的片段，互不影响，也便于用 git 独立追踪。旧版单文件格式启动时自动拆分为片段（幂等）
 - 每次保存先 `testparm` 校验，失败自动回滚，成功后 `smbcontrol reload-config` 热加载
 - 主配置中已有的共享以"主配置"标记只读展示，不会被覆盖
 - include 行固定放在 smb.conf **文件末尾**（samba 的 include 是线性文本包含，放在 [global] 中间会让后续全局参数被误归入共享段；旧位置会自动迁移，行尾注释也能识别、不会重复追加）

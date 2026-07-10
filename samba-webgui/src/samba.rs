@@ -6,6 +6,8 @@ use tokio::process::Command;
 
 pub const SMB_CONF: &str = "/etc/samba/smb.conf";
 pub const MANAGED_CONF: &str = "/etc/samba/webgui-shares.conf";
+/// 每个共享一个片段文件的目录；MANAGED_CONF 退化为只含 include 行的聚合文件
+pub const MANAGED_DIR: &str = "/etc/samba/webgui-shares.d";
 
 /// 串行化共享配置的读-改-写，防并发覆盖
 pub static CONF_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -158,6 +160,9 @@ pub fn ensure_include() -> std::io::Result<()> {
     if !Path::new(MANAGED_CONF).exists() {
         std::fs::write(MANAGED_CONF, "# Managed by samba-webgui. Do not edit manually.\n")?;
     }
+    std::fs::create_dir_all(MANAGED_DIR)?;
+    // 旧单文件格式（聚合文件里直接写 [section]）自动拆分为每共享一个片段
+    migrate_single_file_to_fragments()?;
     let conf = std::fs::read_to_string(SMB_CONF)?;
     let is_include_line = |l: &str| {
         let l = l.trim();
@@ -191,52 +196,145 @@ pub fn ensure_include() -> std::io::Result<()> {
     std::fs::write(SMB_CONF, out)
 }
 
+/// 读取所有片段文件，解析出托管共享（片段内的 [section] 为权威名字，与文件名无关）。
+/// 兼容旧格式：若聚合文件里还残留 [section]（尚未迁移），也一并解析。
 pub fn load_managed() -> Vec<Share> {
-    let text = std::fs::read_to_string(MANAGED_CONF).unwrap_or_default();
-    parse_ini(&text)
-        .iter()
-        .map(|(name, kvs)| section_to_share(name, kvs, true))
-        .collect()
-}
-
-fn render_managed(shares: &[Share]) -> String {
-    let mut out = String::from("# Managed by samba-webgui. Do not edit manually.\n");
-    for s in shares {
-        out.push_str(&format!("\n[{}]\n", s.name));
-        out.push_str(&format!("   path = {}\n", s.path));
-        if !s.comment.is_empty() {
-            out.push_str(&format!("   comment = {}\n", s.comment));
-        }
-        out.push_str(&format!("   read only = {}\n", if s.read_only { "yes" } else { "no" }));
-        out.push_str(&format!("   guest ok = {}\n", if s.guest_ok { "yes" } else { "no" }));
-        out.push_str(&format!("   browseable = {}\n", if s.browseable { "yes" } else { "no" }));
-        if !s.valid_users.trim().is_empty() {
-            out.push_str(&format!("   valid users = {}\n", s.valid_users.trim()));
-        }
-        if !s.write_list.trim().is_empty() {
-            out.push_str(&format!("   write list = {}\n", s.write_list.trim()));
-        }
-        // inherit acls: SMB 客户端新建的文件继承目录的默认 ACL
-        out.push_str("   create mask = 0664\n   directory mask = 0775\n   inherit acls = yes\n");
-        if s.recycle_bin || s.fruit_time_machine {
-            let mut vfs_list = Vec::new();
-            if s.recycle_bin {
-                vfs_list.push("recycle");
-            }
-            if s.fruit_time_machine {
-                vfs_list.push("fruit");
-                vfs_list.push("streams_xattr");
-            }
-            out.push_str(&format!("   vfs objects = {}\n", vfs_list.join(" ")));
-            if s.recycle_bin {
-                out.push_str("   recycle:repository = .recycle\n   recycle:keeptree = yes\n   recycle:versions = yes\n");
-            }
-            if s.fruit_time_machine {
-                out.push_str("   fruit:time machine = yes\n");
+    let mut shares: Vec<Share> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    if let Ok(rd) = std::fs::read_dir(MANAGED_DIR) {
+        let mut files: Vec<_> = rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map_or(false, |x| x == "conf"))
+            .collect();
+        files.sort();
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            for (name, kvs) in parse_ini(&text) {
+                if seen.insert(name.clone()) {
+                    shares.push(section_to_share(&name, &kvs, true));
+                }
             }
         }
     }
+    // 旧格式兜底：聚合文件里若仍有 [section]
+    let agg = std::fs::read_to_string(MANAGED_CONF).unwrap_or_default();
+    for (name, kvs) in parse_ini(&agg) {
+        if seen.insert(name.clone()) {
+            shares.push(section_to_share(&name, &kvs, true));
+        }
+    }
+    shares.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    shares
+}
+
+/// 渲染单个共享的片段文件内容（含 [section] 头）
+fn render_fragment(s: &Share) -> String {
+    let mut out = String::from("# Managed by samba-webgui. Do not edit manually.\n");
+    out.push_str(&format!("[{}]\n", s.name));
+    out.push_str(&format!("   path = {}\n", s.path));
+    if !s.comment.is_empty() {
+        out.push_str(&format!("   comment = {}\n", s.comment));
+    }
+    out.push_str(&format!("   read only = {}\n", if s.read_only { "yes" } else { "no" }));
+    out.push_str(&format!("   guest ok = {}\n", if s.guest_ok { "yes" } else { "no" }));
+    out.push_str(&format!("   browseable = {}\n", if s.browseable { "yes" } else { "no" }));
+    if !s.valid_users.trim().is_empty() {
+        out.push_str(&format!("   valid users = {}\n", s.valid_users.trim()));
+    }
+    if !s.write_list.trim().is_empty() {
+        out.push_str(&format!("   write list = {}\n", s.write_list.trim()));
+    }
+    // inherit acls: SMB 客户端新建的文件继承目录的默认 ACL
+    out.push_str("   create mask = 0664\n   directory mask = 0775\n   inherit acls = yes\n");
+    if s.recycle_bin || s.fruit_time_machine {
+        let mut vfs_list = Vec::new();
+        if s.recycle_bin {
+            vfs_list.push("recycle");
+        }
+        if s.fruit_time_machine {
+            vfs_list.push("fruit");
+            vfs_list.push("streams_xattr");
+        }
+        out.push_str(&format!("   vfs objects = {}\n", vfs_list.join(" ")));
+        if s.recycle_bin {
+            out.push_str("   recycle:repository = .recycle\n   recycle:keeptree = yes\n   recycle:versions = yes\n");
+        }
+        if s.fruit_time_machine {
+            out.push_str("   fruit:time machine = yes\n");
+        }
+    }
     out
+}
+
+/// 由共享名派生安全的片段文件名（含 .conf）。
+/// valid_section_name 已禁止 [ ] = # ; 与控制字符；这里再挡掉路径分隔符/前导点/空格。
+fn fragment_filename(name: &str) -> String {
+    let mut f: String = name
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c == ' ' || c.is_control() { '_' } else { c })
+        .collect();
+    while f.starts_with('.') {
+        f.replace_range(0..1, "_");
+    }
+    if f.is_empty() {
+        f.push('_');
+    }
+    format!("{f}.conf")
+}
+
+/// 在 used 集合内取一个唯一的片段文件名（冲突追加 -2 -3 …）
+fn unique_fragment_filename(name: &str, used: &mut std::collections::HashSet<String>) -> String {
+    let mut fname = fragment_filename(name);
+    if !used.insert(fname.clone()) {
+        let stem = fname.trim_end_matches(".conf").to_string();
+        let mut i = 2;
+        loop {
+            fname = format!("{stem}-{i}.conf");
+            if used.insert(fname.clone()) {
+                break;
+            }
+            i += 1;
+        }
+    }
+    fname
+}
+
+/// 迁移：把旧的单文件 webgui-shares.conf 里的 [section] 拆成每共享一个片段，
+/// 并把聚合文件改写成只含 include 行。幂等（聚合文件无 section 时直接返回）。
+fn migrate_single_file_to_fragments() -> std::io::Result<()> {
+    let agg = std::fs::read_to_string(MANAGED_CONF).unwrap_or_default();
+    let sections = parse_ini(&agg);
+    if sections.is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(MANAGED_DIR)?;
+    let mut used = std::collections::HashSet::new();
+    let mut agg_out = String::from(
+        "# Managed by samba-webgui. Do not edit manually.\n# 每个共享一个片段文件，见 webgui-shares.d/\n",
+    );
+    for (name, kvs) in &sections {
+        let share = section_to_share(name, kvs, true);
+        let fname = unique_fragment_filename(name, &mut used);
+        let path = std::path::Path::new(MANAGED_DIR).join(&fname);
+        std::fs::write(&path, render_fragment(&share))?;
+        agg_out.push_str(&format!("include = {}\n", path.display()));
+    }
+    std::fs::write(MANAGED_CONF, agg_out)
+}
+
+/// 读取目录下所有片段文件为 路径→内容 快照（用于失败回滚）
+fn snapshot_fragments() -> Vec<(std::path::PathBuf, String)> {
+    let mut snap = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(MANAGED_DIR) {
+        for p in rd.filter_map(|e| e.ok().map(|e| e.path())) {
+            if p.extension().map_or(false, |x| x == "conf") {
+                if let Ok(c) = std::fs::read_to_string(&p) {
+                    snap.push((p, c));
+                }
+            }
+        }
+    }
+    snap
 }
 
 /// 控制字符（含 \r \n \t \0 等）会被 smb.conf 解析器当作换行/分隔，
@@ -261,8 +359,38 @@ pub async fn save_managed(shares: &[Share]) -> Result<String, String> {
             return Err("字段中不允许控制字符".into());
         }
     }
-    let old = std::fs::read_to_string(MANAGED_CONF).unwrap_or_default();
-    std::fs::write(MANAGED_CONF, render_managed(shares)).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(MANAGED_DIR).map_err(|e| e.to_string())?;
+    // 快照当前片段 + 聚合文件，供 testparm 失败时回滚
+    let snap = snapshot_fragments();
+    let agg_old = std::fs::read_to_string(MANAGED_CONF).unwrap_or_default();
+
+    // 计算期望的片段文件集（文件名去重）与聚合 include 列表
+    let mut used = std::collections::HashSet::new();
+    let mut desired: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut agg = String::from(
+        "# Managed by samba-webgui. Do not edit manually.\n# 每个共享一个片段文件，见 webgui-shares.d/\n",
+    );
+    for s in shares {
+        let fname = unique_fragment_filename(&s.name, &mut used);
+        let path = std::path::Path::new(MANAGED_DIR).join(&fname);
+        agg.push_str(&format!("include = {}\n", path.display()));
+        desired.push((path, render_fragment(s)));
+    }
+
+    // 应用：写期望片段 → 删除多余旧片段 → 写聚合文件
+    let apply = || -> std::io::Result<()> {
+        for (path, content) in &desired {
+            std::fs::write(path, content)?;
+        }
+        let keep: std::collections::HashSet<_> = desired.iter().map(|(p, _)| p.clone()).collect();
+        for (path, _) in &snap {
+            if !keep.contains(path) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        std::fs::write(MANAGED_CONF, &agg)
+    };
+    apply().map_err(|e| e.to_string())?;
 
     let check = Command::new("testparm")
         .args(["-s", "--suppress-prompt", SMB_CONF])
@@ -270,7 +398,18 @@ pub async fn save_managed(shares: &[Share]) -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
     if !check.status.success() {
-        let _ = std::fs::write(MANAGED_CONF, old);
+        // 回滚：清空目录内片段 → 恢复快照 → 恢复聚合文件
+        if let Ok(rd) = std::fs::read_dir(MANAGED_DIR) {
+            for p in rd.filter_map(|e| e.ok().map(|e| e.path())) {
+                if p.extension().map_or(false, |x| x == "conf") {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+        }
+        for (path, content) in &snap {
+            let _ = std::fs::write(path, content);
+        }
+        let _ = std::fs::write(MANAGED_CONF, agg_old);
         return Err(format!(
             "配置校验失败，已回滚: {}",
             String::from_utf8_lossy(&check.stderr).trim()
