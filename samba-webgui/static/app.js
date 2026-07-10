@@ -654,6 +654,8 @@ async function loadSettings() {
     if ($("set-listen-addr")) $("set-listen-addr").value = cfg.listen_addr || "0.0.0.0:8686";
     if ($("set-session-ttl")) $("set-session-ttl").value = cfg.session_ttl_hours || 24;
     if ($("set-guest-map")) $("set-guest-map").checked = !!cfg.guest_map_bad_user;
+    if ($("set-smb-min")) $("set-smb-min").value = (cfg.smb_min_protocol || "").toUpperCase();
+    if ($("set-smb-max")) $("set-smb-max").value = (cfg.smb_max_protocol || "").toUpperCase();
     lastBackupTs = cfg.backup_ts || null;
     updateRestoreButtons();
   } catch (err) { toast(err.message, true); }
@@ -675,9 +677,12 @@ $("settings-form")?.addEventListener("submit", async (e) => {
       listen_addr: $("set-listen-addr").value.trim(),
       session_ttl_hours: Number($("set-session-ttl").value) || 24,
       guest_map_bad_user: $("set-guest-map").checked,
+      smb_min_protocol: $("set-smb-min")?.value || "",
+      smb_max_protocol: $("set-smb-max")?.value || "",
     };
     await api("/api/config", { json: body });
     toast("全局参数已保存成功（网络监听修改将在下一次重启后生效）");
+    loadSettings();
   } catch (err) { toast(err.message, true); }
 });
 

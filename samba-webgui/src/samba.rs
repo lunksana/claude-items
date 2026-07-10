@@ -421,6 +421,111 @@ pub async fn save_managed(shares: &[Share]) -> Result<String, String> {
     Ok(reload_smbd().await)
 }
 
+/// 支持的 SMB 协议版本 token（server min/max protocol 的取值）
+pub const VALID_PROTOCOLS: &[&str] =
+    &["NT1", "SMB2", "SMB2_02", "SMB2_10", "SMB3", "SMB3_00", "SMB3_02", "SMB3_11"];
+
+pub fn valid_protocol(s: &str) -> bool {
+    VALID_PROTOCOLS.iter().any(|p| p.eq_ignore_ascii_case(s))
+}
+
+/// 读取主配置 [global] 段中某参数的值（大小写不敏感），不存在返回 None
+pub fn read_global_param(key: &str) -> Option<String> {
+    let conf = std::fs::read_to_string(SMB_CONF).ok()?;
+    let mut in_global = false;
+    for line in conf.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            in_global = t[1..t.len() - 1].trim().eq_ignore_ascii_case("global");
+            continue;
+        }
+        if in_global {
+            if let Some((k, v)) = t.split_once('=') {
+                if k.trim().eq_ignore_ascii_case(key) {
+                    return Some(v.trim().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 在 [global] 段内更新/插入/删除若干参数并写回主配置。
+/// value = Some → 设置；value = None → 删除该行。返回改写后的文本。
+fn apply_global_params(conf: &str, pairs: &[(&str, Option<String>)]) -> String {
+    let matches = |lhs: &str| pairs.iter().find(|(k, _)| lhs.trim().eq_ignore_ascii_case(k));
+    let mut out: Vec<String> = Vec::new();
+    let mut in_global = false;
+    let mut handled: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    // 离开 [global] 前，把还没出现过的 Some 参数补插进去
+    let flush_missing = |out: &mut Vec<String>, handled: &std::collections::HashSet<&str>| {
+        for (k, v) in pairs {
+            if let Some(val) = v {
+                if !handled.contains(k) {
+                    out.push(format!("   {k} = {val}"));
+                }
+            }
+        }
+    };
+    for line in conf.lines() {
+        let t = line.trim();
+        if t.starts_with('[') && t.ends_with(']') {
+            if in_global {
+                flush_missing(&mut out, &handled);
+            }
+            in_global = t[1..t.len() - 1].trim().eq_ignore_ascii_case("global");
+            out.push(line.to_string());
+            continue;
+        }
+        if in_global {
+            if let Some((lhs, _)) = t.split_once('=') {
+                if let Some((k, v)) = matches(lhs) {
+                    handled.insert(k);
+                    if let Some(val) = v {
+                        out.push(format!("   {k} = {val}"));
+                    }
+                    // None：删除该行（不 push）
+                    continue;
+                }
+            }
+        }
+        out.push(line.to_string());
+    }
+    if in_global {
+        flush_missing(&mut out, &handled);
+    }
+    let mut s = out.join("\n");
+    s.push('\n');
+    s
+}
+
+/// 写入 [global] 参数：testparm 校验失败则回滚，成功后热加载
+pub async fn set_global_params(pairs: &[(&str, Option<String>)]) -> Result<String, String> {
+    for (_, v) in pairs {
+        if let Some(val) = v {
+            if has_control_char(val) {
+                return Err("参数值中不允许控制字符".into());
+            }
+        }
+    }
+    let conf = std::fs::read_to_string(SMB_CONF).map_err(|e| e.to_string())?;
+    let new_conf = apply_global_params(&conf, pairs);
+    std::fs::write(SMB_CONF, &new_conf).map_err(|e| e.to_string())?;
+    let check = Command::new("testparm")
+        .args(["-s", "--suppress-prompt", SMB_CONF])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !check.status.success() {
+        let _ = std::fs::write(SMB_CONF, conf);
+        return Err(format!(
+            "配置校验失败，已回滚: {}",
+            String::from_utf8_lossy(&check.stderr).trim()
+        ));
+    }
+    Ok(reload_smbd().await)
+}
+
 /// 改配置前调用：把当前 smb.conf + 聚合文件 + 全部片段快照到备份目录（单级，覆盖旧备份）。
 /// 尽力而为——失败不阻断编辑，只是届时无备份可还原。
 pub fn backup_config() {

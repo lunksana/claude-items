@@ -393,6 +393,10 @@ struct ConfigUpdateReq {
     listen_addr: String,
     session_ttl_hours: u64,
     guest_map_bad_user: bool,
+    #[serde(default)]
+    smb_min_protocol: String,
+    #[serde(default)]
+    smb_max_protocol: String,
 }
 
 async fn config_get(State(st): State<SharedState>) -> Response {
@@ -401,6 +405,9 @@ async fn config_get(State(st): State<SharedState>) -> Response {
         "listen_addr": cfg.listen_addr,
         "session_ttl_hours": cfg.session_ttl_hours,
         "guest_map_bad_user": cfg.guest_map_bad_user,
+        // SMB 协议版本直接读自 smb.conf [global]（缺省=空=用 Samba 默认）
+        "smb_min_protocol": samba::read_global_param("server min protocol").unwrap_or_default(),
+        "smb_max_protocol": samba::read_global_param("server max protocol").unwrap_or_default(),
         "backup_ts": samba::backup_timestamp(),
     })).into_response()
 }
@@ -412,51 +419,43 @@ async fn config_update(State(st): State<SharedState>, Json(req): Json<ConfigUpda
     if req.listen_addr.trim().is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "监听地址不能为空");
     }
-    let old_guest;
+    // SMB 协议版本校验（空 = 用 Samba 默认，即删除该行）
+    let min_p = req.smb_min_protocol.trim().to_uppercase();
+    let max_p = req.smb_max_protocol.trim().to_uppercase();
+    if !min_p.is_empty() && !samba::valid_protocol(&min_p) {
+        return err_json(StatusCode::BAD_REQUEST, "非法的最小 SMB 协议版本");
+    }
+    if !max_p.is_empty() && !samba::valid_protocol(&max_p) {
+        return err_json(StatusCode::BAD_REQUEST, "非法的最大 SMB 协议版本");
+    }
+
     {
         let mut cfg = st.config.lock().unwrap();
-        old_guest = cfg.guest_map_bad_user;
         cfg.listen_addr = req.listen_addr.trim().to_string();
         cfg.session_ttl_hours = req.session_ttl_hours;
         cfg.guest_map_bad_user = req.guest_map_bad_user;
         save_config(&cfg);
     }
 
-    if old_guest != req.guest_map_bad_user {
-        if let Ok(conf) = std::fs::read_to_string(samba::SMB_CONF) {
-            let mut out = Vec::new();
-            let mut in_global = false;
-            let mut found = false;
-            for line in conf.lines() {
-                let trimmed = line.trim();
-                if trimmed.starts_with('[') && trimmed.ends_with(']') {
-                    in_global = trimmed[1..trimmed.len() - 1].trim().eq_ignore_ascii_case("global");
-                }
-                if in_global && trimmed.to_lowercase().starts_with("map to guest") {
-                    let val = if req.guest_map_bad_user { "Bad User" } else { "Never" };
-                    out.push(format!("   map to guest = {val}"));
-                    found = true;
-                } else {
-                    out.push(line.to_string());
-                }
-            }
-            if !found {
-                let mut out2 = Vec::new();
-                for line in out {
-                    out2.push(line.clone());
-                    let trimmed = line.trim();
-                    if trimmed.starts_with('[') && trimmed.ends_with(']') && trimmed[1..trimmed.len()-1].trim().eq_ignore_ascii_case("global") {
-                        let val = if req.guest_map_bad_user { "Bad User" } else { "Never" };
-                        out2.push(format!("   map to guest = {val}"));
-                    }
-                }
-                out = out2;
-            }
-            samba::backup_config(); // 改动 smb.conf 前快照，供"还原上次配置"
-            let _ = std::fs::write(samba::SMB_CONF, out.join("\n"));
-            let _ = samba::service_action("reload").await;
+    // 期望的 [global] 参数（这些才真正落到 smb.conf）
+    let guard = samba::CONF_LOCK.lock().await;
+    let pairs: Vec<(&str, Option<String>)> = vec![
+        ("map to guest", Some(if req.guest_map_bad_user { "Bad User".into() } else { "Never".into() })),
+        ("server min protocol", (!min_p.is_empty()).then(|| min_p.clone())),
+        ("server max protocol", (!max_p.is_empty()).then(|| max_p.clone())),
+    ];
+    // 仅当 smb.conf 实际会变化时才快照并写入（避免无谓的备份/重载消耗还原点）
+    let norm = |s: Option<String>| s.map(|v| v.trim().to_uppercase()).unwrap_or_default();
+    let changed = pairs.iter().any(|(k, want)| {
+        norm(samba::read_global_param(k)) != norm(want.clone())
+    });
+    if changed {
+        samba::backup_config();
+        if let Err(e) = samba::set_global_params(&pairs).await {
+            return err_json(StatusCode::BAD_REQUEST, &e);
         }
     }
+    drop(guard);
 
     Json(json!({ "ok": true })).into_response()
 }

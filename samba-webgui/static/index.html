@@ -241,6 +241,31 @@
                 </label>
                 <small class="muted">当输入未知用户名或访客免密尝试连接时，Samba 将自动把该连接映射为系统默认访客账号。</small>
               </div>
+
+              <div class="form-group mt-4">
+                <label>SMB 协议版本范围 (server min / max protocol)</label>
+                <div class="grid-2">
+                  <div>
+                    <small class="muted">最低协议版本</small>
+                    <select id="set-smb-min" class="form-control">
+                      <option value="">默认（Samba 默认，禁用 SMB1）</option>
+                      <option value="SMB2">SMB2（Windows 7+ / 现代设备）</option>
+                      <option value="SMB3">SMB3（最安全，Windows 8+）</option>
+                      <option value="NT1">SMB1 / NT1（兼容老设备，不安全 ⚠）</option>
+                    </select>
+                  </div>
+                  <div>
+                    <small class="muted">最高协议版本</small>
+                    <select id="set-smb-max" class="form-control">
+                      <option value="">默认（最新 SMB3）</option>
+                      <option value="SMB3">SMB3</option>
+                      <option value="SMB2">SMB2</option>
+                      <option value="NT1">SMB1 / NT1</option>
+                    </select>
+                  </div>
+                </div>
+                <small class="muted">限制 SMB 协议版本以提升安全性。建议最低设为 SMB2 或 SMB3，仅在需兼容老旧设备（如 XP / 老 NAS）时才启用 SMB1。</small>
+              </div>
             </div>
             <div class="card-footer">
               <button type="button" class="btn outline" id="btn-restore-config-2" title="还原到最近一次修改前的配置">↩ 还原上次配置</button>
