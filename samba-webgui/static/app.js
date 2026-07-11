@@ -1260,8 +1260,14 @@ $("acl-clear")?.addEventListener("click", async () => {
   } catch (err) { toast(err.message, true); }
 });
 
-$("acl-close")?.addEventListener("click", () => $("acl-dialog").close());
-$("acl-close-top")?.addEventListener("click", () => $("acl-dialog").close());
+// 关闭时清空 aclOverride，避免残留覆盖影响后续文件 ACL 操作
+function closeAclDialog() {
+  aclOverride = null;
+  $("acl-dialog").close();
+}
+$("acl-close")?.addEventListener("click", closeAclDialog);
+$("acl-close-top")?.addEventListener("click", closeAclDialog);
+$("acl-dialog")?.addEventListener("close", () => { aclOverride = null; });
 
 // ---------- 快速预览 Quick Look (长按空格超大超清晰体验) ----------
 const TEXT_EXT = /\.(txt|md|markdown|log|json|js|ts|jsx|tsx|rs|py|c|cpp|cc|h|hpp|java|go|rb|php|sh|bash|zsh|yml|yaml|toml|ini|cfg|conf|xml|html|htm|css|scss|csv|sql|dockerfile|makefile|gitignore|env|properties|lua|kt|swift|pl|vim)$/i;

@@ -256,20 +256,23 @@ async fn share_create(Json(mut share): Json<samba::Share>) -> Response {
     managed.push(share.clone());
     samba::backup_config(); // 改动前快照，供"还原上次配置"
     match samba::save_managed(&managed).await {
-        Ok(msg) => Json(json!({ "ok": true, "message": apply_fix_perms(&share, msg).await })).into_response(),
+        Ok(msg) => Json(json!({ "ok": true, "message": apply_perms(&share, msg).await })).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
 
-async fn apply_fix_perms(share: &samba::Share, msg: String) -> String {
-    // 粘滞位需要 chmod 才能生效，故 sticky 也触发权限修正
-    if !share.fix_perms && !share.sticky {
-        return msg;
+async fn apply_perms(share: &samba::Share, mut msg: String) -> String {
+    if share.fix_perms {
+        match samba::fix_share_perms(share).await {
+            Ok(m) => msg = format!("{msg}；{m}"),
+            Err(e) => msg = format!("{msg}；但权限修正失败: {e}"),
+        }
     }
-    match samba::fix_share_perms(share).await {
-        Ok(m) => format!("{msg}；{m}"),
-        Err(e) => format!("{msg}；但权限修正失败: {e}"),
+    // 粘滞位始终按配置同步（+t/-t）：即使未勾选"自动修正权限"，关闭限制删除也能真正清除 +t
+    if let Err(e) = samba::apply_sticky(&share.path, share.sticky).await {
+        msg = format!("{msg}；但粘滞位设置失败: {e}");
     }
+    msg
 }
 
 async fn share_update(AxPath(name): AxPath<String>, Json(mut share): Json<samba::Share>) -> Response {
@@ -290,7 +293,7 @@ async fn share_update(AxPath(name): AxPath<String>, Json(mut share): Json<samba:
     managed[idx] = share.clone();
     samba::backup_config(); // 改动前快照，供"还原上次配置"
     match samba::save_managed(&managed).await {
-        Ok(msg) => Json(json!({ "ok": true, "message": apply_fix_perms(&share, msg).await })).into_response(),
+        Ok(msg) => Json(json!({ "ok": true, "message": apply_perms(&share, msg).await })).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }

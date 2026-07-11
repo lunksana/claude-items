@@ -710,6 +710,23 @@ pub fn check_share_path(path: &str) -> Result<std::path::PathBuf, String> {
     Ok(canon)
 }
 
+/// 同步目录粘滞位（限制删除）：on=加 +t，off=去 -t。始终执行，保证关闭时也能清除。
+pub async fn apply_sticky(path: &str, on: bool) -> Result<(), String> {
+    let canon = check_share_path(path)?;
+    let p = canon.to_string_lossy().to_string();
+    let flag = if on { "+t" } else { "-t" };
+    let out = Command::new("chmod")
+        .args([flag, "--", &p])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("设置粘滞位失败: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
 /// 修正共享目录属主/权限：Samba 层放行后 Unix 层也要可写
 pub async fn fix_share_perms(share: &Share) -> Result<String, String> {
     let canon = check_share_path(&share.path)?;
@@ -734,13 +751,10 @@ pub async fn fix_share_perms(share: &Share) -> Result<String, String> {
         .find(|s| s.starts_with('@'))
         .map(|s| s.trim_start_matches('@').to_string());
 
-    // 基础位 + setgid(0o2000，有协作组) + sticky(0o1000，限制删除)
+    // 基础位 + setgid(0o2000，有协作组)。粘滞位由 apply_sticky 单独同步（含关闭时清除）
     let mut mode_num: u32 = if share.guest_ok && !share.read_only { 0o777 } else { 0o775 };
     if group.is_some() {
         mode_num |= 0o2000;
-    }
-    if share.sticky {
-        mode_num |= 0o1000;
     }
     let mode = format!("{mode_num:o}");
     let out = Command::new("chmod").args([mode.as_str(), "--", &path]).output().await.map_err(|e| e.to_string())?;
