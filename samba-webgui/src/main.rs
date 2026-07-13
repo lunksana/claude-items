@@ -67,41 +67,68 @@ fn verify_password(pw: &str, hash: &str) -> bool {
 }
 
 fn load_or_init_config() -> AppConfig {
-    if let Ok(text) = std::fs::read_to_string(CONFIG_PATH) {
-        if let Ok(mut cfg) = serde_json::from_str::<AppConfig>(&text) {
-            if !cfg.password_hash.is_empty() {
-                if cfg.session_ttl_hours == 0 {
-                    cfg.session_ttl_hours = 24;
+    match std::fs::read_to_string(CONFIG_PATH) {
+        Ok(text) => {
+            if let Ok(mut cfg) = serde_json::from_str::<AppConfig>(&text) {
+                if !cfg.password_hash.is_empty() {
+                    if cfg.session_ttl_hours == 0 {
+                        cfg.session_ttl_hours = 24;
+                    }
+                    return cfg;
                 }
-                return cfg;
+            } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(h) = v.get("password_hash").and_then(|h| h.as_str()) {
+                    if !h.is_empty() {
+                        return AppConfig {
+                            password_hash: h.to_string(),
+                            listen_addr: default_listen(),
+                            session_ttl_hours: default_ttl(),
+                            guest_map_bad_user: false,
+                        };
+                    }
+                }
             }
-        } else if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(h) = v.get("password_hash").and_then(|h| h.as_str()) {
-                return AppConfig {
-                    password_hash: h.to_string(),
-                    listen_addr: default_listen(),
-                    session_ttl_hours: default_ttl(),
-                    guest_map_bad_user: false,
-                };
-            }
+            // 文件存在但无法解析/无有效密码：绝不静默重置为默认密码（否则掉电损坏后留后门）
+            eprintln!("✗ {CONFIG_PATH} 已损坏或缺少有效 password_hash，拒绝启动以免密码被重置为默认。");
+            eprintln!("  请修复该文件，或确认无价值后删除它再重启（删除后会重新生成默认密码）。");
+            std::process::exit(1);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // 文件不存在=首次运行，生成默认
+            let cfg = AppConfig {
+                password_hash: hash_password(DEFAULT_PASSWORD),
+                listen_addr: default_listen(),
+                session_ttl_hours: default_ttl(),
+                guest_map_bad_user: false,
+            };
+            save_config(&cfg);
+            eprintln!("⚠ 已生成默认登录密码: {DEFAULT_PASSWORD}（请登录后立即修改）");
+            cfg
+        }
+        Err(e) => {
+            eprintln!("✗ 无法读取 {CONFIG_PATH}: {e}，拒绝启动");
+            std::process::exit(1);
         }
     }
-    let hash = hash_password(DEFAULT_PASSWORD);
-    let cfg = AppConfig {
-        password_hash: hash,
-        listen_addr: default_listen(),
-        session_ttl_hours: default_ttl(),
-        guest_map_bad_user: false,
-    };
-    let _ = std::fs::create_dir_all("data");
-    let _ = std::fs::write(CONFIG_PATH, serde_json::to_string_pretty(&cfg).unwrap());
-    eprintln!("⚠ 已生成默认登录密码: {DEFAULT_PASSWORD}（请登录后立即修改）");
-    cfg
 }
 
 fn save_config(cfg: &AppConfig) {
+    use std::io::Write;
     let _ = std::fs::create_dir_all("data");
-    let _ = std::fs::write(CONFIG_PATH, serde_json::to_string_pretty(cfg).unwrap());
+    let data = serde_json::to_string_pretty(cfg).unwrap();
+    // 原子写：临时文件 + fsync + rename，避免掉电/满盘把 config.json 截断为半截
+    let tmp = format!("{CONFIG_PATH}.tmp");
+    let ok = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data.as_bytes())?;
+        f.sync_all()
+    })()
+    .is_ok();
+    if ok {
+        let _ = std::fs::rename(&tmp, CONFIG_PATH);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 fn new_token() -> String {

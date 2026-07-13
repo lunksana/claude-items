@@ -362,8 +362,9 @@ pub async fn acl_set(Json(req): Json<AclSetReq>) -> Response {
         "user" => "u",
         "group" => "g",
         "other" => "o",
+        "mask" => "m",
         _ if req.action == "clear" => "u",
-        _ => return err_json(StatusCode::BAD_REQUEST, "tag 必须是 user/group/other"),
+        _ => return err_json(StatusCode::BAD_REQUEST, "tag 必须是 user/group/other/mask"),
     };
     let dflt = if req.default_acl { "d:" } else { "" };
     let mut cmd = tokio::process::Command::new("setfacl");
@@ -438,7 +439,10 @@ pub async fn delete(Json(req): Json<DeleteReq>) -> Response {
     if path == base {
         return err_json(StatusCode::BAD_REQUEST, "不能删除共享根目录");
     }
-    let res = match tokio::fs::metadata(&path).await {
+    // 用 symlink_metadata 不跟随符号链接：symlink 一律按文件删掉链接本身，
+    // 绝不 remove_dir_all 追进被链接的目录
+    let res = match tokio::fs::symlink_metadata(&path).await {
+        Ok(m) if m.file_type().is_symlink() => tokio::fs::remove_file(&path).await,
         Ok(m) if m.is_dir() => tokio::fs::remove_dir_all(&path).await,
         Ok(_) => tokio::fs::remove_file(&path).await,
         Err(e) => return err_json(StatusCode::NOT_FOUND, &format!("不存在: {e}")),
@@ -602,28 +606,46 @@ pub async fn extract_archive(Json(req): Json<ExtractReq>) -> Response {
     let parent = full.parent().unwrap_or(Path::new("/"));
     let path_str = full.to_string_lossy().to_string();
     let lower = path_str.to_lowercase();
-    let mut cmd = if lower.ends_with(".zip") {
+    let is_zip = lower.ends_with(".zip");
+    let is_tar = lower.ends_with(".tar.gz") || lower.ends_with(".tgz")
+        || lower.ends_with(".tar.bz2") || lower.ends_with(".tbz2")
+        || lower.ends_with(".tar.xz") || lower.ends_with(".txz")
+        || lower.ends_with(".tar");
+    if !is_zip && !is_tar {
+        return err_json(StatusCode::BAD_REQUEST, "暂不支持此格式的解压缩包");
+    }
+    // 先列出包内成员，拒绝绝对路径或含 .. 的成员（Zip Slip 目录穿越）
+    let list = if is_zip {
+        tokio::process::Command::new("unzip").args(["-Z1", "--", &path_str]).output().await
+    } else {
+        tokio::process::Command::new("tar").args(["-tf", &path_str]).output().await
+    };
+    match list {
+        Ok(o) if o.status.success() => {
+            for name in String::from_utf8_lossy(&o.stdout).lines() {
+                let n = name.trim();
+                if n.starts_with('/') || n.split('/').any(|c| c == "..") {
+                    return err_json(StatusCode::BAD_REQUEST, &format!("压缩包含越界路径，已拒绝解压: {n}"));
+                }
+            }
+        }
+        Ok(o) => return err_json(StatusCode::BAD_REQUEST, &format!("无法读取压缩包清单: {}", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("解压工具不存在: {e}")),
+    }
+
+    let mut cmd = if is_zip {
         let mut c = tokio::process::Command::new("unzip");
         c.args(["-q", "-o", "--", &path_str]);
         c
-    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
-        let mut c = tokio::process::Command::new("tar");
-        c.args(["-xzf", &path_str]);
-        c
-    } else if lower.ends_with(".tar.bz2") || lower.ends_with(".tbz2") {
-        let mut c = tokio::process::Command::new("tar");
-        c.args(["-xjf", &path_str]);
-        c
-    } else if lower.ends_with(".tar.xz") || lower.ends_with(".txz") {
-        let mut c = tokio::process::Command::new("tar");
-        c.args(["-xJf", &path_str]);
-        c
-    } else if lower.ends_with(".tar") {
-        let mut c = tokio::process::Command::new("tar");
-        c.args(["-xf", &path_str]);
-        c
     } else {
-        return err_json(StatusCode::BAD_REQUEST, "暂不支持此格式的解压缩包");
+        // --no-same-owner/permissions：root 解压时不保留包内 UID/权限，避免属主劫持
+        let flag = if lower.ends_with(".bz2") || lower.ends_with(".tbz2") { "-xjf" }
+            else if lower.ends_with(".xz") || lower.ends_with(".txz") { "-xJf" }
+            else if lower.ends_with(".gz") || lower.ends_with(".tgz") { "-xzf" }
+            else { "-xf" };
+        let mut c = tokio::process::Command::new("tar");
+        c.args(["--no-same-owner", "--no-same-permissions", flag, &path_str]);
+        c
     };
     cmd.current_dir(parent);
     match cmd.output().await {

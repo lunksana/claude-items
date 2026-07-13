@@ -371,6 +371,18 @@ fn has_control_char(s: &str) -> bool {
     s.chars().any(|c| c.is_control())
 }
 
+/// 原子写文件：同目录临时文件 + fsync + rename，读者永远看到完整的旧或新内容
+fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("swgtmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
 /// 写入托管共享文件：testparm 校验失败则回滚，成功后热加载 smbd
 pub async fn save_managed(shares: &[Share]) -> Result<String, String> {
     for s in shares {
@@ -406,10 +418,11 @@ pub async fn save_managed(shares: &[Share]) -> Result<String, String> {
         desired.push((path, render_fragment(s)));
     }
 
-    // 应用：写期望片段 → 删除多余旧片段 → 写聚合文件
+    // 应用：原子写期望片段 → 删除多余旧片段 → 原子写聚合文件
+    // （临时文件+rename，避免并发 testparm 或掉电读到半截配置）
     let apply = || -> std::io::Result<()> {
         for (path, content) in &desired {
-            std::fs::write(path, content)?;
+            atomic_write(path, content)?;
         }
         let keep: std::collections::HashSet<_> = desired.iter().map(|(p, _)| p.clone()).collect();
         for (path, _) in &snap {
@@ -417,7 +430,7 @@ pub async fn save_managed(shares: &[Share]) -> Result<String, String> {
                 let _ = std::fs::remove_file(path);
             }
         }
-        std::fs::write(MANAGED_CONF, &agg)
+        atomic_write(std::path::Path::new(MANAGED_CONF), &agg)
     };
     apply().map_err(|e| e.to_string())?;
 
@@ -501,6 +514,14 @@ fn apply_global_params(conf: &str, pairs: &[(&str, Option<String>)]) -> String {
                 flush_missing(&mut out, &handled);
             }
             in_global = t[1..t.len() - 1].trim().eq_ignore_ascii_case("global");
+            out.push(line.to_string());
+            continue;
+        }
+        // include 行同样是 [global] 的结束边界：否则新补的全局参数会落到 include 之后，
+        // 被 Samba 当成 include 展开的最后一个 share 的局部配置而全局不生效
+        if in_global && t.to_lowercase().starts_with("include") && t.contains('=') {
+            flush_missing(&mut out, &handled);
+            in_global = false;
             out.push(line.to_string());
             continue;
         }
@@ -651,18 +672,19 @@ static SHARE_CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<Share>)>> =
     std::sync::Mutex::new(None);
 
 pub async fn list_all_shares_cached() -> Result<Vec<Share>, String> {
-    if let Some((t, shares)) = SHARE_CACHE.lock().unwrap().as_ref() {
+    // unwrap_or_else(into_inner)：容忍锁中毒，避免某处 panic 后所有文件接口连锁崩溃
+    if let Some((t, shares)) = SHARE_CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         if t.elapsed() < std::time::Duration::from_secs(3) {
             return Ok(shares.clone());
         }
     }
     let shares = list_all_shares().await?;
-    *SHARE_CACHE.lock().unwrap() = Some((std::time::Instant::now(), shares.clone()));
+    *SHARE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), shares.clone()));
     Ok(shares)
 }
 
 fn invalidate_share_cache() {
-    *SHARE_CACHE.lock().unwrap() = None;
+    *SHARE_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// 所有生效共享（含主配置里的），managed 标记区分能否编辑
@@ -734,6 +756,13 @@ pub async fn fix_share_perms(share: &Share) -> Result<String, String> {
     let split = |s: &str| -> Vec<String> {
         s.split(&[',', ' '][..]).map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
     };
+    // Samba 组前缀：@组 / +组 / &组 都是组
+    let group_of = |t: &str| -> Option<String> {
+        t.strip_prefix('@')
+            .or_else(|| t.strip_prefix('+'))
+            .or_else(|| t.strip_prefix('&'))
+            .map(|s| s.to_string())
+    };
     let entries: Vec<String> = split(&share.write_list)
         .into_iter()
         .chain(split(&share.valid_users))
@@ -742,14 +771,11 @@ pub async fn fix_share_perms(share: &Share) -> Result<String, String> {
     // 第一个普通用户作属主
     let owner = entries
         .iter()
-        .find(|s| !s.starts_with('@') && !s.starts_with('+'))
+        .find(|s| group_of(s).is_none())
         .cloned()
         .or_else(|| share.guest_ok.then(|| "nobody".to_string()));
-    // 第一个 @组 作为多用户协作组：设 setgid + 组属主，组内成员协作互通
-    let group = entries
-        .iter()
-        .find(|s| s.starts_with('@'))
-        .map(|s| s.trim_start_matches('@').to_string());
+    // 第一个组作为主协作组：设 setgid + 组属主，组内成员协作互通
+    let group = entries.iter().find_map(|s| group_of(s));
 
     // 基础位 + setgid(0o2000，有协作组)。粘滞位由 apply_sticky 单独同步（含关闭时清除）
     let mut mode_num: u32 = if share.guest_ok && !share.read_only { 0o777 } else { 0o775 };
@@ -785,12 +811,46 @@ pub async fn fix_share_perms(share: &Share) -> Result<String, String> {
             return Err(format!("chown 失败: {}", String::from_utf8_lossy(&out.stderr).trim()));
         }
     }
-    Ok(match &group {
+
+    // 多写入方（多个组/用户）：仅靠单个属组 + setgid 无法让其它组成员在 Unix 层写入，
+    // 用 POSIX ACL 给所有写授权主体打通 rwx（含默认 ACL 继承）。best-effort。
+    let mut writers: Vec<String> = split(&share.write_list);
+    if !share.read_only {
+        writers.extend(split(&share.valid_users));
+    }
+    let read_set: std::collections::HashSet<String> = split(&share.read_list).into_iter().collect();
+    let mut acl_note = 0u32;
+    let mut seen = std::collections::HashSet::new();
+    for w in writers {
+        if read_set.contains(&w) || !seen.insert(w.clone()) {
+            continue; // 只读名单强制 RO；去重
+        }
+        let (spec_prefix, name) = match group_of(&w) {
+            Some(g) => ("g", g),
+            None => ("u", w.clone()),
+        };
+        if !valid_existing_username(&name) {
+            continue;
+        }
+        let acl = format!("{spec_prefix}:{name}:rwx");
+        let dacl = format!("d:{spec_prefix}:{name}:rwx");
+        let out = Command::new("setfacl").args(["-R", "-m", &acl, "-m", &dacl, "--", &path]).output().await;
+        if matches!(&out, Ok(o) if o.status.success()) {
+            acl_note += 1;
+        }
+    }
+
+    let base = match &group {
         Some(g) => format!("目录权限已修正（多用户协作：组 {g} + setgid，权限 {mode}）"),
         None => match &owner {
             Some(o) => format!("目录权限已修正（属主 {o}，权限 {mode}）"),
             None => format!("目录权限已修正（{mode}）"),
         },
+    };
+    Ok(if acl_note > 0 {
+        format!("{base}；已为 {acl_note} 个写授权主体设置 ACL")
+    } else {
+        base
     })
 }
 
@@ -1297,6 +1357,16 @@ pub async fn get_dashboard_status() -> StatusDashboard {
 pub async fn disconnect_client(pid: u32) -> Result<(), String> {
     if pid <= 1 {
         return Err("非法 PID".into());
+    }
+    // 只允许断开真正的 smbd 会话进程：既要在当前活跃连接列表里，
+    // 又要 /proc/<pid>/comm 确认是 smbd，杜绝借接口杀任意系统进程
+    let active = get_dashboard_status().await.connections.iter().any(|c| c.pid == pid);
+    if !active {
+        return Err("目标 PID 不是有效的 Samba 会话".into());
+    }
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+    if comm.trim() != "smbd" {
+        return Err("目标进程不是 smbd，拒绝操作".into());
     }
     let out = Command::new("kill").args(["-9", &pid.to_string()]).output().await.map_err(|e| e.to_string())?;
     if out.status.success() {
