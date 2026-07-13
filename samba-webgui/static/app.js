@@ -319,6 +319,7 @@ async function openShareDialog(share) {
   $("sh-recycle").checked = share?.recycle || false;
   $("sh-fruit").checked = share?.fruit || false;
   $("sh-sticky").checked = share?.sticky || false;
+  if ($("sh-selinux")) $("sh-selinux").value = "samba_share_t"; // 默认推荐类型（不随共享回显）
   $("sh-valid-users").value = share?.valid_users || "";
   $("sh-write-list").value = share?.write_list || "";
   $("sh-read-list").value = share?.read_list || "";
@@ -347,6 +348,7 @@ $("share-form")?.addEventListener("submit", async (e) => {
     recycle: $("sh-recycle").checked,
     fruit: $("sh-fruit").checked,
     sticky: $("sh-sticky").checked,
+    selinux_type: $("sh-selinux")?.value || "samba_share_t",
     valid_users: $("sh-valid-users").value.trim(),
     write_list: $("sh-write-list").value.trim(),
     read_list: $("sh-read-list").value.trim(),

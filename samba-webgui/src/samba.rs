@@ -51,6 +51,14 @@ pub struct Share {
     /// 保存时是否自动修正目录属主/权限使写入生效（仅请求参数，不落盘）
     #[serde(default, skip_serializing)]
     pub fix_perms: bool,
+    /// 修正权限时给目录打的 SELinux 类型（samba_share_t / public_content_t /
+    /// public_content_rw_t / none=不修改）。仅请求参数，SELinux 未启用时无操作
+    #[serde(default = "default_selinux_type", skip_serializing)]
+    pub selinux_type: String,
+}
+
+fn default_selinux_type() -> String {
+    "samba_share_t".to_string()
 }
 
 fn default_true() -> bool {
@@ -173,6 +181,7 @@ fn section_to_share(name: &str, kvs: &[(String, String)], managed: bool) -> Shar
         sticky,
         managed,
         fix_perms: false,
+        selinux_type: default_selinux_type(),
     }
 }
 
@@ -1142,12 +1151,18 @@ pub fn selinux_mode() -> &'static str {
     }
 }
 
-/// 给共享目录打上 Samba 可访问的 SELinux 上下文（samba_share_t）。
-/// SELinux 未启用时直接返回 None（无操作）。优先用 semanage+restorecon 做持久化标签，
-/// 缺 semanage 时退回 chcon（立即生效但重打标签时会丢失）。
-pub async fn apply_selinux_context(path: &str) -> Result<Option<String>, String> {
-    if selinux_mode() == "disabled" {
+/// 支持的 SELinux 类型（Samba 相关）
+pub const VALID_SELINUX_TYPES: &[&str] = &["samba_share_t", "public_content_t", "public_content_rw_t"];
+
+/// 给共享目录打指定的 SELinux 类型。se_type = "none"/"" 或 SELinux 未启用时无操作。
+/// 优先用 semanage+restorecon 持久化，缺 semanage 时退回 chcon（重打标签会丢失）。
+pub async fn apply_selinux_context(path: &str, se_type: &str) -> Result<Option<String>, String> {
+    let se_type = se_type.trim();
+    if se_type.is_empty() || se_type == "none" || selinux_mode() == "disabled" {
         return Ok(None);
+    }
+    if !VALID_SELINUX_TYPES.contains(&se_type) {
+        return Err(format!("不支持的 SELinux 类型: {se_type}"));
     }
     let canon = check_share_path(path)?;
     let p = canon.to_string_lossy().to_string();
@@ -1157,7 +1172,7 @@ pub async fn apply_selinux_context(path: &str) -> Result<Option<String>, String>
     if has_semanage {
         // 已有规则时 -a 会报错，忽略之（restorecon 仍会套用现有/新规则）
         let _ = Command::new("semanage")
-            .args(["fcontext", "-a", "-t", "samba_share_t", &format!("{p}(/.*)?")])
+            .args(["fcontext", "-a", "-t", se_type, &format!("{p}(/.*)?")])
             .output()
             .await;
         let out = Command::new("restorecon")
@@ -1166,19 +1181,19 @@ pub async fn apply_selinux_context(path: &str) -> Result<Option<String>, String>
             .await
             .map_err(|e| e.to_string())?;
         if out.status.success() {
-            return Ok(Some("SELinux 上下文已设为 samba_share_t（持久化）".into()));
+            return Ok(Some(format!("SELinux 上下文已设为 {se_type}（持久化）")));
         }
         // restorecon 失败则继续尝试 chcon
     }
 
     // 退回 chcon（非持久化）
     let out = Command::new("chcon")
-        .args(["-R", "-t", "samba_share_t", "--", &p])
+        .args(["-R", "-t", se_type, "--", &p])
         .output()
         .await
         .map_err(|e| e.to_string())?;
     if out.status.success() {
-        Ok(Some("SELinux 上下文已设为 samba_share_t（chcon，非持久化，建议装 policycoreutils-python-utils）".into()))
+        Ok(Some(format!("SELinux 上下文已设为 {se_type}（chcon，非持久化，建议装 policycoreutils-python-utils）")))
     } else {
         Err(format!("SELinux 上下文设置失败: {}", String::from_utf8_lossy(&out.stderr).trim()))
     }

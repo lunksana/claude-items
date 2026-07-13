@@ -295,7 +295,7 @@ async fn apply_perms(share: &samba::Share, mut msg: String) -> String {
             Err(e) => msg = format!("{msg}；但权限修正失败: {e}"),
         }
         // SELinux 强制模式下，目录需 samba_share_t 上下文 Samba 才能访问；未启用则无操作
-        match samba::apply_selinux_context(&share.path).await {
+        match samba::apply_selinux_context(&share.path, &share.selinux_type).await {
             Ok(Some(m)) => msg = format!("{msg}；{m}"),
             Ok(None) => {}
             Err(e) => msg = format!("{msg}；但 {e}"),

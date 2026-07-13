@@ -16,7 +16,7 @@ Rust 编写的单二进制 Samba Web 管理工具：通过浏览器管理共享�
 | 限制删除 | 共享级"限制删除（粘滞位）"：用户只能删除自己创建的文件（`chmod +t`，从目录 mode 反推回显）。注：per-user"可写不可删"非 Samba 原生能力，粘滞位是标准可行的实现 |
 | ACL 控制 | 文件/目录级 POSIX ACL：按用户/组精细授权 rwx，支持默认 ACL（新建文件继承）与递归应用，Samba 侧 `inherit acls = yes` 保证 SMB 客户端新建文件同样继承 |
 | 全局设置 | 监听地址、会话有效期、访客映射策略、**SMB 协议版本范围**（server min/max protocol，可禁用不安全的 SMB1）；写入前 testparm 校验、失败回滚 |
-| SELinux | 监控大盘显示 SELinux 模式（enforcing/permissive/disabled）；在 enforcing 系统上，勾选"自动修正权限"时会给共享目录打 `samba_share_t` 上下文（优先 `semanage fcontext`+`restorecon` 持久化，缺则退回 `chcon`），否则 SELinux 会拦住 Samba 访问；未启用 SELinux 时全程无操作 |
+| SELinux | 监控大盘显示 SELinux 模式（enforcing/permissive/disabled）；共享对话框可选 **SELinux 上下文类型**（samba_share_t / public_content_rw_t / public_content_t / 不修改），勾选"自动修正权限"时给共享目录打该上下文（优先 `semanage fcontext`+`restorecon` 持久化，缺则退回 `chcon`），否则 SELinux 会拦住 Samba 访问；未启用 SELinux 时全程无操作 |
 | 登录认证 | 管理密码登录（Argon2 哈希），HttpOnly + SameSite=Strict 会话 Cookie（24h），60 秒内失败 5 次全局锁定，可在线改密 |
 
 ## 安全设计

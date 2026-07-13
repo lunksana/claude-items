@@ -373,6 +373,15 @@
           <label class="check"><input type="checkbox" id="sh-sticky"> 🚫 限制删除（粘滞位：仅可删除自己创建的文件）</label>
           <label class="check"><input type="checkbox" id="sh-fix-perms" checked> 🔧 自动修正宿主目录读写权限（若授权了 @用户组，自动设 setgid 实现多用户协作）</label>
         </div>
+        <div class="form-group mt-2">
+          <label for="sh-selinux">🛡️ SELinux 上下文类型 <small class="muted">(仅 SELinux 系统生效，随"自动修正权限"一起应用)</small></label>
+          <select id="sh-selinux" class="form-control">
+            <option value="samba_share_t">samba_share_t（Samba 读写共享，推荐）</option>
+            <option value="public_content_rw_t">public_content_rw_t（多服务读写：Samba+FTP/HTTP）</option>
+            <option value="public_content_t">public_content_t（多服务只读）</option>
+            <option value="none">不修改 SELinux 上下文</option>
+          </select>
+        </div>
       </div>
       <div class="dialog-footer">
         <button type="button" class="btn" id="share-cancel">取消</button>
