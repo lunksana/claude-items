@@ -76,6 +76,10 @@
                 <span><b>NMBD 服务</b> <small class="muted">(NetBIOS 名字解析及网络邻居)</small></span>
                 <span id="badge-nmbd" class="status-pill stopped">获取中...</span>
               </div>
+              <div class="flex justify-between align-center mb-4">
+                <span><b>SELinux</b> <small class="muted">(强制访问控制；新建共享会自动打 samba_share_t 上下文)</small></span>
+                <span id="badge-selinux" class="status-pill">获取中...</span>
+              </div>
               <div class="service-actions flex gap-2 mt-4">
                 <button class="btn success mini" data-action="start">▶ 启动服务</button>
                 <button class="btn mini" data-action="restart">🔄 重启服务</button>

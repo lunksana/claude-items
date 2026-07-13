@@ -165,6 +165,18 @@ async function loadStatus() {
       nmbdBadge.textContent = data.nmbd_active ? "运行中 (Active)" : "未启动 (Stopped)";
       nmbdBadge.className = "status-pill " + (data.nmbd_active ? "active" : "stopped");
     }
+    const seBadge = $("badge-selinux");
+    if (seBadge) {
+      const se = data.selinux || "disabled";
+      const map = {
+        enforcing: ["强制 (Enforcing)", "active"],
+        permissive: ["宽容 (Permissive)", "warn"],
+        disabled: ["未启用 (Disabled)", ""],
+      };
+      const [txt, cls] = map[se] || [se, ""];
+      seBadge.textContent = txt;
+      seBadge.className = "status-pill " + cls;
+    }
 
     const diskBox = $("status-disks-list");
     if (diskBox && data.disks) {

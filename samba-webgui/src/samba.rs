@@ -1067,8 +1067,61 @@ pub struct DiskInfo {
 pub struct StatusDashboard {
     pub smbd_active: bool,
     pub nmbd_active: bool,
+    /// SELinux 模式：disabled / permissive / enforcing
+    pub selinux: String,
     pub connections: Vec<SmbConnection>,
     pub disks: Vec<DiskInfo>,
+}
+
+/// SELinux 当前模式（无需任何工具，直接读内核接口）
+pub fn selinux_mode() -> &'static str {
+    match std::fs::read_to_string("/sys/fs/selinux/enforce") {
+        Ok(s) if s.trim() == "1" => "enforcing",
+        Ok(_) => "permissive",
+        Err(_) => "disabled",
+    }
+}
+
+/// 给共享目录打上 Samba 可访问的 SELinux 上下文（samba_share_t）。
+/// SELinux 未启用时直接返回 None（无操作）。优先用 semanage+restorecon 做持久化标签，
+/// 缺 semanage 时退回 chcon（立即生效但重打标签时会丢失）。
+pub async fn apply_selinux_context(path: &str) -> Result<Option<String>, String> {
+    if selinux_mode() == "disabled" {
+        return Ok(None);
+    }
+    let canon = check_share_path(path)?;
+    let p = canon.to_string_lossy().to_string();
+
+    // 持久化：semanage fcontext 记规则 + restorecon 应用
+    let has_semanage = Command::new("semanage").arg("--help").output().await.is_ok();
+    if has_semanage {
+        // 已有规则时 -a 会报错，忽略之（restorecon 仍会套用现有/新规则）
+        let _ = Command::new("semanage")
+            .args(["fcontext", "-a", "-t", "samba_share_t", &format!("{p}(/.*)?")])
+            .output()
+            .await;
+        let out = Command::new("restorecon")
+            .args(["-R", "-F", "--", &p])
+            .output()
+            .await
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            return Ok(Some("SELinux 上下文已设为 samba_share_t（持久化）".into()));
+        }
+        // restorecon 失败则继续尝试 chcon
+    }
+
+    // 退回 chcon（非持久化）
+    let out = Command::new("chcon")
+        .args(["-R", "-t", "samba_share_t", "--", &p])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(Some("SELinux 上下文已设为 samba_share_t（chcon，非持久化，建议装 policycoreutils-python-utils）".into()))
+    } else {
+        Err(format!("SELinux 上下文设置失败: {}", String::from_utf8_lossy(&out.stderr).trim()))
+    }
 }
 
 pub async fn migrate_share_from_main(name: &str) -> Result<String, String> {
@@ -1235,6 +1288,7 @@ pub async fn get_dashboard_status() -> StatusDashboard {
     StatusDashboard {
         smbd_active,
         nmbd_active,
+        selinux: selinux_mode().to_string(),
         connections,
         disks,
     }

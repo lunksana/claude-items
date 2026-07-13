@@ -290,6 +290,7 @@ td b { color: var(--text); }
 .status-pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .status-pill.active { background: var(--ok-bg); color: var(--ok); }
 .status-pill.stopped { background: var(--danger-bg); color: var(--danger); }
+.status-pill.warn { background: var(--warn-bg); color: var(--warn); }
 
 /* ---------------- 监控大盘 ---------------- */
 .service-actions { flex-wrap: wrap; }
