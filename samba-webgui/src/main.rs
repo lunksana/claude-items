@@ -29,6 +29,9 @@ pub struct AppConfig {
     pub session_ttl_hours: u64,
     #[serde(default)]
     pub guest_map_bad_user: bool,
+    /// 登录后必须修改密码（首次运行生成默认密码时为 true，改密成功后清除）
+    #[serde(default)]
+    pub must_change_password: bool,
 }
 
 fn default_listen() -> String {
@@ -84,6 +87,7 @@ fn load_or_init_config() -> AppConfig {
                             listen_addr: default_listen(),
                             session_ttl_hours: default_ttl(),
                             guest_map_bad_user: false,
+                            must_change_password: false,
                         };
                     }
                 }
@@ -94,15 +98,18 @@ fn load_or_init_config() -> AppConfig {
             std::process::exit(1);
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // 文件不存在=首次运行，生成默认
+            // 文件不存在=首次运行，生成默认（并标记必须改密）
             let cfg = AppConfig {
                 password_hash: hash_password(DEFAULT_PASSWORD),
                 listen_addr: default_listen(),
                 session_ttl_hours: default_ttl(),
                 guest_map_bad_user: false,
+                must_change_password: true,
             };
-            save_config(&cfg);
-            eprintln!("⚠ 已生成默认登录密码: {DEFAULT_PASSWORD}（请登录后立即修改）");
+            if let Err(e) = save_config(&cfg) {
+                eprintln!("⚠ 默认配置写入失败（重启后默认密码将不生效）: {e}");
+            }
+            eprintln!("⚠ 已生成默认登录密码: {DEFAULT_PASSWORD}（登录后必须立即修改）");
             cfg
         }
         Err(e) => {
@@ -112,23 +119,36 @@ fn load_or_init_config() -> AppConfig {
     }
 }
 
-fn save_config(cfg: &AppConfig) {
+/// 原子写配置：临时文件 + fsync + rename。失败返回错误（由调用方决定如何处理），不再静默吞掉
+fn save_config(cfg: &AppConfig) -> std::io::Result<()> {
     use std::io::Write;
-    let _ = std::fs::create_dir_all("data");
+    std::fs::create_dir_all("data")?;
     let data = serde_json::to_string_pretty(cfg).unwrap();
-    // 原子写：临时文件 + fsync + rename，避免掉电/满盘把 config.json 截断为半截
     let tmp = format!("{CONFIG_PATH}.tmp");
-    let ok = (|| -> std::io::Result<()> {
+    {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(data.as_bytes())?;
-        f.sync_all()
-    })()
-    .is_ok();
-    if ok {
-        let _ = std::fs::rename(&tmp, CONFIG_PATH);
-    } else {
-        let _ = std::fs::remove_file(&tmp);
+        f.sync_all()?;
     }
+    std::fs::rename(&tmp, CONFIG_PATH)?;
+    Ok(())
+}
+
+/// 审计日志：JSON Lines 追加写 data/audit.log（与配置同目录），尽力而为、不阻断业务操作
+pub fn audit(event: &str, detail: &str) {
+    static AUDIT_LOCK: Mutex<()> = Mutex::new(());
+    let _g = AUDIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let entry = json!({ "ts": ts, "event": event, "detail": detail });
+    use std::io::Write;
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("data/audit.log")
+        .and_then(|mut f| writeln!(f, "{entry}"));
 }
 
 fn new_token() -> String {
@@ -188,6 +208,7 @@ async fn login(
         }
         if let Some((n, t)) = fails.get(&ip) {
             if *n >= LOGIN_FAIL_LIMIT && t.elapsed() <= LOGIN_LOCKOUT {
+                audit("login_blocked", &format!("ip={ip}, fails={n}"));
                 return err_json(StatusCode::TOO_MANY_REQUESTS, "失败次数过多，请稍后再试");
             }
         }
@@ -202,10 +223,12 @@ async fn login(
             }
             e.0 += 1;
         }
+        audit("login_failed", &format!("ip={ip}"));
         tokio::time::sleep(Duration::from_millis(800)).await;
         return err_json(StatusCode::UNAUTHORIZED, "密码错误");
     }
     st.login_fails.lock().unwrap().remove(&ip);
+    audit("login_ok", &format!("ip={ip}"));
     let tok = new_token();
     // Cookie 有效期与服务器端会话 TTL 保持一致（此前硬编码 24h，TTL>24h 时浏览器仍 24h 掉线）
     let ttl_secs = st.config.lock().unwrap().session_ttl_hours * 3600;
@@ -229,6 +252,7 @@ async fn logout(State(st): State<SharedState>, req: Request) -> Response {
     if let Some(tok) = get_cookie(&req, "sid") {
         st.sessions.lock().unwrap().remove(&tok);
     }
+    audit("logout", "");
     Response::builder()
         .header(header::SET_COOKIE, "sid=; HttpOnly; Path=/; Max-Age=0")
         .header(header::CONTENT_TYPE, "application/json")
@@ -236,8 +260,9 @@ async fn logout(State(st): State<SharedState>, req: Request) -> Response {
         .unwrap()
 }
 
-async fn me() -> Response {
-    Json(json!({ "ok": true })).into_response()
+async fn me(State(st): State<SharedState>) -> Response {
+    let must = st.config.lock().unwrap().must_change_password;
+    Json(json!({ "ok": true, "must_change_password": must })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -255,8 +280,17 @@ async fn change_password(State(st): State<SharedState>, Json(req): Json<ChangePw
         return err_json(StatusCode::UNAUTHORIZED, "原密码错误");
     }
     cfg.password_hash = hash_password(&req.new_password);
-    save_config(&cfg);
-    Json(json!({ "ok": true })).into_response()
+    cfg.must_change_password = false;
+    match save_config(&cfg) {
+        Ok(_) => {
+            audit("password_changed", "WebGUI 管理密码");
+            Json(json!({ "ok": true })).into_response()
+        }
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("配置保存失败，密码可能未持久化（重启后恢复旧密码）: {e}"),
+        ),
+    }
 }
 
 // ---- 共享管理 ----
@@ -285,7 +319,10 @@ async fn share_create(Json(mut share): Json<samba::Share>) -> Response {
     managed.push(share.clone());
     samba::backup_config(); // 改动前快照，供"还原上次配置"
     match samba::save_managed(&managed).await {
-        Ok(msg) => Json(json!({ "ok": true, "message": apply_perms(&share, msg).await })).into_response(),
+        Ok(msg) => {
+            audit("share_create", &format!("name={} path={}", share.name, share.path));
+            Json(json!({ "ok": true, "message": apply_perms(&share, msg).await })).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -328,7 +365,10 @@ async fn share_update(AxPath(name): AxPath<String>, Json(mut share): Json<samba:
     managed[idx] = share.clone();
     samba::backup_config(); // 改动前快照，供"还原上次配置"
     match samba::save_managed(&managed).await {
-        Ok(msg) => Json(json!({ "ok": true, "message": apply_perms(&share, msg).await })).into_response(),
+        Ok(msg) => {
+            audit("share_update", &format!("name={} path={}", share.name, share.path));
+            Json(json!({ "ok": true, "message": apply_perms(&share, msg).await })).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -343,7 +383,10 @@ async fn share_delete(AxPath(name): AxPath<String>) -> Response {
     }
     samba::backup_config(); // 改动前快照，供"还原上次配置"
     match samba::save_managed(&managed).await {
-        Ok(msg) => Json(json!({ "ok": true, "message": msg })).into_response(),
+        Ok(msg) => {
+            audit("share_delete", &format!("name={name}"));
+            Json(json!({ "ok": true, "message": msg })).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -374,13 +417,16 @@ async fn user_create(Json(req): Json<UserCreateReq>) -> Response {
     if !req.groups.is_empty() {
         for g in &req.groups {
             if let Err(e) = samba::create_group(g).await {
+                audit("user_create_warn", &format!("username={} group={g} err={e}", req.username));
                 return Json(json!({ "ok": true, "warn": true, "message": format!("用户已创建，但用户组 {g} 处理失败: {e}") })).into_response();
             }
         }
         if let Err(e) = samba::set_user_groups(&req.username, &req.groups).await {
+            audit("user_create_warn", &format!("username={} groups err={e}", req.username));
             return Json(json!({ "ok": true, "warn": true, "message": format!("用户已创建，但设置用户组失败: {e}") })).into_response();
         }
     }
+    audit("user_create", &format!("username={} groups={:?}", req.username, req.groups));
     Json(json!({ "ok": true })).into_response()
 }
 
@@ -391,7 +437,10 @@ struct GroupCreateReq {
 
 async fn group_create(Json(req): Json<GroupCreateReq>) -> Response {
     match samba::create_group(&req.name).await {
-        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Ok(_) => {
+            audit("group_create", &format!("name={}", req.name));
+            Json(json!({ "ok": true })).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -403,7 +452,10 @@ struct UserPwReq {
 
 async fn user_password(AxPath(name): AxPath<String>, Json(req): Json<UserPwReq>) -> Response {
     match samba::set_user_password(&name, &req.password).await {
-        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Ok(_) => {
+            audit("user_password", &format!("username={name}"));
+            Json(json!({ "ok": true })).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -415,14 +467,20 @@ struct UserEnableReq {
 
 async fn user_enable(AxPath(name): AxPath<String>, Json(req): Json<UserEnableReq>) -> Response {
     match samba::set_user_enabled(&name, req.enabled).await {
-        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Ok(_) => {
+            audit("user_enable", &format!("username={name} enabled={}", req.enabled));
+            Json(json!({ "ok": true })).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
 
 async fn user_delete(AxPath(name): AxPath<String>) -> Response {
     match samba::delete_user(&name).await {
-        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Ok(_) => {
+            audit("user_delete", &format!("username={name}"));
+            Json(json!({ "ok": true })).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -473,7 +531,9 @@ async fn config_update(State(st): State<SharedState>, Json(req): Json<ConfigUpda
         cfg.listen_addr = req.listen_addr.trim().to_string();
         cfg.session_ttl_hours = req.session_ttl_hours;
         cfg.guest_map_bad_user = req.guest_map_bad_user;
-        save_config(&cfg);
+        if let Err(e) = save_config(&cfg) {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("WebGUI 配置保存失败: {e}"));
+        }
     }
 
     // 期望的 [global] 参数（这些才真正落到 smb.conf）
@@ -495,6 +555,7 @@ async fn config_update(State(st): State<SharedState>, Json(req): Json<ConfigUpda
         }
     }
     drop(guard);
+    audit("config_update", &format!("listen={} ttl={}h guest_map={} smb_min={min_p} smb_max={max_p}", req.listen_addr.trim(), req.session_ttl_hours, req.guest_map_bad_user));
 
     Json(json!({ "ok": true })).into_response()
 }
@@ -510,7 +571,10 @@ struct DisconnectReq {
 
 async fn status_disconnect(Json(req): Json<DisconnectReq>) -> Response {
     match samba::disconnect_client(req.pid).await {
-        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Ok(_) => {
+            audit("client_disconnect", &format!("pid={}", req.pid));
+            Json(json!({ "ok": true })).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -522,7 +586,10 @@ struct ServiceReq {
 
 async fn status_service(Json(req): Json<ServiceReq>) -> Response {
     match samba::service_action(&req.action).await {
-        Ok(msg) => Json(json!({ "ok": true, "msg": msg })).into_response(),
+        Ok(msg) => {
+            audit("service_action", &format!("action={}", req.action));
+            Json(json!({ "ok": true, "msg": msg })).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -530,7 +597,10 @@ async fn status_service(Json(req): Json<ServiceReq>) -> Response {
 async fn share_migrate(AxPath(name): AxPath<String>) -> Response {
     // 锁与改动前快照都在 migrate_share_from_main 内部完成（避免对 CONF_LOCK 重复加锁造成死锁）
     match samba::migrate_share_from_main(&name).await {
-        Ok(msg) => Json(json!({ "ok": true, "msg": msg })).into_response(),
+        Ok(msg) => {
+            audit("share_migrate", &format!("name={name}"));
+            Json(json!({ "ok": true, "msg": msg })).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -538,7 +608,10 @@ async fn share_migrate(AxPath(name): AxPath<String>) -> Response {
 async fn config_restore() -> Response {
     let _guard = samba::CONF_LOCK.lock().await;
     match samba::restore_config().await {
-        Ok(msg) => Json(json!({ "ok": true, "message": msg })).into_response(),
+        Ok(msg) => {
+            audit("config_restore", "还原到上次配置备份");
+            Json(json!({ "ok": true, "message": msg })).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -557,7 +630,10 @@ struct UserGroupsReq {
 
 async fn user_groups_update(AxPath(name): AxPath<String>, Json(req): Json<UserGroupsReq>) -> Response {
     match samba::set_user_groups(&name, &req.groups).await {
-        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Ok(_) => {
+            audit("user_groups", &format!("username={name} groups={:?}", req.groups));
+            Json(json!({ "ok": true })).into_response()
+        }
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),
     }
 }
@@ -584,10 +660,16 @@ async fn main() {
         eprintln!("⚠ 未以 root 运行，Samba 配置与用户管理可能失败");
     }
     if let Err(e) = samba::ensure_include() {
-        eprintln!("⚠ 无法接管 smb.conf include: {e}");
+        eprintln!("✗ 无法接管 smb.conf include: {e}，拒绝启动（共享管理功能将不可用）");
+        std::process::exit(1);
     }
 
     let cfg = load_or_init_config();
+    // 数据目录基于当前工作目录；明确打印，避免换目录启动后"静默重置"默认密码
+    let data_dir = std::fs::canonicalize("data")
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "data/".to_string());
+    println!("数据与配置目录: {data_dir}（{CONFIG_PATH}）");
     let listen_str = if let Ok(env_addr) = std::env::var("SWG_LISTEN") {
         env_addr
     } else {

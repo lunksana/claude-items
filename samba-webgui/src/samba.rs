@@ -732,9 +732,10 @@ pub fn check_share_path(path: &str) -> Result<std::path::PathBuf, String> {
     }
     for c in CRITICAL_PATHS {
         let cp = Path::new(c);
-        // 命中关键目录本身，或将关键目录当作共享根（如 /etc）
-        if canon == cp {
-            return Err(format!("禁止将系统关键目录 {c} 设为共享/修改权限"));
+        // "/" 只匹配根本身；其余关键目录按前缀匹配，拦截 /etc、/etc/samba、/var/lib 等子目录
+        let hit = if *c == "/" { canon == cp } else { canon.starts_with(cp) };
+        if hit {
+            return Err(format!("禁止将系统关键目录 {c} 或其子目录设为共享/修改权限"));
         }
     }
     // 额外：不允许共享根直接是这些顶层目录的直接父级混淆

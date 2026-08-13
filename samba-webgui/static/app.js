@@ -118,7 +118,12 @@ $("login-form")?.addEventListener("submit", async (e) => {
   try {
     await api("/api/login", { json: { password: $("login-password").value } });
     $("login-password").value = "";
-    showMain();
+    const me = await api("/api/me");
+    if (me.must_change_password) {
+      openPwDialog(true); // 首次登录：强制修改默认密码后才能进入
+    } else {
+      showMain();
+    }
   } catch (err) {
     if ($("login-error")) $("login-error").textContent = err.message;
   }
@@ -131,12 +136,23 @@ $("btn-logout")?.addEventListener("click", async () => {
 });
 
 // 修改 WebGUI 管理密码
-$("btn-change-pw")?.addEventListener("click", () => {
+let forcedPwChange = false;
+function openPwDialog(force) {
+  forcedPwChange = !!force;
   $("pw-form").reset();
+  if ($("pw-title")) {
+    $("pw-title").textContent = force ? "🔒 首次登录：请先修改默认管理密码" : "🔑 修改 WebGUI 管理密码";
+  }
+  // 强制模式下不允许取消/关闭，防止跳过改密
+  const cancel = $("pw-cancel"), close = $("pw-close");
+  if (cancel) cancel.style.display = force ? "none" : "";
+  if (close) close.style.display = force ? "none" : "";
   $("pw-dialog").showModal();
-});
-$("pw-cancel")?.addEventListener("click", () => $("pw-dialog").close());
-$("pw-close")?.addEventListener("click", () => $("pw-dialog").close());
+}
+$("btn-change-pw")?.addEventListener("click", () => openPwDialog(false));
+$("pw-cancel")?.addEventListener("click", () => { if (!forcedPwChange) $("pw-dialog").close(); });
+$("pw-close")?.addEventListener("click", () => { if (!forcedPwChange) $("pw-dialog").close(); });
+$("pw-dialog")?.addEventListener("cancel", (e) => { if (forcedPwChange) e.preventDefault(); });
 $("pw-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   if ($("pw-new").value !== $("pw-confirm").value) {
@@ -147,7 +163,10 @@ $("pw-form")?.addEventListener("submit", async (e) => {
     await api("/api/password", { json: { old_password: $("pw-old").value, new_password: $("pw-new").value } });
     $("pw-dialog").close();
     $("pw-form").reset();
-    toast("WebGUI 管理后台密码已更新成功");
+    const forced = forcedPwChange;
+    forcedPwChange = false;
+    toast(forced ? "默认密码已修改，请牢记新密码" : "WebGUI 管理后台密码已更新成功");
+    if (forced) showMain();
   } catch (err) { toast(err.message, true); }
 });
 
@@ -894,7 +913,7 @@ async function loadFiles() {
       b.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         const e = curEntries[+b.dataset.rm];
-        if (!confirm(`确定删除项目「${e.name}」吗？${e.is_dir ? "（⚠️ 警告：目录及其下全部子文件均将被递归清除）" : ""}`)) return;
+        if (!confirm(`确定将项目「${e.name}」移入共享回收站(.recycle)吗？${e.is_dir ? "（⚠️ 整个目录及子文件将一并移入，可在回收站中移回）" : "（可在回收站中恢复）"}`)) return;
         try {
           await api("/api/files/delete", { json: { share: curShare, path: joinPath(curPath, e.name) } });
           toast("项目已成功彻底删除"); loadFiles();
@@ -1390,8 +1409,12 @@ document.addEventListener("keyup", (ev) => {
 // ---------- 系统启动 ----------
 (async () => {
   try {
-    await api("/api/me");
-    showMain();
+    const me = await api("/api/me");
+    if (me.must_change_password) {
+      openPwDialog(true); // 会话有效但仍是默认密码：强制改密
+    } else {
+      showMain();
+    }
   } catch (_) {
     showLogin();
   }

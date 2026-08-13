@@ -150,7 +150,7 @@ pub async fn list(Query(q): Query<FsQuery>) -> Response {
     Json(json!({ "entries": entries })).into_response()
 }
 
-pub async fn download(Query(q): Query<FsQuery>) -> Response {
+pub async fn download(Query(q): Query<FsQuery>, headers: axum::http::HeaderMap) -> Response {
     let (_, path) = match resolve(&q.share, &q.path).await {
         Ok(v) => v,
         Err(e) => return err_json(StatusCode::BAD_REQUEST, &e),
@@ -172,16 +172,57 @@ pub async fn download(Query(q): Query<FsQuery>) -> Response {
         if inline { "inline" } else { "attachment" },
         utf8_percent_encode(&filename, NON_ALPHANUMERIC)
     );
+    let size = meta.len();
+
+    // 解析 Range（bytes=start-end / bytes=start- / bytes=-suffix），支持断点续传
+    use axum::http::header::{ACCEPT_RANGES, CONTENT_RANGE};
+    let (status, start, content_len, range_hdr) =
+        if let Some(spec) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()).and_then(|r| r.trim().strip_prefix("bytes=")) {
+            let (s, e) = spec.split_once('-').unwrap_or((spec, ""));
+            let s0 = s.trim().parse::<u64>().ok();
+            let e0 = e.trim().parse::<u64>().ok();
+            let (st, en) = match (s0, e0) {
+                (Some(a), Some(b)) => (a, b.min(size.saturating_sub(1))),
+                (Some(a), None) => (a, size.saturating_sub(1)),
+                (None, Some(n)) => (size.saturating_sub(n.min(size)), size.saturating_sub(1)),
+                (None, None) => (0, size.saturating_sub(1)),
+            };
+            if size == 0 || st >= size || st > en {
+                return Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(CONTENT_RANGE, format!("bytes */{size}"))
+                    .body(Body::empty())
+                    .unwrap();
+            }
+            (StatusCode::PARTIAL_CONTENT, st, en - st + 1, Some(format!("bytes {st}-{en}/{size}")))
+        } else {
+            (StatusCode::OK, 0, size, None)
+        };
+
     let mut resp = Response::builder()
+        .status(status)
         .header(header::CONTENT_TYPE, mime.as_ref())
-        .header(header::CONTENT_LENGTH, meta.len())
+        .header(header::CONTENT_LENGTH, content_len)
         .header(header::CONTENT_DISPOSITION, disp)
-        .header("X-Content-Type-Options", "nosniff");
+        .header("X-Content-Type-Options", "nosniff")
+        .header(ACCEPT_RANGES, "bytes");
+    if let Some(cr) = range_hdr {
+        resp = resp.header(CONTENT_RANGE, cr);
+    }
     if inline {
         // 预览的 html/svg 等可能含脚本：sandbox 剥离同源与脚本执行
         resp = resp.header("Content-Security-Policy", "sandbox");
     }
-    resp.body(Body::from_stream(ReaderStream::new(file))).unwrap()
+    if start > 0 {
+        use tokio::io::AsyncSeekExt;
+        let mut f = file;
+        if let Err(e) = f.seek(std::io::SeekFrom::Start(start)).await {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("seek 失败: {e}"));
+        }
+        resp.body(Body::from_stream(ReaderStream::new(f))).unwrap()
+    } else {
+        resp.body(Body::from_stream(ReaderStream::new(file))).unwrap()
+    }
 }
 
 pub async fn upload(
@@ -439,17 +480,33 @@ pub async fn delete(Json(req): Json<DeleteReq>) -> Response {
     if path == base {
         return err_json(StatusCode::BAD_REQUEST, "不能删除共享根目录");
     }
-    // 用 symlink_metadata 不跟随符号链接：symlink 一律按文件删掉链接本身，
-    // 绝不 remove_dir_all 追进被链接的目录
-    let res = match tokio::fs::symlink_metadata(&path).await {
-        Ok(m) if m.file_type().is_symlink() => tokio::fs::remove_file(&path).await,
-        Ok(m) if m.is_dir() => tokio::fs::remove_dir_all(&path).await,
-        Ok(_) => tokio::fs::remove_file(&path).await,
-        Err(e) => return err_json(StatusCode::NOT_FOUND, &format!("不存在: {e}")),
+    // 删除 = 移入共享根下 .recycle/<时间戳>/<相对路径>，可在文件管理器中手动移回恢复；
+    // rename 移动符号链接时只移动链接本身（不追进链接目标），目录整棵移动而非递归删除
+    let rel = match path.strip_prefix(&base) {
+        Ok(r) if !r.as_os_str().is_empty() => r.to_path_buf(),
+        _ => return err_json(StatusCode::BAD_REQUEST, "路径解析失败"),
     };
-    match res {
-        Ok(_) => Json(json!({ "ok": true })).into_response(),
-        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("删除失败: {e}")),
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let recycle_dir = base.join(".recycle").join(ts.to_string());
+    let mut dest = recycle_dir.join(&rel);
+    if dest.exists() {
+        // 同秒重复删除同名项目：加随机后缀避免覆盖
+        dest = recycle_dir.join(format!("{ts}-{}", rand_suffix())).join(&rel);
+    }
+    if let Some(p) = dest.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(p).await {
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("创建回收站目录失败: {e}"));
+        }
+    }
+    match tokio::fs::rename(&path, &dest).await {
+        Ok(_) => {
+            crate::audit("files_delete", &format!("share={} path={} → .recycle", req.share, req.path));
+            Json(json!({ "ok": true, "message": "已移入共享回收站 .recycle（可在文件管理器中找到并移回）" })).into_response()
+        }
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("移入回收站失败: {e}")),
     }
 }
 
@@ -606,6 +663,13 @@ pub struct ExtractReq {
     pub path: String,
 }
 
+/// 检查链接目标是否越界：绝对路径或含 .. 组件的目标一律拒绝
+/// （软链接/硬链接目标越界会让解压产物指向共享外，之后可经下载读到任意文件）
+fn link_target_unsafe(target: &str) -> bool {
+    let t = target.trim();
+    t.starts_with('/') || t.split('/').any(|c| c == "..")
+}
+
 pub async fn extract_archive(Json(req): Json<ExtractReq>) -> Response {
     let (_, full) = match resolve(&req.share, &req.path).await {
         Ok(v) => v,
@@ -641,6 +705,31 @@ pub async fn extract_archive(Json(req): Json<ExtractReq>) -> Response {
         Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("解压工具不存在: {e}")),
     }
 
+    // 再查符号链接/硬链接目标（tar 详细清单的 " -> target" / " link to target"，
+    // unzip 详细清单对 Unix symlink 条目同样显示 " -> target"）
+    let linklist = if is_zip {
+        tokio::process::Command::new("unzip").args(["-Z", "-v", "--", &path_str]).output().await
+    } else {
+        tokio::process::Command::new("tar").args(["-tvvf", "--", &path_str]).output().await
+    };
+    match linklist {
+        Ok(o) if o.status.success() => {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                let target = line
+                    .rfind(" -> ")
+                    .map(|i| &line[i + 4..])
+                    .or_else(|| line.rfind(" link to ").map(|i| &line[i + 9..]));
+                if let Some(t) = target {
+                    if link_target_unsafe(t) {
+                        return err_json(StatusCode::BAD_REQUEST, &format!("压缩包含越界链接目标，已拒绝解压: {}", t.trim()));
+                    }
+                }
+            }
+        }
+        Ok(o) => return err_json(StatusCode::BAD_REQUEST, &format!("无法读取压缩包链接清单: {}", String::from_utf8_lossy(&o.stderr).trim())),
+        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("解压工具不存在: {e}")),
+    }
+
     let mut cmd = if is_zip {
         let mut c = tokio::process::Command::new("unzip");
         c.args(["-q", "-o", "--", &path_str]);
@@ -657,7 +746,10 @@ pub async fn extract_archive(Json(req): Json<ExtractReq>) -> Response {
     };
     cmd.current_dir(parent);
     match cmd.output().await {
-        Ok(o) if o.status.success() => Json(json!({ "ok": true })).into_response(),
+        Ok(o) if o.status.success() => {
+            crate::audit("files_extract", &format!("share={} path={}", req.share, req.path));
+            Json(json!({ "ok": true })).into_response()
+        }
         Ok(o) => err_json(StatusCode::BAD_REQUEST, &format!("解压错误: {}", String::from_utf8_lossy(&o.stderr).trim())),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("解压工具不存在或执行失败: {e}")),
     }
@@ -692,7 +784,10 @@ pub async fn create_archive(Json(req): Json<ArchiveReq>) -> Response {
     let mut cmd = tokio::process::Command::new("tar");
     cmd.args(&args).current_dir(&dir);
     match cmd.output().await {
-        Ok(o) if o.status.success() => Json(json!({ "ok": true })).into_response(),
+        Ok(o) if o.status.success() => {
+            crate::audit("files_archive", &format!("share={} path={} name={}", req.share, req.path, arch_name));
+            Json(json!({ "ok": true })).into_response()
+        }
         Ok(o) => err_json(StatusCode::BAD_REQUEST, &format!("打包错误: {}", String::from_utf8_lossy(&o.stderr).trim())),
         Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("执行 tar 失败: {e}")),
     }
