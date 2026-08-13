@@ -2,6 +2,10 @@
 target/
 dist/
 
+# 运行时数据（用户环境生成，勿上传；模板见 data/config.example.json）
+data/config.json
+data/audit.log
+
 # 系统
 .DS_Store
 Thumbs.db

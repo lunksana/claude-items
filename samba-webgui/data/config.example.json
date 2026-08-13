@@ -1,0 +1,8 @@
+{
+  "_note": "配置文件模板：首次运行会在运行目录自动生成 data/config.json（含随机密码哈希与默认 admin123 密码，需登录后强制修改）。password_hash 留空时复制本文件为 data/config.json 会被拒绝启动，请直接删除 data/config.json 让程序重新生成，或填入用 argon2 工具生成的哈希。",
+  "password_hash": "",
+  "listen_addr": "0.0.0.0:8686",
+  "session_ttl_hours": 24,
+  "guest_map_bad_user": false,
+  "must_change_password": true
+}
