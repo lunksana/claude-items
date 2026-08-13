@@ -207,8 +207,10 @@ async fn login(
     }
     st.login_fails.lock().unwrap().remove(&ip);
     let tok = new_token();
+    // Cookie 有效期与服务器端会话 TTL 保持一致（此前硬编码 24h，TTL>24h 时浏览器仍 24h 掉线）
+    let ttl_secs = st.config.lock().unwrap().session_ttl_hours * 3600;
     {
-        let ttl = Duration::from_secs(st.config.lock().unwrap().session_ttl_hours * 3600);
+        let ttl = Duration::from_secs(ttl_secs);
         let mut sessions = st.sessions.lock().unwrap();
         sessions.retain(|_, exp| exp.elapsed() < ttl);
         sessions.insert(tok.clone(), Instant::now());
@@ -216,7 +218,7 @@ async fn login(
     Response::builder()
         .header(
             header::SET_COOKIE,
-            format!("sid={tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400"),
+            format!("sid={tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age={ttl_secs}"),
         )
         .header(header::CONTENT_TYPE, "application/json")
         .body(json!({ "ok": true }).to_string().into())
@@ -526,8 +528,7 @@ async fn status_service(Json(req): Json<ServiceReq>) -> Response {
 }
 
 async fn share_migrate(AxPath(name): AxPath<String>) -> Response {
-    let _guard = samba::CONF_LOCK.lock().await;
-    samba::backup_config(); // 接管会改 smb.conf + 片段，改动前快照
+    // 锁与改动前快照都在 migrate_share_from_main 内部完成（避免对 CONF_LOCK 重复加锁造成死锁）
     match samba::migrate_share_from_main(&name).await {
         Ok(msg) => Json(json!({ "ok": true, "msg": msg })).into_response(),
         Err(e) => err_json(StatusCode::BAD_REQUEST, &e),

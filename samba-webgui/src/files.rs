@@ -540,6 +540,10 @@ pub async fn copy_file(Json(req): Json<CopyMoveReq>) -> Response {
     if src == dst {
         return err_json(StatusCode::BAD_REQUEST, "源和目标路径相同");
     }
+    // 目标若已是符号链接，cp 会穿透写入链接指向的文件（可越出共享），必须拒绝
+    if tokio::fs::symlink_metadata(&dst).await.map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        return err_json(StatusCode::BAD_REQUEST, "目标位置已存在同名符号链接，已拒绝复制");
+    }
     let out = tokio::process::Command::new("cp")
         .args(["-a", "--", src.to_str().unwrap_or(""), dst.to_str().unwrap_or("")])
         .output()
@@ -573,6 +577,10 @@ pub async fn move_file(Json(req): Json<CopyMoveReq>) -> Response {
     }
     if tokio::fs::rename(&src, &dst).await.is_ok() {
         return Json(json!({ "ok": true })).into_response();
+    }
+    // rename 失败走 cp 回退：目标若已是符号链接，cp 会穿透写入链接指向的文件，必须拒绝
+    if tokio::fs::symlink_metadata(&dst).await.map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        return err_json(StatusCode::BAD_REQUEST, "目标位置已存在同名符号链接，已拒绝移动");
     }
     let out = tokio::process::Command::new("cp")
         .args(["-a", "--", src.to_str().unwrap_or(""), dst.to_str().unwrap_or("")])

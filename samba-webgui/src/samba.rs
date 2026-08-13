@@ -1201,6 +1201,7 @@ pub async fn apply_selinux_context(path: &str, se_type: &str) -> Result<Option<S
 
 pub async fn migrate_share_from_main(name: &str) -> Result<String, String> {
     let _guard = CONF_LOCK.lock().await;
+    backup_config(); // 接管会改 smb.conf + 片段，改动前快照（锁内执行，避免并发改配置时快照到中间态）
     let shares = list_all_shares().await?;
     let target = shares
         .iter()
