@@ -1,0 +1,13 @@
+# 构建产物
+native/**/target/
+android/app/src/main/jniLibs/
+android/app/build/
+android/build/
+android/.gradle/
+.build/
+*.apk
+
+# IDE
+.idea/
+*.iml
+.DS_Store

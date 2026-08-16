@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- meow 风格 Material3 主题: 品牌蓝主色, 天蓝背景, 白卡片 -->
+    <style name="Theme.Mirage" parent="Theme.Material3.DayNight">
+        <item name="colorPrimary">@color/meow_blue</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">@color/meow_ginger</item>
+        <item name="android:colorBackground">@color/meow_canvas</item>
+        <item name="colorSurface">@color/meow_card</item>
+        <item name="android:windowBackground">@color/meow_canvas</item>
+        <item name="android:textColor">@color/meow_ink</item>
+        <item name="android:statusBarColor">@color/meow_canvas</item>
+
+        <!-- 卡片: 圆角 8 + 边框 (对齐 meow CardTheme) -->
+        <item name="materialCardViewStyle">@style/MirageCard</item>
+
+        <!-- 按钮: 圆角 8 填充 -->
+        <item name="materialButtonStyle">@style/MirageButton</item>
+        <item name="android:buttonStyle">@style/MirageButton</item>
+
+        <!-- 输入框: 填充背景 + 圆角 8 -->
+        <item name="android:editTextStyle">@style/MirageEditText</item>
+    </style>
+
+    <style name="MirageCard" parent="Widget.MaterialComponents.CardView">
+        <item name="cardCornerRadius">8dp</item>
+        <item name="cardElevation">0dp</item>
+        <item name="strokeColor">@color/meow_outline</item>
+        <item name="strokeWidth">1dp</item>
+    </style>
+
+    <style name="MirageButton" parent="Widget.Material3.Button">
+        <item name="cornerRadius">8dp</item>
+        <item name="android:textColor">#FFFFFF</item>
+        <item name="backgroundTint">@color/meow_blue</item>
+    </style>
+
+    <style name="MirageEditText" parent="Widget.AppCompat.EditText" />
+
+    <!-- 底部导航选中指示 (meow: 淡蓝胶囊) -->
+    <style name="MirageNavIndicator" parent="Widget.Material3.BottomNavigationView.ActiveIndicator">
+        <item name="android:color">@color/meow_outline</item>
+    </style>
+</resources>

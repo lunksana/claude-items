@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="分流规则"
+        android:textSize="20sp"
+        android:textStyle="bold" />
+
+    <!-- 内置规则: 按钮展开查看 (geo 数据: 中国 IP 段 + 国内域名) -->
+    <Button
+        android:id="@+id/builtinToggleBtn"
+        style="@style/MirageButton"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="查看内置规则 (GeoIP CN / GeoSite CN)" />
+
+    <LinearLayout
+        android:id="@+id/builtinContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <LinearLayout
+            android:id="@+id/ruleList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+    </ScrollView>
+
+    <Button
+        android:id="@+id/addRuleBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="添加规则" />
+
+    <Button
+        android:id="@+id/defaultActionBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="默认策略" />
+
+    <Button
+        android:id="@+id/applyRulesBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="应用规则" />
+</LinearLayout>

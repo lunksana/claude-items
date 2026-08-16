@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- meow 品牌色 (源自 meow 窥视猫图标: 天蓝/白边/姜黄猫) -->
+    <color name="meow_blue">#0077CC</color>          <!-- brandAccent 主色 -->
+    <color name="meow_ginger">#FE9B01</color>        <!-- brandGinger 次色 -->
+    <color name="meow_navy">#0049B8</color>
+    <color name="meow_ink">#102A43</color>           <!-- 文字 -->
+    <color name="meow_canvas">#EAF8FF</color>        <!-- 背景: 淡蓝 -->
+    <color name="meow_card">#FFFFFF</color>          <!-- 卡片 -->
+    <color name="meow_connected">#148742</color>     <!-- 已连接绿 -->
+    <color name="meow_upload">#F29A00</color>        <!-- 上传: 琥珀 -->
+    <color name="meow_download">#0077CC</color>      <!-- 下载: 品牌蓝 -->
+    <color name="meow_outline">#A8D8F0</color>       <!-- 卡片边框 -->
+    <color name="meow_disconnected">#8FA3B0</color>  <!-- 未连接灰 -->
+</resources>

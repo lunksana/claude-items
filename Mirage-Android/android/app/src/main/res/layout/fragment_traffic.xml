@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:id="@+id/upRate"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="↑ 0 B/s"
+        android:textColor="#10B981"
+        android:textSize="36sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/downRate"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="↓ 0 B/s"
+        android:textColor="#3B82F6"
+        android:textSize="36sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/totalUp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="累计上行: 0 B"
+        android:textSize="13sp" />
+
+    <TextView
+        android:id="@+id/totalDown"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="累计下行: 0 B"
+        android:textSize="13sp" />
+
+    <TextView
+        android:id="@+id/conns"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="活跃连接: TCP 0 / UDP 0"
+        android:textSize="13sp" />
+
+    <TextView
+        android:id="@+id/dnsCount"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="DNS 查询: 0"
+        android:textSize="13sp" />
+
+    <com.mirage.android.TrafficChart
+        android:id="@+id/chart"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="12dp"
+        android:background="#11000000" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="最近 60 秒速率 (绿=上行, 蓝=下行)"
+        android:textSize="11sp" />
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="日志"
+        android:textSize="15sp"
+        android:textStyle="bold" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1.2"
+        android:layout_marginTop="4dp">
+
+        <TextView
+            android:id="@+id/trafficLogView"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@color/meow_card"
+            android:fontFamily="monospace"
+            android:padding="8dp"
+            android:textSize="11sp"
+            android:typeface="monospace" />
+    </ScrollView>
+</LinearLayout>

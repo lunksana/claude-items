@@ -1,0 +1,19 @@
+[package]
+name = "mirage-jni"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Mirage-Android 的 Android JNI 包装层 (cdylib): 控制 mirage-core 的 TUN 引擎"
+
+[lib]
+name = "mirage_jni"
+crate-type = ["cdylib"]
+
+[dependencies]
+mirage-core = { path = "../mirage-core" }
+jni = "0.21.1"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+libc = "0.2.186"
+anyhow = "1.0.102"
