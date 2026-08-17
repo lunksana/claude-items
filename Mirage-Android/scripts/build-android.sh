@@ -28,6 +28,7 @@ build_native() {
     rm -rf "$out"; mkdir -p "$out"
 
     cd "$HERE/native/mirage-jni"
+    export RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
     # 用宿主 rustup + NDK 直接构建 (等效 cargo-ndk)
     for target in aarch64-linux-android x86_64-linux-android; do
         local abi
@@ -35,7 +36,7 @@ build_native() {
             aarch64*) abi="arm64-v8a" ;;
             x86_64*) abi="x86_64" ;;
         esac
-        echo "  -- $target ($abi)"
+        echo "  -- $target ($abi) [16KB Page Aligned]"
         cargo build --release --target "$target" --lib
         mkdir -p "$out/$abi"
         cp "$HERE/native/mirage-jni/target/$target/release/libmirage_jni.so" "$out/$abi/"
