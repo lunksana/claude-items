@@ -41,7 +41,11 @@ class HomeFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
-        binding.tvVersion.text = "v${com.mirage.android.BuildConfig.VERSION_NAME}"
+        updateVersionBadge()
+
+        binding.tvVersion.setOnClickListener {
+            (activity as? MainActivity)?.showCoreManagerDialog()
+        }
 
         binding.connectSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked && !viewModel.vpnState.value.isRunning) {
@@ -155,6 +159,13 @@ class HomeFragment : Fragment() {
                 binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_blue))
             }
         }
+    }
+
+    fun updateVersionBadge() {
+        val ctx = context ?: return
+        val activeCore = com.mirage.android.core.CoreManager.getInstance(ctx).getActiveCore()
+        val coreTag = if (activeCore.isBuiltin) "内置" else "自定义"
+        _binding?.tvVersion?.text = "v${com.mirage.android.BuildConfig.VERSION_NAME} · $coreTag"
     }
 
     override fun onDestroyView() {

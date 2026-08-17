@@ -2,11 +2,14 @@ package com.mirage.android.core
 
 /**
  * mirage-core 的 JNI 接口 (对应 native/mirage-jni)。
- * Kotlin 侧只做: 传 TUN fd + 节点 URI、取状态/日志、drain protect 队列。
+ * 库由 NativeLoader 动态加载。
  */
 object MirageNative {
     init {
-        System.loadLibrary("mirage_jni")
+        // 如果外部尚未通过 NativeLoader.load() 加载，则尝试默认载入内置库
+        if (!NativeLoader.isLoaded()) {
+            runCatching { System.loadLibrary("mirage_jni") }
+        }
     }
 
     /** 启动 TUN 引擎。返回 0 = 成功, 负数 = 错误码。uri 形如 mirage://密码@host:端口?sni=... */

@@ -2,6 +2,7 @@ package com.mirage.android
 
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
 import android.net.VpnService
 import android.os.Bundle
 import android.widget.Toast
@@ -11,9 +12,11 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
 import androidx.viewpager2.adapter.FragmentStateAdapter
 import androidx.viewpager2.widget.ViewPager2
+import com.mirage.android.core.NativeLoader
 import com.mirage.android.data.model.Node
 import com.mirage.android.data.repository.NodeRepository
 import com.mirage.android.databinding.ActivityMainBinding
+import com.mirage.android.ui.CoreManagerDialog
 import com.mirage.android.ui.HomeFragment
 import com.mirage.android.ui.NodesFragment
 import com.mirage.android.ui.RulesFragment
@@ -28,6 +31,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val homeViewModel: HomeViewModel by viewModels()
 
+    private var coreManagerDialog: CoreManagerDialog? = null
+
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -38,10 +43,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val pickSoLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            coreManagerDialog?.handleImportUri(uri)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        // 确保内核库已初始化
+        NativeLoader.load(this)
 
         handleIncomingUri(intent)
 
@@ -105,6 +121,22 @@ class MainActivity : AppCompatActivity() {
         if (tabIndex in 0..3) {
             binding.viewPager.setCurrentItem(tabIndex, false)
         }
+    }
+
+    fun showCoreManagerDialog() {
+        coreManagerDialog = CoreManagerDialog(
+            context = this,
+            onPickSoFile = {
+                // 打开文件选择器选择 .so 文件或任意二进制
+                pickSoLauncher.launch("*/*")
+            },
+            onCoreChanged = {
+                // 刷新首页内核显示
+                val homeFragment = supportFragmentManager.findFragmentByTag("f0") as? HomeFragment
+                homeFragment?.updateVersionBadge()
+            }
+        )
+        coreManagerDialog?.show()
     }
 
     private fun handleIncomingUri(intent: Intent?) {

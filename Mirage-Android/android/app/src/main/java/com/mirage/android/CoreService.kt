@@ -13,6 +13,7 @@ import com.mirage.android.core.ICoreCallback
 import com.mirage.android.core.ICoreService
 import com.mirage.android.core.LogStore
 import com.mirage.android.core.MirageNative
+import com.mirage.android.core.NativeLoader
 import com.mirage.android.core.NodeStore
 import com.mirage.android.core.RuleStore
 import kotlinx.coroutines.*
@@ -43,6 +44,8 @@ class CoreService : VpnService() {
         }
         // startForegroundService 启动: 5 秒内必须 startForeground, 否则系统杀服务/崩溃
         startForegroundCompat()
+        // 加载选中的内核 (自定义或内置)
+        NativeLoader.load(this)
         val uri = intent?.getStringExtra("uri")
         val poolSize = intent?.getIntExtra("pool_size", -1) ?: -1
         // 直接驱动启动 (建 TUN + 内核), 不依赖 UI 后续 AIDL 调用
