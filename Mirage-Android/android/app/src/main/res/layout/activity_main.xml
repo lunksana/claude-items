@@ -28,12 +28,17 @@
         <com.google.android.material.bottomnavigation.BottomNavigationView
             android:id="@+id/bottomNav"
             android:layout_width="match_parent"
-            android:layout_height="62dp"
+            android:layout_height="64dp"
             android:background="@android:color/transparent"
             app:elevation="0dp"
+            app:itemIconSize="22dp"
+            app:itemPaddingTop="8dp"
+            app:itemPaddingBottom="8dp"
             app:itemActiveIndicatorStyle="@style/MirageNavIndicator"
             app:itemIconTint="@color/nav_item_tint"
             app:itemTextColor="@color/nav_item_tint"
+            app:itemTextAppearanceActive="@style/MirageNavTextAppearance"
+            app:itemTextAppearanceInactive="@style/MirageNavTextAppearance"
             app:menu="@menu/bottom_nav"
             app:labelVisibilityMode="labeled" />
     </com.google.android.material.card.MaterialCardView>

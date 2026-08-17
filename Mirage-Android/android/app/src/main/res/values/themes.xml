@@ -52,9 +52,17 @@
         <item name="android:textSize">14sp</item>
     </style>
 
+    <style name="MirageNavTextAppearance" parent="TextAppearance.Material3.LabelSmall">
+        <item name="android:textSize">11sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:includeFontPadding">false</item>
+    </style>
+
     <!-- 底部导航指示胶囊 (Telegram 风格浅蓝胶囊) -->
     <style name="MirageNavIndicator" parent="Widget.Material3.BottomNavigationView.ActiveIndicator">
         <item name="android:color">@color/meow_accent_tint</item>
+        <item name="android:width">48dp</item>
+        <item name="android:height">28dp</item>
         <item name="shapeAppearance">@style/ShapeAppearance.Material3.Corner.Full</item>
     </style>
 </resources>

@@ -15,5 +15,5 @@
     <item
         android:id="@+id/nav_traffic"
         android:icon="@drawable/ic_nav_traffic"
-        android:title="流量与日志" />
+        android:title="监控" />
 </menu>
