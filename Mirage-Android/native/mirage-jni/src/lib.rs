@@ -545,3 +545,27 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_getConnectionsJ
     let json = mirage_core::monitor::get_connections_json();
     env.new_string(json).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
 }
+
+/// `boolean setBlockQuic(boolean block)` — 设置是否全局拦截 QUIC (UDP 443)。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_setBlockQuic(
+    _env: JNIEnv,
+    _class: JClass,
+    block: jboolean,
+) -> jboolean {
+    mirage_core::direct::set_block_quic(block != 0);
+    1
+}
+
+/// `boolean isBlockQuic()` — 查询当前是否开启 QUIC 拦截。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_isBlockQuic(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jboolean {
+    if mirage_core::direct::is_block_quic() {
+        1
+    } else {
+        0
+    }
+}

@@ -22,7 +22,7 @@
             android:layout_weight="1"
             android:text="分流规则"
             android:textColor="@color/meow_ink"
-            android:textSize="24sp"
+            android:textSize="22sp"
             android:textStyle="bold" />
 
         <com.google.android.material.button.MaterialButton
@@ -37,12 +37,59 @@
             app:strokeColor="@color/meow_outline" />
     </LinearLayout>
 
+    <!-- 全局屏蔽 QUIC 开关卡片 (Telegram 风格) -->
+    <com.google.android.material.card.MaterialCardView
+        style="@style/MirageCard"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        app:cardCornerRadius="12dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="14dp"
+            android:paddingVertical="10dp">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="屏蔽 QUIC 协议 (UDP 443)"
+                    android:textColor="@color/meow_ink"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="消除 X/YouTube 握手超时，秒级回退至极速 HTTP/2 TCP 隧道"
+                    android:textColor="@color/meow_ink_secondary"
+                    android:textSize="11sp" />
+            </LinearLayout>
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/switchBlockQuic"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
     <!-- 内置规则折叠卡片 -->
     <com.google.android.material.card.MaterialCardView
         style="@style/MirageCard"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="6dp"
         app:cardCornerRadius="10dp">
 
         <LinearLayout
@@ -76,7 +123,7 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:layout_marginVertical="8dp">
+        android:layout_marginVertical="6dp">
 
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/recyclerRules"
@@ -91,7 +138,7 @@
             android:layout_height="wrap_content"
             android:layout_gravity="center"
             android:text="暂无自定义规则，默认国内直连，其余代理"
-            android:textColor="#94A3B8"
+            android:textColor="@color/meow_ink_secondary"
             android:textSize="14sp"
             android:visibility="gone" />
     </FrameLayout>
@@ -106,7 +153,7 @@
             android:id="@+id/addRuleBtn"
             style="@style/MirageButton"
             android:layout_width="0dp"
-            android:layout_height="48dp"
+            android:layout_height="46dp"
             android:layout_marginEnd="4dp"
             android:layout_weight="1"
             android:text="添加规则"
@@ -117,7 +164,7 @@
             android:id="@+id/applyRulesBtn"
             style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="0dp"
-            android:layout_height="48dp"
+            android:layout_height="46dp"
             android:layout_marginStart="4dp"
             android:layout_weight="1"
             android:text="应用规则"

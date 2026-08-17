@@ -38,6 +38,12 @@ object MirageNative {
     /** 设置自定义分流规则 (JSON: domains_direct/domains_proxy/cidrs_direct/cidrs_proxy)。 */
     external fun setRules(json: String): Boolean
 
+    /** 设置是否全局屏蔽 QUIC (UDP 443)。 */
+    external fun setBlockQuic(block: Boolean): Boolean
+
+    /** 查询当前是否开启 QUIC 屏蔽。 */
+    external fun isBlockQuic(): Boolean
+
     /**
      * 流量统计: [up_total, down_total, up_rate(B/s), down_rate(B/s),
      * tcp_conns, udp_flows, dns_queries]。

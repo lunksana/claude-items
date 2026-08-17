@@ -78,6 +78,15 @@ class RulesFragment : Fragment() {
             Toast.makeText(requireContext(), if (ok) "分流规则已立即生效" else "规则应用失败", Toast.LENGTH_SHORT).show()
         }
 
+        binding.switchBlockQuic.setOnCheckedChangeListener { _, isChecked ->
+            viewModel.setBlockQuic(isChecked)
+            Toast.makeText(
+                requireContext(),
+                if (isChecked) "已开启 QUIC 屏蔽 (促使 HTTP/2 秒级降级)" else "已允许 QUIC 流量",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
         binding.builtinToggleBtn.setOnClickListener {
             isBuiltinExpanded = !isBuiltinExpanded
             binding.builtinContainer.visibility = if (isBuiltinExpanded) View.VISIBLE else View.GONE
@@ -99,6 +108,13 @@ class RulesFragment : Fragment() {
                     viewModel.rules.collect { list ->
                         adapter.submitList(list)
                         binding.tvEmptyRules.visibility = if (list.isEmpty()) View.VISIBLE else View.GONE
+                    }
+                }
+                launch {
+                    viewModel.isBlockQuic.collect { blocked ->
+                        if (binding.switchBlockQuic.isChecked != blocked) {
+                            binding.switchBlockQuic.isChecked = blocked
+                        }
                     }
                 }
                 launch {

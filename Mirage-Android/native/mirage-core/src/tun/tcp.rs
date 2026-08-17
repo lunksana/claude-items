@@ -297,7 +297,7 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
 
     let upload = async {
         let mut up_bytes: u64 = 0;
-        let mut buf = [0u8; 16384];
+        let mut buf = [0u8; 65536];
         loop {
             match tokio::time::timeout(RELAY_IDLE, local_rd.read(&mut buf)).await {
                 Ok(Ok(0)) => {

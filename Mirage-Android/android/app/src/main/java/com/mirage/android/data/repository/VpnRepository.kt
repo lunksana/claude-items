@@ -35,6 +35,10 @@ class VpnRepository(private val context: Context) {
     private val _connections = MutableStateFlow<List<com.mirage.android.data.model.ConnectionInfo>>(emptyList())
     val connections: StateFlow<List<com.mirage.android.data.model.ConnectionInfo>> = _connections.asStateFlow()
 
+    private val prefs = context.getSharedPreferences("mirage_vpn_prefs", Context.MODE_PRIVATE)
+    private val _isBlockQuic = MutableStateFlow(prefs.getBoolean("block_quic", true))
+    val isBlockQuic: StateFlow<Boolean> = _isBlockQuic.asStateFlow()
+
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var telemetryJob: Job? = null
 
@@ -127,6 +131,12 @@ class VpnRepository(private val context: Context) {
             com.mirage.android.data.model.LogLevel.ERROR -> "error"
         }
         return CoreController.setLogLevel(levelStr)
+    }
+
+    fun setBlockQuic(block: Boolean): Boolean {
+        _isBlockQuic.value = block
+        prefs.edit().putBoolean("block_quic", block).apply()
+        return CoreController.setBlockQuic(block)
     }
 
     private fun startTelemetry() {

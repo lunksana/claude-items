@@ -94,6 +94,18 @@ fn direct_ips() -> &'static std::sync::Mutex<std::collections::HashSet<IpAddr>> 
     S.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
+static BLOCK_QUIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// 设置全局是否屏蔽 QUIC (UDP 443) 协议。
+pub fn set_block_quic(block: bool) {
+    BLOCK_QUIC.store(block, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 查询当前是否开启 QUIC 屏蔽。
+pub fn is_block_quic() -> bool {
+    BLOCK_QUIC.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// 标记某 IP 为直连 (DNS 分流调用)。
 pub fn mark_direct_ip(ip: IpAddr) {
     direct_ips().lock().unwrap_or_else(|e| e.into_inner()).insert(ip);

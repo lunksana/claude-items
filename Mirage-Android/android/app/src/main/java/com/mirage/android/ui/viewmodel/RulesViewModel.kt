@@ -9,11 +9,17 @@ import kotlinx.coroutines.flow.StateFlow
 class RulesViewModel(application: Application) : AndroidViewModel(application) {
 
     private val ruleRepo = RuleRepository.getInstance(application)
+    private val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(application)
 
     val rules: StateFlow<List<Rule>> = ruleRepo.rules
     val defaultAction: StateFlow<String> = ruleRepo.defaultAction
     val builtinDomains: StateFlow<List<String>> = ruleRepo.builtinDomains
     val builtinIpCount: StateFlow<Long> = ruleRepo.builtinIpCount
+    val isBlockQuic: StateFlow<Boolean> = vpnRepo.isBlockQuic
+
+    fun setBlockQuic(block: Boolean) {
+        vpnRepo.setBlockQuic(block)
+    }
 
     init {
         ruleRepo.refreshBuiltin()

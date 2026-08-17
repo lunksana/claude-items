@@ -75,6 +75,12 @@ impl UdpEngine {
 
     /// 泵线程调用: 把一个 TUN 数据报送进对应流。无流则建 (超限丢)。
     pub fn feed(&self, stack: Arc<TunStack>, src: SocketAddr, dst: SocketAddr, payload: &[u8]) {
+        // 屏蔽 QUIC (UDP 443): 0ms 即刻丢弃, 促使客户端 Cronet/OkHttp 瞬间降级到 HTTP/2 TCP 隧道
+        if dst.port() == 443 && crate::direct::is_block_quic() {
+            debug!("[TUN-UDP] 全局屏蔽 QUIC: 拦截 {} → {}, 触发即时 HTTP/2 降级", src, dst);
+            return;
+        }
+
         let key = FlowKey { src: src.ip(), src_port: src.port(), dst: dst.ip(), dst_port: dst.port() };
         let mut map = self.flows.lock().unwrap_or_else(|e| e.into_inner());
         GLOBAL_FLOW_COUNT.store(map.len(), std::sync::atomic::Ordering::Relaxed);

@@ -76,6 +76,8 @@ object CoreController {
     fun setNode(uri: String): Boolean = call { it.setNode(uri) } ?: false
     fun setRules(json: String): Boolean = call { it.setRules(json) } ?: false
     fun setLogLevel(level: String): Boolean = call { it.setLogLevel(level) } ?: false
+    fun setBlockQuic(block: Boolean): Boolean = call { it.setBlockQuic(block) } ?: false
+    fun isBlockQuic(): Boolean = call { it.isBlockQuic } ?: true
 
     // ── 状态 ──
     fun isRunning(): Boolean = call { it.isRunning() } ?: false

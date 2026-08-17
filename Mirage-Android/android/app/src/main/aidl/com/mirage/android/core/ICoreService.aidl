@@ -16,6 +16,8 @@ interface ICoreService {
     boolean setRules(String json);
     /** 动态设置日志等级 (trace/debug/info/warn/error)。 */
     boolean setLogLevel(String level);
+    boolean setBlockQuic(boolean block);
+    boolean isBlockQuic();
     boolean isRunning();
     boolean isHealthy();
     long latencyMs();
