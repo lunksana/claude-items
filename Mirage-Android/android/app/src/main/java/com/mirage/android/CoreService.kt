@@ -5,7 +5,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.VpnService
+import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
@@ -202,7 +204,25 @@ class CoreService : VpnService() {
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "断开", stopPi)
             .setOngoing(true)
             .build()
-        startForeground(1, notif)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            }
+            try {
+                startForeground(1, notif, fgsType)
+            } catch (e: Throwable) {
+                try {
+                    startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                } catch (e2: Throwable) {
+                    startForeground(1, notif)
+                }
+            }
+        } else {
+            startForeground(1, notif)
+        }
     }
 
     private fun updateNotif(text: String) {
