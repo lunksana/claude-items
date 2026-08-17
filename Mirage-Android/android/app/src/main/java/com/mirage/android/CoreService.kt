@@ -165,6 +165,7 @@ class CoreService : VpnService() {
     fun isHealthyInternal(): Boolean = MirageNative.isHealthy()
     fun latencyMsInternal(): Long = MirageNative.latencyMs()
     fun getStatsInternal(): DoubleArray = MirageNative.getStats()
+    fun getConnectionsJsonInternal(): String = MirageNative.getConnectionsJson()
     fun recentLogsInternal(): Array<String> =
         (LogStore.all() + MirageNative.recentLogs().toList()).toTypedArray()
     fun getBuiltinDomainsInternal(): Array<String> = MirageNative.getBuiltinDomains()
@@ -290,6 +291,7 @@ class CoreService : VpnService() {
         override fun isHealthy(): Boolean = isHealthyInternal()
         override fun latencyMs(): Long = latencyMsInternal()
         override fun getStats(): DoubleArray = getStatsInternal()
+        override fun getConnectionsJson(): String = getConnectionsJsonInternal()
         override fun recentLogs(): Array<String> = recentLogsInternal()
         override fun getBuiltinDomains(): Array<String> = getBuiltinDomainsInternal()
         override fun getBuiltinIpCount(): Long = getBuiltinIpCountInternal()

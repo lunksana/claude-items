@@ -535,3 +535,13 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_version(
     );
     env.new_string(v).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
 }
+
+/// `String getConnectionsJson()` — 获取最近/活跃连接信息列表 (JSON 字符串)。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_getConnectionsJson(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let json = mirage_core::monitor::get_connections_json();
+    env.new_string(json).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
+}

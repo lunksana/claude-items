@@ -19,6 +19,11 @@ class NodesViewModel(application: Application) : AndroidViewModel(application) {
     val isTestingAll: StateFlow<Boolean> = nodeRepo.isTestingAll
     val testMethod: StateFlow<String> = nodeRepo.testMethod
     val isAutoSelect: StateFlow<Boolean> = nodeRepo.isAutoSelect
+    val poolSize: StateFlow<Int> = nodeRepo.poolSize
+
+    fun setPoolSize(size: Int) {
+        nodeRepo.setPoolSize(size)
+    }
 
     fun selectNode(index: Int) {
         nodeRepo.setSelected(index)

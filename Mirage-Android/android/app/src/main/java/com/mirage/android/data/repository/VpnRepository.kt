@@ -32,6 +32,9 @@ class VpnRepository(private val context: Context) {
     private val _logs = MutableStateFlow<List<String>>(emptyList())
     val logs: StateFlow<List<String>> = _logs.asStateFlow()
 
+    private val _connections = MutableStateFlow<List<com.mirage.android.data.model.ConnectionInfo>>(emptyList())
+    val connections: StateFlow<List<com.mirage.android.data.model.ConnectionInfo>> = _connections.asStateFlow()
+
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var telemetryJob: Job? = null
 
@@ -147,6 +150,18 @@ class VpnRepository(private val context: Context) {
                     val remoteLogs = CoreController.recentLogs().toList()
                     if (remoteLogs.isNotEmpty()) {
                         _logs.value = remoteLogs.takeLast(150)
+                    }
+
+                    val connJson = CoreController.getConnectionsJson()
+                    if (connJson.isNotBlank() && connJson != "[]") {
+                        val parsedList = mutableListOf<com.mirage.android.data.model.ConnectionInfo>()
+                        runCatching {
+                            val arr = org.json.JSONArray(connJson)
+                            for (i in 0 until arr.length()) {
+                                parsedList.add(com.mirage.android.data.model.ConnectionInfo.fromJson(arr.getJSONObject(i)))
+                            }
+                        }
+                        _connections.value = parsedList
                     }
                 } else {
                     if (_vpnState.value !is VpnState.Disconnected && _vpnState.value !is VpnState.Connecting) {

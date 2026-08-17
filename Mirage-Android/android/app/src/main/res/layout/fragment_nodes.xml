@@ -22,7 +22,7 @@
             android:layout_weight="1"
             android:text="节点管理"
             android:textColor="@color/meow_ink"
-            android:textSize="24sp"
+            android:textSize="22sp"
             android:textStyle="bold" />
 
         <com.google.android.material.button.MaterialButton
@@ -42,7 +42,7 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:layout_marginVertical="10dp">
+        android:layout_marginVertical="8dp">
 
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/recyclerNodes"
@@ -57,12 +57,12 @@
             android:layout_height="wrap_content"
             android:layout_gravity="center"
             android:text="暂无节点，点击下方「添加节点」或「剪贴板导入」"
-            android:textColor="#94A3B8"
+            android:textColor="@color/meow_ink_secondary"
             android:textSize="14sp"
             android:visibility="gone" />
     </FrameLayout>
 
-    <!-- 底部功能按钮组 -->
+    <!-- 主操作按钮组: 添加节点 / 一键测速 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -72,7 +72,7 @@
             android:id="@+id/addNodeBtn"
             style="@style/MirageButton"
             android:layout_width="0dp"
-            android:layout_height="48dp"
+            android:layout_height="46dp"
             android:layout_marginEnd="4dp"
             android:layout_weight="1"
             android:text="添加节点"
@@ -83,7 +83,7 @@
             android:id="@+id/btnTestAll"
             style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="0dp"
-            android:layout_height="48dp"
+            android:layout_height="46dp"
             android:layout_marginStart="4dp"
             android:layout_weight="1"
             android:text="一键测速"
@@ -91,6 +91,7 @@
             app:cornerRadius="10dp" />
     </LinearLayout>
 
+    <!-- 节点与高级参数配置栏: 自动优选 / 测速方法 / 并发连接池 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -101,11 +102,12 @@
             android:id="@+id/autoSelectBtn"
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="0dp"
-            android:layout_height="42dp"
-            android:layout_marginEnd="4dp"
+            android:layout_height="38dp"
+            android:layout_marginEnd="3dp"
             android:layout_weight="1"
-            android:text="自动选择: 关"
-            android:textSize="12sp"
+            android:paddingHorizontal="4dp"
+            android:text="自动优选: 关"
+            android:textSize="11sp"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_outline" />
 
@@ -113,11 +115,25 @@
             android:id="@+id/testMethodBtn"
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="0dp"
-            android:layout_height="42dp"
-            android:layout_marginStart="4dp"
+            android:layout_height="38dp"
+            android:layout_marginHorizontal="3dp"
             android:layout_weight="1"
-            android:text="测试方法: tcp"
-            android:textSize="12sp"
+            android:paddingHorizontal="4dp"
+            android:text="测速: TCP"
+            android:textSize="11sp"
+            app:cornerRadius="8dp"
+            app:strokeColor="@color/meow_outline" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnPoolSize"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="0dp"
+            android:layout_height="38dp"
+            android:layout_marginStart="3dp"
+            android:layout_weight="1"
+            android:paddingHorizontal="4dp"
+            android:text="连接池: 8"
+            android:textSize="11sp"
             app:cornerRadius="8dp"
             app:strokeColor="@color/meow_outline" />
     </LinearLayout>

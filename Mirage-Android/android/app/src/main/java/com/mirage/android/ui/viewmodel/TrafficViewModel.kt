@@ -15,6 +15,7 @@ class TrafficViewModel(application: Application) : AndroidViewModel(application)
 
     val stats: StateFlow<TrafficStats> = vpnRepo.trafficStats
     val latencyMs: StateFlow<Long> = vpnRepo.latencyMs
+    val connections: StateFlow<List<com.mirage.android.data.model.ConnectionInfo>> = vpnRepo.connections
     val rawLogs: StateFlow<List<String>> = vpnRepo.logs
 
     private val _selectedLogLevel = MutableStateFlow(LogLevel.ALL)

@@ -77,12 +77,22 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // 统一处理 Window Insets: 顶部状态栏沉浸, 底部导航栏避让
+        // 统一处理 Window Insets: 顶部状态栏沉浸, 底部避让系统导航栏与悬浮底栏
         androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
             val statusBars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.statusBars())
             val navBars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.navigationBars())
-            binding.viewPager.setPadding(0, statusBars.top, 0, 0)
-            binding.bottomNav.setPadding(0, 0, 0, navBars.bottom)
+            
+            val density = resources.displayMetrics.density
+            val floatingNavHeightWithMargin = (78 * density).toInt()
+            binding.viewPager.setPadding(0, statusBars.top, 0, floatingNavHeightWithMargin + navBars.bottom)
+
+            val lp = binding.cardFloatingNav.layoutParams as? androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams
+            if (lp != null) {
+                val sideMargin = (20 * density).toInt()
+                val bottomMargin = (12 * density).toInt() + navBars.bottom
+                lp.setMargins(sideMargin, 0, sideMargin, bottomMargin)
+                binding.cardFloatingNav.layoutParams = lp
+            }
             insets
         }
 

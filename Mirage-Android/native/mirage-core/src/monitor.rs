@@ -132,3 +132,89 @@ pub fn recent_logs_push(line: &str) {
     }
     global_logger().write_line(&s);
 }
+
+// ── 活跃/最近连接监控 ────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ConnectionRecord {
+    pub id: u64,
+    pub protocol: String,
+    pub target: String,
+    pub outbound: String,
+    pub status: String,
+    pub up_bytes: u64,
+    pub down_bytes: u64,
+    pub start_time: u64,
+    pub duration_secs: u64,
+}
+
+static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
+static CONNECTIONS: Mutex<Option<VecDeque<ConnectionRecord>>> = Mutex::new(None);
+
+pub fn record_conn_start(protocol: &str, target: &str, outbound: &str) -> u64 {
+    let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
+    let start_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let record = ConnectionRecord {
+        id,
+        protocol: protocol.to_string(),
+        target: target.to_string(),
+        outbound: outbound.to_string(),
+        status: "已连接".to_string(),
+        up_bytes: 0,
+        down_bytes: 0,
+        start_time,
+        duration_secs: 0,
+    };
+
+    let mut lock = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let list = lock.get_or_insert_with(|| VecDeque::with_capacity(100));
+    list.push_front(record);
+    while list.len() > 100 {
+        list.pop_back();
+    }
+    id
+}
+
+pub fn record_conn_update(id: u64, up: u64, down: u64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut lock = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(list) = lock.as_mut() {
+        if let Some(item) = list.iter_mut().find(|c| c.id == id) {
+            item.up_bytes = up;
+            item.down_bytes = down;
+            item.duration_secs = now.saturating_sub(item.start_time);
+        }
+    }
+}
+
+pub fn record_conn_close(id: u64, up: u64, down: u64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut lock = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(list) = lock.as_mut() {
+        if let Some(item) = list.iter_mut().find(|c| c.id == id) {
+            item.up_bytes = up;
+            item.down_bytes = down;
+            item.status = "已断开".to_string();
+            item.duration_secs = now.saturating_sub(item.start_time);
+        }
+    }
+}
+
+pub fn get_connections_json() -> String {
+    let lock = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(list) = lock.as_ref() {
+        serde_json::to_string(list).unwrap_or_else(|_| "[]".to_string())
+    } else {
+        "[]".to_string()
+    }
+}

@@ -138,8 +138,8 @@
     <com.google.android.material.card.MaterialCardView
         style="@style/MirageCard"
         android:layout_width="match_parent"
-        android:layout_height="130dp"
-        android:layout_marginTop="10dp"
+        android:layout_height="115dp"
+        android:layout_marginTop="8dp"
         app:cardCornerRadius="14dp">
 
         <com.mirage.android.TrafficChart
@@ -149,18 +149,78 @@
             android:padding="8dp" />
     </com.google.android.material.card.MaterialCardView>
 
-    <!-- 日志 Level 筛选条与操作按钮 -->
+    <!-- 底部功能切换栏: 日志 vs 活跃连接 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
+        android:layout_marginTop="8dp"
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
-        <HorizontalScrollView
-            android:layout_width="0dp"
+        <com.google.android.material.button.MaterialButtonToggleGroup
+            android:id="@+id/toggleViewMode"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
+            app:checkedButton="@id/btnModeLogs"
+            app:selectionRequired="true"
+            app:singleSelection="true">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnModeLogs"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:paddingHorizontal="12dp"
+                android:text="运行日志"
+                android:textSize="12sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnModeConns"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:paddingHorizontal="12dp"
+                android:text="连接信息"
+                android:textSize="12sp" />
+        </com.google.android.material.button.MaterialButtonToggleGroup>
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <ImageButton
+            android:id="@+id/btnCopyLogs"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="复制"
+            android:src="@android:drawable/ic_menu_share"
+            app:tint="@color/meow_blue" />
+
+        <ImageButton
+            android:id="@+id/btnClearLogs"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:layout_marginStart="4dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="清空"
+            android:src="@android:drawable/ic_menu_delete"
+            app:tint="@color/meow_ink_secondary" />
+    </LinearLayout>
+
+    <!-- 容器1: 日志控制台与 Level 筛选 -->
+    <LinearLayout
+        android:id="@+id/boxLogs"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
             android:scrollbars="none">
 
             <com.google.android.material.chip.ChipGroup
@@ -220,53 +280,60 @@
             </com.google.android.material.chip.ChipGroup>
         </HorizontalScrollView>
 
-        <ImageButton
-            android:id="@+id/btnCopyLogs"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="复制日志"
-            android:src="@android:drawable/ic_menu_share"
-            app:tint="@color/meow_blue" />
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="4dp"
+            android:layout_weight="1"
+            app:cardBackgroundColor="@color/meow_console_bg"
+            app:cardCornerRadius="12dp"
+            app:cardElevation="0dp"
+            app:strokeColor="#2C353F"
+            app:strokeWidth="1dp">
 
-        <ImageButton
-            android:id="@+id/btnClearLogs"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
-            android:layout_marginStart="4dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="清空日志"
-            android:src="@android:drawable/ic_menu_delete"
-            app:tint="@color/meow_ink_secondary" />
+            <ScrollView
+                android:id="@+id/scrollLogs"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:padding="10dp">
+
+                <TextView
+                    android:id="@+id/trafficLogView"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="monospace"
+                    android:lineSpacingExtra="3dp"
+                    android:textColor="#94A3B8"
+                    android:textSize="11sp"
+                    tools:text="[core] Mirage 内核运行中..." />
+            </ScrollView>
+        </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
 
-    <!-- Telegram 风格深色日志控制台卡片 -->
-    <com.google.android.material.card.MaterialCardView
+    <!-- 容器2: 实时连接信息列表 (RecyclerView) -->
+    <FrameLayout
+        android:id="@+id/boxConnections"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_marginTop="6dp"
+        android:layout_marginTop="4dp"
         android:layout_weight="1"
-        app:cardBackgroundColor="@color/meow_console_bg"
-        app:cardCornerRadius="12dp"
-        app:cardElevation="0dp"
-        app:strokeColor="#2C353F"
-        app:strokeWidth="1dp">
+        android:visibility="gone">
 
-        <ScrollView
-            android:id="@+id/scrollLogs"
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/recyclerConnections"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:padding="10dp">
+            android:clipToPadding="false"
+            android:paddingVertical="4dp" />
 
-            <TextView
-                android:id="@+id/trafficLogView"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:fontFamily="monospace"
-                android:lineSpacingExtra="3dp"
-                android:textColor="#94A3B8"
-                android:textSize="11sp"
-                tools:text="[core] Mirage 内核运行中..." />
-        </ScrollView>
-    </com.google.android.material.card.MaterialCardView>
+        <TextView
+            android:id="@+id/tvEmptyConnections"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="暂无活跃/转发连接"
+            android:textColor="@color/meow_ink_secondary"
+            android:textSize="13sp"
+            android:visibility="gone" />
+    </FrameLayout>
 </LinearLayout>

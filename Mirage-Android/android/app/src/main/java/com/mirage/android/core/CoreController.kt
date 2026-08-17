@@ -82,6 +82,7 @@ object CoreController {
     fun isHealthy(): Boolean = call { it.isHealthy() } ?: false
     fun latencyMs(): Long = call { it.latencyMs() } ?: -1
     fun getStats(): DoubleArray? = call { it.stats }
+    fun getConnectionsJson(): String = call { it.connectionsJson } ?: "[]"
     fun recentLogs(): Array<String> = call { it.recentLogs() } ?: emptyArray()
     fun getBuiltinDomains(): Array<String> = call { it.builtinDomains } ?: emptyArray()
     fun getBuiltinIpCount(): Long = call { it.builtinIpCount } ?: 0

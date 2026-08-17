@@ -21,6 +21,7 @@ interface ICoreService {
     long latencyMs();
     /** [up,down,upRate,downRate,tcp,udp,dns] */
     double[] getStats();
+    String getConnectionsJson();
     String[] recentLogs();
     String[] getBuiltinDomains();
     long getBuiltinIpCount();

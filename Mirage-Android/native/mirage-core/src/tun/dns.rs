@@ -243,17 +243,31 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, quer
     DNS_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     debug!("[TUN-DNS] 查询 {} (type {})", domain, qtype);
 
-    if qtype == 1 && direct::should_direct(Some(&domain), None) {
+    let is_direct = qtype == 1 && direct::should_direct(Some(&domain), None);
+    let cid = crate::monitor::record_conn_start(
+        "DNS",
+        &format!("{domain}:53"),
+        if is_direct { "直连解析" } else { "Fake-IP 代理" },
+    );
+
+    if is_direct {
         // 直连域名 (内置国内 或 用户自定义规则) → 异步上游真实解析 (返回真实 IP, 直连用)
         let stack2 = stack.clone();
         let query2 = query.to_vec();
+        let qlen = query.len() as u64;
         tokio::spawn(async move {
             match resolve_upstream(&domain).await {
-                Some(ip) => send_dns_reply(&stack2, client, &query2, &domain, qtype, Some(ip.octets()), question_len),
+                Some(ip) => {
+                    send_dns_reply(&stack2, client, &query2, &domain, qtype, Some(ip.octets()), question_len);
+                    crate::monitor::record_conn_close(cid, qlen, 64);
+                }
                 // 上游失败 → 兜底 fake-IP (保证连通性)
                 None => {
                     if let Some(a) = stack2.engine().fake_ip_allocate(&domain).map(|i| i.octets()) {
                         send_dns_reply(&stack2, client, &query2, &domain, qtype, Some(a), question_len);
+                        crate::monitor::record_conn_close(cid, qlen, 64);
+                    } else {
+                        crate::monitor::record_conn_close(cid, qlen, 0);
                     }
                 }
             }
@@ -268,6 +282,7 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, quer
         None
     };
     send_dns_reply(&stack, client, query, &domain, qtype, a, question_len);
+    crate::monitor::record_conn_close(cid, query.len() as u64, 64);
 }
 
 /// UDP DNS 应答 (兼容旧接口, TCP DNS relay 用; fake-IP 路径)。

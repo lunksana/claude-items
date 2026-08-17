@@ -94,6 +94,10 @@ class NodesFragment : Fragment() {
         binding.testMethodBtn.setOnClickListener {
             chooseTestMethod()
         }
+
+        binding.btnPoolSize.setOnClickListener {
+            choosePoolSize()
+        }
     }
 
     private fun observeState() {
@@ -118,16 +122,46 @@ class NodesFragment : Fragment() {
                 }
                 launch {
                     viewModel.isAutoSelect.collect { auto ->
-                        binding.autoSelectBtn.text = if (auto) "自动选择: 开" else "自动选择: 关"
+                        binding.autoSelectBtn.text = if (auto) "自动优选: 开" else "自动优选: 关"
                     }
                 }
                 launch {
                     viewModel.testMethod.collect { method ->
-                        binding.testMethodBtn.text = "测试方法: $method"
+                        binding.testMethodBtn.text = "测速: ${method.uppercase()}"
+                    }
+                }
+                launch {
+                    viewModel.poolSize.collect { size ->
+                        binding.btnPoolSize.text = "连接池: $size"
                     }
                 }
             }
         }
+    }
+
+    private fun choosePoolSize() {
+        val sizes = intArrayOf(1, 4, 8, 16, 32, 64)
+        val items = arrayOf(
+            "1 (低功耗 / 单路)",
+            "4 (轻量 / 省电)",
+            "8 (标准推荐 / 兼顾性能)",
+            "16 (高并发 / 极速浏览)",
+            "32 (超快响应 / 大带宽)",
+            "64 (极限并发)"
+        )
+        val currentSize = viewModel.poolSize.value
+        val currentIdx = sizes.indexOf(currentSize).coerceAtLeast(2)
+
+        AlertDialog.Builder(requireContext())
+            .setTitle("设置并发连接池容量 (Warm Pool Size)")
+            .setSingleChoiceItems(items, currentIdx) { dialog, which ->
+                val selected = sizes[which]
+                viewModel.setPoolSize(selected)
+                Toast.makeText(requireContext(), "已设置连接池容量为: $selected", Toast.LENGTH_SHORT).show()
+                dialog.dismiss()
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun chooseTestMethod() {

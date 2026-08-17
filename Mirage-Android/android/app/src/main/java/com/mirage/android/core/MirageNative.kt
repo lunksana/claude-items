@@ -44,6 +44,9 @@ object MirageNative {
      */
     external fun getStats(): DoubleArray
 
+    /** 获取活跃与最近连接监控列表 (JSON 字符串)。 */
+    external fun getConnectionsJson(): String
+
     /** 完整协议握手测活: 返回 RTT 毫秒, -1 = 不可用。 */
     external fun testNode(uri: String, timeoutMs: Int): Long
 

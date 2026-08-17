@@ -276,7 +276,7 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
     };
     let _ = is_direct;
 
-    let tunnel = match connect_tunnel(&stack, dst, direct_domain).await {
+    let tunnel = match connect_tunnel(&stack, dst, direct_domain.clone()).await {
         Ok(t) => t,
         Err(e) => {
             debug!("[TUN-TCP] 隧道建立失败 ({}:{}): {e}", dst.0, dst.1);
@@ -284,13 +284,19 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
         }
     };
 
+    let target_name = if let Some(dom) = &direct_domain {
+        format!("{}:{}", dom, dst.1)
+    } else {
+        format!("{}:{}", dst.0, dst.1)
+    };
+    let cid = crate::monitor::record_conn_start("TCP", &target_name, "隧道代理");
+
     // 拆成读写半程: upload (app→tunnel) / download (tunnel→app)
     let (mut tun_reader, mut tun_writer) = (tunnel.reader, tunnel.writer);
     let (mut local_rd, mut local_wr) = tokio::io::split(stream);
-    let mut up_bytes: u64 = 0;
-    let mut down_bytes: u64 = 0;
 
     let upload = async {
+        let mut up_bytes: u64 = 0;
         let mut buf = [0u8; 16384];
         loop {
             match tokio::time::timeout(RELAY_IDLE, local_rd.read(&mut buf)).await {
@@ -315,6 +321,7 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
     };
 
     let download = async {
+        let mut down_bytes: u64 = 0;
         loop {
             match tokio::time::timeout(RELAY_IDLE, tun_reader.recv_data()).await {
                 Ok(Ok(data)) => {
@@ -332,6 +339,7 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
     };
 
     let (up, down) = tokio::join!(upload, download);
+    crate::monitor::record_conn_close(cid, up, down);
     debug!(
         "[TUN-TCP] {}:{} 关闭 (↑{} ↓{})",
         dst.0,
@@ -348,6 +356,7 @@ fn _sock_buf_const() -> usize {
 
 /// 直连路径: smoltcp socket ⇄ 真实 TCP socket (protect 绕过 TUN)。
 async fn relay_direct(stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::net::IpAddr, u16)) {
+    let cid = crate::monitor::record_conn_start("TCP", &format!("{}:{}", dst.0, dst.1), "直连");
     TCP_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _guard = TcpActiveGuard;
     use std::os::unix::io::AsRawFd;
@@ -409,6 +418,7 @@ async fn relay_direct(stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::net
         down
     };
     let (up, down) = tokio::join!(to_tunnel, from_tunnel);
+    crate::monitor::record_conn_close(cid, up, down);
     debug!("[TUN-TCP/direct] {}:{} 直连关闭 (↑{} ↓{})",
         dst.0, dst.1,
         crate::tun::udp::human_bytes(up), crate::tun::udp::human_bytes(down));
