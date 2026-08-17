@@ -5,7 +5,6 @@ import android.content.Intent
 import com.mirage.android.CoreService
 import com.mirage.android.core.CoreController
 import com.mirage.android.core.ICoreCallback
-import com.mirage.android.core.LogStore
 import com.mirage.android.data.model.TrafficStats
 import com.mirage.android.data.model.VpnState
 import kotlinx.coroutines.*
@@ -51,8 +50,9 @@ class VpnRepository(private val context: Context) {
 
         override fun onLog(line: String?) {
             if (!line.isNullOrBlank()) {
-                LogStore.append(line)
-                _logs.value = LogStore.all()
+                val current = _logs.value.toMutableList()
+                current.add(line)
+                _logs.value = current.takeLast(150)
             }
         }
     }
@@ -60,7 +60,7 @@ class VpnRepository(private val context: Context) {
     init {
         CoreController.bind(context)
         CoreController.registerCallback(callback)
-        checkCurrentState()
+        startTelemetry()
     }
 
     fun checkCurrentState() {
@@ -85,7 +85,10 @@ class VpnRepository(private val context: Context) {
         // 注入规则
         ruleRepo.applyRules()
 
-        val intent = Intent(context, CoreService::class.java)
+        val intent = Intent(context, CoreService::class.java).apply {
+            putExtra("uri", selected.uri)
+            putExtra("pool_size", nodeRepo.getPoolSize())
+        }
         context.startForegroundService(intent)
         startTelemetry()
     }
@@ -109,7 +112,6 @@ class VpnRepository(private val context: Context) {
     }
 
     fun clearLogs() {
-        LogStore.clear()
         _logs.value = emptyList()
     }
 
@@ -117,7 +119,13 @@ class VpnRepository(private val context: Context) {
         telemetryJob?.cancel()
         telemetryJob = scope.launch(Dispatchers.IO) {
             while (isActive) {
-                if (CoreController.isRunning()) {
+                val isRunning = CoreController.isRunning()
+                if (isRunning) {
+                    if (_vpnState.value !is VpnState.Connected) {
+                        withContext(Dispatchers.Main) {
+                            _vpnState.value = VpnState.Connected(nodeRepo.getSelectedNode())
+                        }
+                    }
                     val statsArr = CoreController.getStats()
                     if (statsArr != null && statsArr.size >= 7) {
                         _trafficStats.value = TrafficStats.fromArray(statsArr)
@@ -125,9 +133,10 @@ class VpnRepository(private val context: Context) {
                     val lat = CoreController.latencyMs()
                     _latencyMs.value = lat
 
-                    val nativeLogs = CoreController.recentLogs()
-                    val allLogs = LogStore.all() + nativeLogs.toList()
-                    _logs.value = allLogs.takeLast(100)
+                    val remoteLogs = CoreController.recentLogs().toList()
+                    if (remoteLogs.isNotEmpty()) {
+                        _logs.value = remoteLogs.takeLast(150)
+                    }
                 } else {
                     if (_vpnState.value !is VpnState.Disconnected && _vpnState.value !is VpnState.Connecting) {
                         withContext(Dispatchers.Main) {

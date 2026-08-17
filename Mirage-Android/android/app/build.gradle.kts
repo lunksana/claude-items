@@ -11,8 +11,8 @@ android {
         applicationId = "com.mirage.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0-modern"
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
@@ -40,6 +40,7 @@ android {
     buildFeatures {
         viewBinding = true
         aidl = true
+        buildConfig = true
     }
 
     // 原生库来自 native/mirage-jni 的构建产物 (由 scripts/build-android.sh 拷入)

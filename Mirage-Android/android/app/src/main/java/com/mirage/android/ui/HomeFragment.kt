@@ -41,6 +41,8 @@ class HomeFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
+        binding.tvVersion.text = "v${com.mirage.android.BuildConfig.VERSION_NAME}"
+
         binding.connectSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (isChecked && !viewModel.vpnState.value.isRunning) {
                 performConnect()

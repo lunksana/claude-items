@@ -46,11 +46,18 @@ class MainActivity : AppCompatActivity() {
         handleIncomingUri(intent)
 
         setupViewPager()
+
+        if (intent?.getBooleanExtra("auto_connect", false) == true) {
+            requestVpnPermissionAndConnect()
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIncomingUri(intent)
+        if (intent.getBooleanExtra("auto_connect", false)) {
+            requestVpnPermissionAndConnect()
+        }
     }
 
     private fun setupViewPager() {

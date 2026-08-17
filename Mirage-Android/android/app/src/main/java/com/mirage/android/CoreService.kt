@@ -17,6 +17,7 @@ import com.mirage.android.core.NodeStore
 import com.mirage.android.core.RuleStore
 import kotlinx.coroutines.*
 import java.net.InetAddress
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * 独立内核进程 (:core) 的 CoreService。
@@ -31,7 +32,7 @@ class CoreService : VpnService() {
 
     private var tunFd: ParcelFileDescriptor? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
-    private val callbacks = ArrayList<ICoreCallback>()
+    private val callbacks = CopyOnWriteArrayList<ICoreCallback>()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         setActive(this)
@@ -42,23 +43,33 @@ class CoreService : VpnService() {
         }
         // startForegroundService 启动: 5 秒内必须 startForeground, 否则系统杀服务/崩溃
         startForegroundCompat()
+        val uri = intent?.getStringExtra("uri")
+        val poolSize = intent?.getIntExtra("pool_size", -1) ?: -1
         // 直接驱动启动 (建 TUN + 内核), 不依赖 UI 后续 AIDL 调用
-        startInternal()
+        startInternal(uri, poolSize)
         return START_STICKY
     }
 
     // ── ICoreService 实现 ────────────────────────────────────────────────
 
-    fun startInternal(): Int {
-        if (MirageNative.isRunning()) return 0
-        val uri = NodeStore.getSelectedUri(this)
+    fun log(msg: String) {
+        LogStore.append(msg)
+        callbacks.forEach { runCatching { it.onLog(msg) } }
+    }
+
+    fun startInternal(uriOverride: String? = null, poolSizeOverride: Int = -1): Int {
+        if (MirageNative.isRunning()) {
+            notifyState()
+            return 0
+        }
+        val uri = if (!uriOverride.isNullOrBlank()) uriOverride else NodeStore.getSelectedUri(this)
         if (uri.isEmpty()) {
-            LogStore.append("[core] 无选中节点")
+            log("[core] 无选中节点")
             return -1
         }
         // 已授权检查 (包级授权, 与 UI 进程同包)
         if (VpnService.prepare(this) != null) {
-            LogStore.append("[core] VPN 未授权")
+            log("[core] VPN 未授权")
             return -2
         }
 
@@ -70,30 +81,37 @@ class CoreService : VpnService() {
         builder.addDnsServer(InetAddress.getByName("198.19.0.53"))
         builder.setMtu(1500)
 
-        val fd = try { builder.establish() } catch (e: Exception) { return -3 }
-            ?: return -4
+        val fd = try { builder.establish() } catch (e: Exception) {
+            log("[core] TUN establish 异常: ${e.message}")
+            return -3
+        } ?: run {
+            log("[core] TUN establish 返回 null")
+            return -4
+        }
         tunFd = fd
         startForegroundCompat()
 
         // 注入规则
         runCatching { MirageNative.setRules(RuleStore.toJson(this)) }
 
-        LogStore.append("[core] 开始启动内核 (uri=${uri.take(30)}...)")
-        val rc = MirageNative.start(fd.fd, uri, NodeStore.getPoolSize(this))
+        val poolSize = if (poolSizeOverride > 0) poolSizeOverride else NodeStore.getPoolSize(this)
+        log("[core] 开始启动内核 (uri=${uri.take(30)}..., poolSize=$poolSize)")
+        val rc = MirageNative.start(fd.fd, uri, poolSize)
         if (rc != 0) {
-            LogStore.append("[core] 内核启动失败 rc=$rc")
+            log("[core] 内核启动失败 rc=$rc")
             runCatching { fd.close() }
             tunFd = null
+            notifyState()
             return rc
         }
-        LogStore.append("[core] 内核已启动")
+        log("[core] 内核已启动")
         notifyState()
+
         // 文件日志: 内核+App 日志落盘 (adb run-as cat files/core.log 诊断用)
         scope.launch {
             while (isActive) {
                 runCatching {
-                    val logs = (com.mirage.android.core.LogStore.all()
-                        + MirageNative.recentLogs().toList()).joinToString("\n")
+                    val logs = (LogStore.all() + MirageNative.recentLogs().toList()).joinToString("\n")
                     java.io.File(filesDir, "core.log").writeText(logs.takeLast(30000))
                 }
                 delay(3000)
@@ -117,7 +135,7 @@ class CoreService : VpnService() {
     }
 
     fun stopInternal() {
-        LogStore.append("[core] stop()")
+        log("[core] stop()")
         runCatching { MirageNative.stop() }
         runCatching { tunFd?.close() }
         tunFd = null
@@ -142,20 +160,25 @@ class CoreService : VpnService() {
     fun isHealthyInternal(): Boolean = MirageNative.isHealthy()
     fun latencyMsInternal(): Long = MirageNative.latencyMs()
     fun getStatsInternal(): DoubleArray = MirageNative.getStats()
-    fun recentLogsInternal(): Array<String> = MirageNative.recentLogs()
+    fun recentLogsInternal(): Array<String> =
+        (LogStore.all() + MirageNative.recentLogs().toList()).toTypedArray()
     fun getBuiltinDomainsInternal(): Array<String> = MirageNative.getBuiltinDomains()
     fun getBuiltinIpCountInternal(): Long = MirageNative.getBuiltinIpCount()
     fun testNodeInternal(uri: String, timeoutMs: Int): Long = MirageNative.testNode(uri, timeoutMs)
 
     fun registerCallbackInternal(cb: ICoreCallback?) {
-        if (cb != null && !callbacks.contains(cb)) callbacks.add(cb)
+        if (cb != null && !callbacks.contains(cb)) {
+            callbacks.add(cb)
+            // 注册后立即推一次当前运行状态
+            runCatching { cb.onStateChanged(MirageNative.isRunning()) }
+        }
     }
 
     fun unregisterCallbackInternal(cb: ICoreCallback?) { callbacks.remove(cb) }
 
     private fun notifyState() {
         val running = MirageNative.isRunning()
-        callbacks.toList().forEach { runCatching { it.onStateChanged(running) } }
+        callbacks.forEach { runCatching { it.onStateChanged(running) } }
     }
 
     // ── 前台通知 ─────────────────────────────────────────────────────────
@@ -215,7 +238,7 @@ class CoreService : VpnService() {
 
     override fun onDestroy() {
         clearActive()
-        LogStore.append("[core] onDestroy()")
+        log("[core] onDestroy()")
         runCatching { MirageNative.stop() }
         runCatching { tunFd?.close() }
         tunFd = null

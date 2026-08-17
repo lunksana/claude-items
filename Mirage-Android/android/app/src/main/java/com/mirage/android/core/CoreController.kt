@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
 import kotlinx.coroutines.flow.MutableStateFlow
+import java.util.concurrent.CopyOnWriteArraySet
 
 /**
  * CoreController: App (UI) 侧的控制层客户端。
@@ -16,24 +17,39 @@ object CoreController {
     private var service: ICoreService? = null
     private var bound = false
     private var ctx: Context? = null
+    private val callbacks = CopyOnWriteArraySet<ICoreCallback>()
 
     /** 内核运行状态 (UI 轮询/回调更新)。 */
     val running = MutableStateFlow(false)
 
     private val conn = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            service = ICoreService.Stub.asInterface(binder)
+            val s = ICoreService.Stub.asInterface(binder)
+            service = s
             bound = true
+            // 重新注册所有待生效回调
+            callbacks.forEach { cb ->
+                runCatching { s.registerCallback(cb) }
+            }
+            // 立即同步一次状态
+            runCatching {
+                val isRun = s.isRunning
+                running.value = isRun
+                callbacks.forEach { cb -> runCatching { cb.onStateChanged(isRun) } }
+            }
         }
+
         override fun onServiceDisconnected(name: ComponentName?) {
             service = null
             bound = false
+            running.value = false
+            callbacks.forEach { cb -> runCatching { cb.onStateChanged(false) } }
         }
     }
 
     /** 绑定 core 进程服务 (每次进入 UI 时调用)。 */
     fun bind(context: Context) {
-        if (bound) return
+        if (bound && service != null) return
         ctx = context.applicationContext
         val intent = Intent(context, Class.forName("com.mirage.android.CoreService"))
         context.bindService(intent, conn, Context.BIND_AUTO_CREATE)
@@ -69,6 +85,14 @@ object CoreController {
     fun getBuiltinDomains(): Array<String> = call { it.builtinDomains } ?: emptyArray()
     fun getBuiltinIpCount(): Long = call { it.builtinIpCount } ?: 0
     fun testNode(uri: String, timeoutMs: Int): Long = call { it.testNode(uri, timeoutMs) } ?: -1
-    fun registerCallback(cb: ICoreCallback) { call { it.registerCallback(cb) } }
-    fun unregisterCallback(cb: ICoreCallback) { call { it.unregisterCallback(cb) } }
+
+    fun registerCallback(cb: ICoreCallback) {
+        callbacks.add(cb)
+        service?.let { s -> runCatching { s.registerCallback(cb) } }
+    }
+
+    fun unregisterCallback(cb: ICoreCallback) {
+        callbacks.remove(cb)
+        service?.let { s -> runCatching { s.unregisterCallback(cb) } }
+    }
 }
