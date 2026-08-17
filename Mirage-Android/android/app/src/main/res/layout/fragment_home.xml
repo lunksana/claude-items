@@ -13,39 +13,65 @@
         android:orientation="vertical"
         android:padding="16dp">
 
-        <!-- 顶栏: 标题 + 连接开关 -->
+        <!-- 顶栏: Telegram 风格 Header -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center_vertical"
             android:orientation="horizontal"
-            android:paddingVertical="4dp">
+            android:paddingVertical="6dp">
 
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Mirage"
-                android:textColor="@color/meow_ink"
-                android:textSize="26sp"
-                android:textStyle="bold" />
+            <ImageView
+                android:layout_width="38dp"
+                android:layout_height="38dp"
+                android:background="@drawable/bg_telegram_avatar"
+                android:padding="8dp"
+                android:src="@drawable/ic_nav_home"
+                app:tint="@color/meow_blue" />
 
-            <TextView
-                android:id="@+id/tvVersion"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:background="@drawable/badge_latency_bg"
-                android:paddingHorizontal="6dp"
-                android:paddingVertical="2dp"
-                android:text="v0.2.0"
-                android:textColor="@color/meow_blue"
-                android:textSize="11sp"
-                android:textStyle="bold" />
-
-            <View
+            <LinearLayout
                 android:layout_width="0dp"
-                android:layout_height="0dp"
-                android:layout_weight="1" />
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Mirage"
+                        android:textColor="@color/meow_ink"
+                        android:textSize="22sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvVersion"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_telegram_pill"
+                        android:paddingHorizontal="8dp"
+                        android:paddingVertical="2dp"
+                        android:text="v0.2.0 · 内置"
+                        android:textColor="@color/meow_blue"
+                        android:textSize="11sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="1dp"
+                    android:text="安全隧道代理"
+                    android:textColor="@color/meow_ink_secondary"
+                    android:textSize="12sp" />
+            </LinearLayout>
 
             <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/connectSwitch"
@@ -54,7 +80,7 @@
                 android:minWidth="0dp" />
         </LinearLayout>
 
-        <!-- 状态卡片 -->
+        <!-- 主连接 Hero 卡片 (Telegram 风格圆角 16dp) -->
         <com.google.android.material.card.MaterialCardView
             style="@style/MirageCard"
             android:layout_width="match_parent"
@@ -67,38 +93,53 @@
                 android:layout_height="wrap_content"
                 android:gravity="center"
                 android:orientation="vertical"
-                android:padding="22dp">
+                android:padding="20dp">
 
-                <TextView
-                    android:id="@+id/statusText"
+                <!-- 状态与延迟指示 -->
+                <LinearLayout
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="@string/status_idle"
-                    android:textColor="@color/meow_disconnected"
-                    android:textSize="22sp"
-                    android:textStyle="bold" />
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <View
+                        android:id="@+id/statusDot"
+                        android:layout_width="10dp"
+                        android:layout_height="10dp"
+                        android:background="@drawable/bg_telegram_avatar" />
+
+                    <TextView
+                        android:id="@+id/statusText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:text="@string/status_idle"
+                        android:textColor="@color/meow_disconnected"
+                        android:textSize="20sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
 
                 <TextView
                     android:id="@+id/tvLatency"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:textColor="#64748B"
+                    android:textColor="@color/meow_ink_secondary"
                     android:textSize="13sp"
                     android:visibility="gone"
                     tools:text="隧道 RTT: 42ms"
                     tools:visibility="visible" />
 
-                <!-- 选中节点卡片 -->
+                <!-- 选中节点卡片 (Telegram 频道条目风格) -->
                 <com.google.android.material.card.MaterialCardView
                     android:id="@+id/nodeSelectCard"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="14dp"
+                    android:layout_marginTop="16dp"
                     android:clickable="true"
                     android:focusable="true"
-                    app:cardBackgroundColor="#080077CC"
-                    app:cardCornerRadius="10dp"
+                    app:cardBackgroundColor="@color/meow_canvas"
+                    app:cardCornerRadius="12dp"
                     app:cardElevation="0dp"
                     app:strokeColor="@color/meow_outline"
                     app:strokeWidth="1dp">
@@ -109,12 +150,21 @@
                         android:gravity="center_vertical"
                         android:orientation="horizontal"
                         android:paddingHorizontal="14dp"
-                        android:paddingVertical="10dp">
+                        android:paddingVertical="12dp">
+
+                        <ImageView
+                            android:layout_width="28dp"
+                            android:layout_height="28dp"
+                            android:background="@drawable/bg_telegram_avatar"
+                            android:padding="6dp"
+                            android:src="@drawable/ic_nav_nodes"
+                            app:tint="@color/meow_blue" />
 
                         <TextView
                             android:id="@+id/currentNode"
                             android:layout_width="0dp"
                             android:layout_height="wrap_content"
+                            android:layout_marginStart="10dp"
                             android:layout_weight="1"
                             android:ellipsize="end"
                             android:maxLines="1"
@@ -128,13 +178,14 @@
                             android:layout_height="wrap_content"
                             android:text="切换 ›"
                             android:textColor="@color/meow_blue"
-                            android:textSize="13sp" />
+                            android:textSize="13sp"
+                            android:textStyle="bold" />
                     </LinearLayout>
                 </com.google.android.material.card.MaterialCardView>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- 实时速率卡片: 上传/下载 -->
+        <!-- 实时速率卡片: 上传 / 下载 (Telegram 扁平双列卡片) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -159,9 +210,9 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="上传速率"
+                        android:text="↑ 实时上传"
                         android:textColor="@color/meow_upload"
-                        android:textSize="13sp"
+                        android:textSize="12sp"
                         android:textStyle="bold" />
 
                     <TextView
@@ -170,8 +221,8 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
                         android:text="0 B/s"
-                        android:textColor="@color/meow_upload"
-                        android:textSize="22sp"
+                        android:textColor="@color/meow_ink"
+                        android:textSize="20sp"
                         android:textStyle="bold" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
@@ -194,9 +245,9 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="下载速率"
+                        android:text="↓ 实时下载"
                         android:textColor="@color/meow_download"
-                        android:textSize="13sp"
+                        android:textSize="12sp"
                         android:textStyle="bold" />
 
                     <TextView
@@ -205,8 +256,8 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
                         android:text="0 B/s"
-                        android:textColor="@color/meow_download"
-                        android:textSize="22sp"
+                        android:textColor="@color/meow_ink"
+                        android:textSize="20sp"
                         android:textStyle="bold" />
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
@@ -232,29 +283,30 @@
                     android:layout_height="wrap_content"
                     android:text="累计流量: ↑0 B / ↓0 B"
                     android:textColor="@color/meow_ink"
-                    android:textSize="14sp" />
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
 
                 <TextView
                     android:id="@+id/connsInfo"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
+                    android:layout_marginTop="4dp"
                     android:text="活跃连接: TCP 0 · UDP 0 · DNS 0"
-                    android:textColor="#64748B"
-                    android:textSize="13sp" />
+                    android:textColor="@color/meow_ink_secondary"
+                    android:textSize="12sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- 连接按钮 -->
+        <!-- 连接按钮 (Telegram 胶囊按钮) -->
         <com.google.android.material.button.MaterialButton
             android:id="@+id/connectBtn"
             style="@style/MirageButton"
             android:layout_width="match_parent"
-            android:layout_height="54dp"
+            android:layout_height="52dp"
             android:layout_marginTop="18dp"
             android:text="@string/connect"
-            android:textSize="17sp"
-            app:cornerRadius="12dp" />
+            android:textSize="16sp"
+            app:cornerRadius="26dp" />
 
     </LinearLayout>
 </ScrollView>

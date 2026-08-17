@@ -17,9 +17,9 @@ class TrafficChart @JvmOverloads constructor(
     private var upData: List<Float> = emptyList()
     private var downData: List<Float> = emptyList()
 
-    private val upColor = 0xFFF29A00.toInt() // 琥珀橙
-    private val downColor = 0xFF0077CC.toInt() // 品牌蓝
-    private val gridColor = 0x18000000.toInt()
+    private val upColor = 0xFF2481CC.toInt()   // Telegram 经典蓝 (上行)
+    private val downColor = 0xFF2AA3EF.toInt() // Telegram 天空蓝 (下行)
+    private val gridColor = 0x14000000.toInt()
 
     private val upPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = upColor

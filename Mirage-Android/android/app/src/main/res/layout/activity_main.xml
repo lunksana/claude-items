@@ -12,13 +12,20 @@
         android:layout_height="0dp"
         android:layout_weight="1" />
 
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@color/meow_outline" />
+
     <com.google.android.material.bottomnavigation.BottomNavigationView
         android:id="@+id/bottomNav"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:background="@color/meow_card"
-        app:elevation="8dp"
+        app:elevation="0dp"
         app:itemActiveIndicatorStyle="@style/MirageNavIndicator"
+        app:itemIconTint="@color/nav_item_tint"
+        app:itemTextColor="@color/nav_item_tint"
         app:menu="@menu/bottom_nav"
         app:labelVisibilityMode="labeled" />
 </LinearLayout>

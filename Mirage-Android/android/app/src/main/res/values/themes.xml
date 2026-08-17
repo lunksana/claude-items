@@ -1,44 +1,60 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- meow 风格 Material3 主题: 品牌蓝主色, 天蓝背景, 白卡片 -->
-    <style name="Theme.Mirage" parent="Theme.Material3.DayNight">
+    <!-- Telegram 现代化清爽扁平风格主题: 沉浸式透明状态栏 + 经典蓝 + 圆角卡片 -->
+    <style name="Theme.Mirage" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="colorPrimary">@color/meow_blue</item>
         <item name="colorOnPrimary">#FFFFFF</item>
-        <item name="colorSecondary">@color/meow_ginger</item>
+        <item name="colorSecondary">@color/meow_download</item>
         <item name="android:colorBackground">@color/meow_canvas</item>
         <item name="colorSurface">@color/meow_card</item>
         <item name="android:windowBackground">@color/meow_canvas</item>
         <item name="android:textColor">@color/meow_ink</item>
-        <item name="android:statusBarColor">@color/meow_canvas</item>
+        
+        <!-- 任务栏/状态栏透明 (结合 WindowInsets 沉浸式渲染) -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
 
-        <!-- 卡片: 圆角 8 + 边框 (对齐 meow CardTheme) -->
+        <!-- 卡片: Telegram 扁平圆角 (14dp) + 0.8dp 极细边框 -->
         <item name="materialCardViewStyle">@style/MirageCard</item>
 
-        <!-- 按钮: 圆角 8 填充 -->
+        <!-- 按钮: 胶囊圆角 (24dp) 填充 -->
         <item name="materialButtonStyle">@style/MirageButton</item>
         <item name="android:buttonStyle">@style/MirageButton</item>
 
-        <!-- 输入框: 填充背景 + 圆角 8 -->
+        <!-- 输入框: 填充背景 + 圆角 10dp -->
         <item name="android:editTextStyle">@style/MirageEditText</item>
     </style>
 
     <style name="MirageCard" parent="Widget.MaterialComponents.CardView">
-        <item name="cardCornerRadius">8dp</item>
+        <item name="cardCornerRadius">14dp</item>
         <item name="cardElevation">0dp</item>
         <item name="strokeColor">@color/meow_outline</item>
         <item name="strokeWidth">1dp</item>
+        <item name="cardBackgroundColor">@color/meow_card</item>
     </style>
 
     <style name="MirageButton" parent="Widget.Material3.Button">
-        <item name="cornerRadius">8dp</item>
+        <item name="cornerRadius">24dp</item>
         <item name="android:textColor">#FFFFFF</item>
         <item name="backgroundTint">@color/meow_blue</item>
+        <item name="elevation">0dp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
     </style>
 
-    <style name="MirageEditText" parent="Widget.AppCompat.EditText" />
+    <style name="MirageEditText" parent="Widget.AppCompat.EditText">
+        <item name="android:background">@drawable/bg_telegram_pill</item>
+        <item name="android:paddingHorizontal">14dp</item>
+        <item name="android:paddingVertical">10dp</item>
+        <item name="android:textColor">@color/meow_ink</item>
+        <item name="android:textColorHint">@color/meow_ink_secondary</item>
+        <item name="android:textSize">14sp</item>
+    </style>
 
-    <!-- 底部导航选中指示 (meow: 淡蓝胶囊) -->
+    <!-- 底部导航指示胶囊 (Telegram 风格浅蓝胶囊) -->
     <style name="MirageNavIndicator" parent="Widget.Material3.BottomNavigationView.ActiveIndicator">
-        <item name="android:color">@color/meow_outline</item>
+        <item name="android:color">@color/meow_accent_tint</item>
+        <item name="shapeAppearance">@style/ShapeAppearance.Material3.Corner.Full</item>
     </style>
 </resources>

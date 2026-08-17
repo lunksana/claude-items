@@ -8,18 +8,18 @@
     android:background="@color/meow_canvas"
     android:padding="16dp">
 
-    <!-- 顶栏速率统计卡片 -->
+    <!-- 顶栏速率统计卡片 (Telegram 扁平设计) -->
     <com.google.android.material.card.MaterialCardView
         style="@style/MirageCard"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        app:cardCornerRadius="14dp">
+        app:cardCornerRadius="16dp">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="14dp">
+            android:padding="16dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -37,7 +37,7 @@
                         android:layout_height="wrap_content"
                         android:text="↑ 上行速率"
                         android:textColor="@color/meow_upload"
-                        android:textSize="13sp"
+                        android:textSize="12sp"
                         android:textStyle="bold" />
 
                     <TextView
@@ -46,8 +46,8 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
                         android:text="0 B/s"
-                        android:textColor="@color/meow_upload"
-                        android:textSize="26sp"
+                        android:textColor="@color/meow_ink"
+                        android:textSize="22sp"
                         android:textStyle="bold" />
                 </LinearLayout>
 
@@ -62,7 +62,7 @@
                         android:layout_height="wrap_content"
                         android:text="↓ 下行速率"
                         android:textColor="@color/meow_download"
-                        android:textSize="13sp"
+                        android:textSize="12sp"
                         android:textStyle="bold" />
 
                     <TextView
@@ -71,8 +71,8 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="2dp"
                         android:text="0 B/s"
-                        android:textColor="@color/meow_download"
-                        android:textSize="26sp"
+                        android:textColor="@color/meow_ink"
+                        android:textSize="22sp"
                         android:textStyle="bold" />
                 </LinearLayout>
             </LinearLayout>
@@ -94,7 +94,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="累计上行: 0 B"
-                    android:textColor="#64748B"
+                    android:textColor="@color/meow_ink_secondary"
                     android:textSize="12sp" />
 
                 <TextView
@@ -103,7 +103,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="累计下行: 0 B"
-                    android:textColor="#64748B"
+                    android:textColor="@color/meow_ink_secondary"
                     android:textSize="12sp" />
             </LinearLayout>
 
@@ -119,7 +119,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="活跃连接: TCP 0 · UDP 0"
-                    android:textColor="#64748B"
+                    android:textColor="@color/meow_ink_secondary"
                     android:textSize="12sp" />
 
                 <TextView
@@ -128,7 +128,7 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="DNS 查询: 0"
-                    android:textColor="#64748B"
+                    android:textColor="@color/meow_ink_secondary"
                     android:textSize="12sp" />
             </LinearLayout>
         </LinearLayout>
@@ -138,9 +138,9 @@
     <com.google.android.material.card.MaterialCardView
         style="@style/MirageCard"
         android:layout_width="match_parent"
-        android:layout_height="140dp"
+        android:layout_height="130dp"
         android:layout_marginTop="10dp"
-        app:cardCornerRadius="12dp">
+        app:cardCornerRadius="14dp">
 
         <com.mirage.android.TrafficChart
             android:id="@+id/chart"
@@ -149,7 +149,7 @@
             android:padding="8dp" />
     </com.google.android.material.card.MaterialCardView>
 
-    <!-- 日志卡片与操作 -->
+    <!-- 日志 Level 筛选条与操作按钮 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -157,44 +157,106 @@
         android:gravity="center_vertical"
         android:orientation="horizontal">
 
-        <TextView
+        <HorizontalScrollView
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="实时运行日志"
-            android:textColor="@color/meow_ink"
-            android:textSize="15sp"
-            android:textStyle="bold" />
+            android:scrollbars="none">
 
-        <com.google.android.material.button.MaterialButton
+            <com.google.android.material.chip.ChipGroup
+                android:id="@+id/chipGroupLogLevel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                app:singleSelection="true">
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipLevelAll"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:checked="true"
+                    android:text="全部"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipLevelInfo"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="INFO"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipLevelWarn"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="WARN"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipLevelError"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="ERROR"
+                    android:textSize="11sp" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipLevelDebug"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="DEBUG"
+                    android:textSize="11sp" />
+            </com.google.android.material.chip.ChipGroup>
+        </HorizontalScrollView>
+
+        <ImageButton
+            android:id="@+id/btnCopyLogs"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="复制日志"
+            android:src="@android:drawable/ic_menu_share"
+            app:tint="@color/meow_blue" />
+
+        <ImageButton
             android:id="@+id/btnClearLogs"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="wrap_content"
-            android:layout_height="36dp"
-            android:text="清空日志"
-            android:textSize="12sp" />
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:layout_marginStart="4dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="清空日志"
+            android:src="@android:drawable/ic_menu_delete"
+            app:tint="@color/meow_ink_secondary" />
     </LinearLayout>
 
+    <!-- Telegram 风格深色日志控制台卡片 -->
     <com.google.android.material.card.MaterialCardView
-        style="@style/MirageCard"
         android:layout_width="match_parent"
         android:layout_height="0dp"
+        android:layout_marginTop="6dp"
         android:layout_weight="1"
-        android:layout_marginTop="4dp"
-        app:cardCornerRadius="10dp">
+        app:cardBackgroundColor="@color/meow_console_bg"
+        app:cardCornerRadius="12dp"
+        app:cardElevation="0dp"
+        app:strokeColor="#2C353F"
+        app:strokeWidth="1dp">
 
         <ScrollView
             android:id="@+id/scrollLogs"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:padding="8dp">
+            android:padding="10dp">
 
             <TextView
                 android:id="@+id/trafficLogView"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:fontFamily="monospace"
-                android:textColor="#334155"
+                android:lineSpacingExtra="3dp"
+                android:textColor="#94A3B8"
                 android:textSize="11sp"
                 tools:text="[core] Mirage 内核运行中..." />
         </ScrollView>

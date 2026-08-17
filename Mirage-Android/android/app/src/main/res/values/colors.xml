@@ -1,15 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- meow 品牌色 (源自 meow 窥视猫图标: 天蓝/白边/姜黄猫) -->
-    <color name="meow_blue">#0077CC</color>          <!-- brandAccent 主色 -->
-    <color name="meow_ginger">#FE9B01</color>        <!-- brandGinger 次色 -->
-    <color name="meow_navy">#0049B8</color>
-    <color name="meow_ink">#102A43</color>           <!-- 文字 -->
-    <color name="meow_canvas">#EAF8FF</color>        <!-- 背景: 淡蓝 -->
-    <color name="meow_card">#FFFFFF</color>          <!-- 卡片 -->
-    <color name="meow_connected">#148742</color>     <!-- 已连接绿 -->
-    <color name="meow_upload">#F29A00</color>        <!-- 上传: 琥珀 -->
-    <color name="meow_download">#0077CC</color>      <!-- 下载: 品牌蓝 -->
-    <color name="meow_outline">#A8D8F0</color>       <!-- 卡片边框 -->
-    <color name="meow_disconnected">#8FA3B0</color>  <!-- 未连接灰 -->
+    <!-- Telegram 风格设计系统配色 -->
+    <color name="meow_blue">#2481CC</color>          <!-- Telegram 官方经典主蓝 -->
+    <color name="meow_ginger">#FF9500</color>        <!-- 琥珀橙 (连接中/告警) -->
+    <color name="meow_navy">#1C6CA8</color>          <!-- 深蓝 -->
+    <color name="meow_ink">#17212B</color>           <!-- 主要正文字 (Telegram 深色墨水) -->
+    <color name="meow_ink_secondary">#707579</color> <!-- 次要辅助字 (Telegram 灰) -->
+    <color name="meow_canvas">#F0F2F5</color>        <!-- 背景: 极简纯净浅灰底色 -->
+    <color name="meow_card">#FFFFFF</color>          <!-- 卡片表面色: 纯白 -->
+    <color name="meow_connected">#34C759</color>     <!-- 激活连接绿 (Telegram 绿) -->
+    <color name="meow_upload">#2481CC</color>        <!-- 上传流量: 经典蓝 -->
+    <color name="meow_download">#2AA3EF</color>      <!-- 下载流量: 天空蓝 -->
+    <color name="meow_outline">#E3E7EB</color>       <!-- 卡片精细边框 -->
+    <color name="meow_disconnected">#8E959E</color>  <!-- 未连接/待机灰 -->
+    <color name="meow_accent_tint">#E8F2FA</color>   <!-- 浅蓝淡色胶囊底色 -->
+    <color name="meow_console_bg">#181F26</color>    <!-- Telegram 风格深色控制台面板 -->
+    <color name="meow_error">#FF3B30</color>         <!-- 错误/断开红 -->
 </resources>

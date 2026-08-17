@@ -1,7 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <menu xmlns:android="http://schemas.android.com/apk/res/android">
-    <item android:id="@+id/nav_home" android:icon="@android:drawable/ic_lock_lock" android:title="首页" />
-    <item android:id="@+id/nav_nodes" android:icon="@android:drawable/ic_menu_agenda" android:title="节点" />
-    <item android:id="@+id/nav_rules" android:icon="@android:drawable/ic_menu_manage" android:title="规则" />
-    <item android:id="@+id/nav_traffic" android:icon="@android:drawable/ic_menu_sort_by_size" android:title="流量" />
+    <item
+        android:id="@+id/nav_home"
+        android:icon="@drawable/ic_nav_home"
+        android:title="首页" />
+    <item
+        android:id="@+id/nav_nodes"
+        android:icon="@drawable/ic_nav_nodes"
+        android:title="节点" />
+    <item
+        android:id="@+id/nav_rules"
+        android:icon="@drawable/ic_nav_rules"
+        android:title="规则" />
+    <item
+        android:id="@+id/nav_traffic"
+        android:icon="@drawable/ic_nav_traffic"
+        android:title="流量与日志" />
 </menu>

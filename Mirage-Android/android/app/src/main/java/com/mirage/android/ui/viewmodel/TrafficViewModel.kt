@@ -3,11 +3,10 @@ package com.mirage.android.ui.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.mirage.android.data.model.LogLevel
 import com.mirage.android.data.model.TrafficStats
 import com.mirage.android.data.repository.VpnRepository
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
 class TrafficViewModel(application: Application) : AndroidViewModel(application) {
@@ -16,7 +15,14 @@ class TrafficViewModel(application: Application) : AndroidViewModel(application)
 
     val stats: StateFlow<TrafficStats> = vpnRepo.trafficStats
     val latencyMs: StateFlow<Long> = vpnRepo.latencyMs
-    val logs: StateFlow<List<String>> = vpnRepo.logs
+    val rawLogs: StateFlow<List<String>> = vpnRepo.logs
+
+    private val _selectedLogLevel = MutableStateFlow(LogLevel.ALL)
+    val selectedLogLevel: StateFlow<LogLevel> = _selectedLogLevel.asStateFlow()
+
+    val filteredLogs: StateFlow<List<String>> = combine(rawLogs, selectedLogLevel) { logs, level ->
+        if (level == LogLevel.ALL) logs else logs.filter { level.matches(it) }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     private val _historyUp = MutableStateFlow<List<Float>>(emptyList())
     val historyUp: StateFlow<List<Float>> = _historyUp.asStateFlow()
@@ -39,6 +45,10 @@ class TrafficViewModel(application: Application) : AndroidViewModel(application)
                 _historyDown.value = downList.toList()
             }
         }
+    }
+
+    fun setLogLevel(level: LogLevel) {
+        _selectedLogLevel.value = level
     }
 
     fun clearLogs() {

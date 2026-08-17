@@ -130,29 +130,34 @@ class HomeFragment : Fragment() {
 
         when (state) {
             is VpnState.Connected -> {
-                binding.statusText.text = "已连接"
+                binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_connected))
+                binding.statusText.text = "已连接 (加密隧道保护中)"
                 binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_connected))
                 binding.connectBtn.text = getString(R.string.disconnect)
-                binding.connectBtn.setBackgroundColor(Color.parseColor("#DC2626")) // 红
+                binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_error))
             }
             is VpnState.Connecting -> {
-                binding.statusText.text = "连接中…"
-                binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_upload))
-                binding.connectBtn.text = "连接中…"
-                binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_upload))
+                binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_ginger))
+                binding.statusText.text = "正在建立加密隧道…"
+                binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_ginger))
+                binding.connectBtn.text = "正在连接…"
+                binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_ginger))
             }
             is VpnState.Stopping -> {
-                binding.statusText.text = "断开中…"
+                binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
+                binding.statusText.text = "正在断开连接…"
                 binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
                 binding.connectBtn.text = "断开中…"
             }
             is VpnState.Error -> {
+                binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_error))
                 binding.statusText.text = "连接异常: ${state.message}"
-                binding.statusText.setTextColor(Color.parseColor("#DC2626"))
+                binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_error))
                 binding.connectBtn.text = getString(R.string.connect)
                 binding.connectBtn.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.meow_blue))
             }
             is VpnState.Disconnected -> {
+                binding.statusDot.backgroundTintList = android.content.res.ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
                 binding.statusText.text = getString(R.string.status_idle)
                 binding.statusText.setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_disconnected))
                 binding.connectBtn.text = getString(R.string.connect)
