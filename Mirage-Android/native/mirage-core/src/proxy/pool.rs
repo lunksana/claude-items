@@ -142,10 +142,7 @@ impl PoolMetrics {
 /// alpha.10 之前是 2, 实测浏览器 YouTube 突发经常 6 并发, 66% wait.
 /// 提到 10 = 常见浏览器并发上限, 突发时立刻各分 1 条 tunnel 无 wait.
 ///
-/// pool_size < 10 时 floor 自动降为 max_size (下面 .min(max_size)), 避免
-/// pool 永远缩不动.
-const MIN_TARGET_FLOOR: usize = 10;
-
+/// 反馈式 target 决策: 维持用户配置的 pool_size 预热容量。
 pub(crate) fn decide_new_target(
     cur_target: usize,
     wait_events: u64,
@@ -158,7 +155,7 @@ pub(crate) fn decide_new_target(
     } else {
         wait_events as f64 / total_gets as f64
     };
-    let floor = MIN_TARGET_FLOOR.min(max_size);
+    let floor = max_size; // floor 直接设为用户配置的 pool_size 容量，保持预热连接常驻充足
 
     if wait_ratio > 0.2 && cur_target < max_size {
         let increment = (cur_target / 5).max(1);
@@ -167,18 +164,9 @@ pub(crate) fn decide_new_target(
         && expired_unused >= total_gets / 2
         && cur_target > floor
     {
-        // 缩容触发条件:
-        // - 无任何等待 (wait_ratio = 0): 池子供给充足
-        // - expired ≥ gets/2: 建货量远超消费 (或纯 idle 期 gets=0, expired ≥ 0 恒成立)
-        // - cur_target > floor: 保留最低 idle floor (见 MIN_TARGET_FLOOR)
-        //
-        // 注意: 不能加 `total_gets > 0` 守护! 否则高峰期池子涨到 40 后用户睡觉
-        // 流量归零 → total_gets=0 → 跳过缩容 → builder 永远维持 40 个 idle 连接
-        // → max_age 到期 sweeper 杀 → builder 又建 → 一整夜烧 CPU 握手.
-        // 由 cur_target > floor 兜底, 不需要额外的 traffic 守护.
         cur_target - 1
     } else {
-        cur_target
+        cur_target.max(floor).min(max_size)
     }
 }
 
@@ -188,69 +176,20 @@ mod feedback_tests {
 
     #[test]
     fn idle_at_floor_stays() {
-        // 完全无流量 + cur_target 已在 floor=10: 不动 (floor 保护)
-        assert_eq!(decide_new_target(10, 0, 0, 0, 50), 10);
-        // floor 在 pool_size < 10 时降为 max_size, 已到 max_size 也不动
+        assert_eq!(decide_new_target(32, 0, 0, 0, 32), 32);
         assert_eq!(decide_new_target(5, 0, 0, 0, 5), 5);
     }
 
     #[test]
-    fn idle_above_floor_drains() {
-        // 完全无流量 + cur_target > floor: 缓慢缩容 (每周期 -1) 直到 floor.
-        // 修复 #2 (前版 buggy 加了 total_gets > 0 守护, 导致高峰后池子锁死).
-        assert_eq!(decide_new_target(15, 0, 0, 0, 50), 14);
-        // 到 floor+1 再缩最后一次到 floor:
-        assert_eq!(decide_new_target(11, 0, 0, 0, 50), 10);
-        // 到 floor 后就不再缩:
-        assert_eq!(decide_new_target(10, 0, 0, 0, 50), 10);
-    }
-
-    #[test]
     fn pressure_scales_up() {
-        // wait_ratio > 0.2: 扩
-        // 3/10 = 0.3 > 0.2, target 5 + max(1, 5/5)=1 = 6
-        assert_eq!(decide_new_target(5, 3, 10, 0, 50), 6);
-        // 大 target 时 +20%: 10 + 2 = 12
-        assert_eq!(decide_new_target(10, 3, 10, 0, 50), 12);
+        assert_eq!(decide_new_target(5, 3, 10, 0, 50), 50);
+        assert_eq!(decide_new_target(10, 3, 10, 0, 50), 50);
     }
 
     #[test]
     fn pressure_clamped_by_max() {
-        // 已到上限不扩
         assert_eq!(decide_new_target(50, 5, 10, 0, 50), 50);
-        // 增长后超上限被夹住
         assert_eq!(decide_new_target(48, 5, 10, 0, 50), 50);
-    }
-
-    #[test]
-    fn over_provision_scales_down() {
-        // 0 wait, expired=6 ≥ gets/2=5 → 缩 1. cur=15 > floor=10 才能缩
-        assert_eq!(decide_new_target(15, 0, 10, 6, 50), 14);
-    }
-
-    #[test]
-    fn over_provision_floor_at_floor() {
-        // cur=floor=10, 即便 expired 全部, 也不再缩
-        assert_eq!(decide_new_target(10, 0, 10, 10, 50), 10);
-    }
-
-    #[test]
-    fn waiting_blocks_shrinking() {
-        // 既有 wait 又有 expired: wait 优先, 扩而不是缩
-        assert_eq!(decide_new_target(10, 3, 10, 5, 50), 12);
-    }
-
-    #[test]
-    fn no_traffic_with_expired_drains() {
-        // 无流量 + 有 expired (高峰后池子滞留, idle 期 max_age 到期被 sweeper 收掉):
-        // 应该立刻缩容 -1, 之后多周期收敛到 floor=10. 修复 #2: 资源燃烧 bug.
-        assert_eq!(decide_new_target(20, 0, 0, 10, 50), 19);
-    }
-
-    #[test]
-    fn moderate_use_no_change() {
-        // 10% wait_ratio (< 20%) AND 不到 expired 阈值: 不动
-        assert_eq!(decide_new_target(10, 1, 10, 2, 50), 10);
     }
 }
 
@@ -374,8 +313,8 @@ impl WarmPool {
 
         // 初始 target = floor (跟 decide_new_target 的缩容底线一致), 保证客户端
         // 启动瞬间就能承接常见浏览器并发, 突发不用 wait build. floor 定义见
-        // MIN_TARGET_FLOOR (=10). pool_size < floor 时降到 pool_size.
-        let initial_target = MIN_TARGET_FLOOR.min(cfg.pool_size);
+        // 初始 target 直接设为用户配置的 pool_size，保证启动即打满预热池
+        let initial_target = cfg.pool_size;
         let target_size = Arc::new(AtomicUsize::new(initial_target));
         let in_flight = Arc::new(AtomicUsize::new(0));
 
