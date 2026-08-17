@@ -14,6 +14,8 @@ interface ICoreService {
     boolean setNode(String uri);
     /** 注入路由规则 (JSON)。 */
     boolean setRules(String json);
+    /** 动态设置日志等级 (trace/debug/info/warn/error)。 */
+    boolean setLogLevel(String level);
     boolean isRunning();
     boolean isHealthy();
     long latencyMs();

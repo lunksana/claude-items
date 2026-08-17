@@ -73,6 +73,7 @@ class TrafficFragment : Fragment() {
                 R.id.chipLevelWarn -> LogLevel.WARN
                 R.id.chipLevelError -> LogLevel.ERROR
                 R.id.chipLevelDebug -> LogLevel.DEBUG
+                R.id.chipLevelTrace -> LogLevel.TRACE
                 else -> LogLevel.ALL
             }
             viewModel.setLogLevel(level)

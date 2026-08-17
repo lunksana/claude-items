@@ -44,6 +44,14 @@ struct RunState {
 
 // ── JNI 导出 ───────────────────────────────────────────────────────────────
 
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::reload;
+use tracing_subscriber::EnvFilter;
+
+type ReloadHandle = reload::Handle<EnvFilter, tracing_subscriber::Registry>;
+static RELOAD_HANDLE: Mutex<Option<ReloadHandle>> = Mutex::new(None);
+
 /// 把 tracing 输出同时写进 App 日志面板 (monitor::global_logger) 与 stderr。
 #[derive(Clone)]
 struct PanelWriter;
@@ -69,14 +77,22 @@ impl std::io::Write for PanelWriter {
 fn init_logging() {
     static LOG_INIT: Once = Once::new();
     LOG_INIT.call_once(|| {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "mirage_core=info".into()),
+        let default_filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "mirage_core=info,mirage_jni=info".into());
+        let (filter_layer, reload_handle) = reload::Layer::new(default_filter);
+        if let Ok(mut lock) = RELOAD_HANDLE.lock() {
+            *lock = Some(reload_handle);
+        }
+
+        let _ = tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(PanelWriter),
             )
-            .with_ansi(false)
-            .with_writer(PanelWriter)
             .try_init();
+
         // panic hook: Rust panic 会 abort 进程 (闪退), 至少把堆栈写进日志便于定位
         std::panic::set_hook(Box::new(|info| {
             eprintln!("[mirage-jni] PANIC: {info}");
@@ -84,6 +100,45 @@ fn init_logging() {
             eprintln!("[mirage-jni] stack:\n{bt}");
         }));
     });
+}
+
+pub fn update_log_level(level: &str) -> bool {
+    init_logging();
+    let filter_str = match level.to_ascii_lowercase().as_str() {
+        "trace" => "mirage_core=trace,mirage_jni=trace",
+        "debug" => "mirage_core=debug,mirage_jni=debug",
+        "warn" => "mirage_core=warn,mirage_jni=warn",
+        "error" => "mirage_core=error,mirage_jni=error",
+        _ => "mirage_core=info,mirage_jni=info",
+    };
+    if let Ok(lock) = RELOAD_HANDLE.lock() {
+        if let Some(handle) = lock.as_ref() {
+            if let Ok(new_filter) = EnvFilter::try_new(filter_str) {
+                let ok = handle.reload(new_filter).is_ok();
+                tracing::info!("[mirage-jni] 日志过滤级别已切换为: {level} (filter: {filter_str})");
+                return ok;
+            }
+        }
+    }
+    false
+}
+
+/// `boolean setLogLevel(String level)` — 动态热切换 Rust 日志级别 (trace/debug/info/warn/error)。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_setLogLevel(
+    mut env: JNIEnv,
+    _class: JClass,
+    level: JString,
+) -> jboolean {
+    let level_str: String = match env.get_string(&level) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    if update_log_level(&level_str) {
+        1
+    } else {
+        0
+    }
 }
 
 /// `int start(int tunFd, String uri, int poolSize)` — uri 为 `mirage://密码@host:port?sni=...`。

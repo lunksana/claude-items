@@ -261,6 +261,11 @@ class CoreService : VpnService() {
         else -> "%.0fB".format(b)
     }
 
+    fun setLogLevelInternal(level: String): Boolean {
+        log("[core] 切换内核日志级别: $level")
+        return MirageNative.setLogLevel(level)
+    }
+
     override fun onDestroy() {
         clearActive()
         log("[core] onDestroy()")
@@ -279,6 +284,8 @@ class CoreService : VpnService() {
         override fun stop() = stopInternal()
         override fun setNode(uri: String): Boolean = setNodeInternal(uri)
         override fun setRules(json: String): Boolean = setRulesInternal(json)
+        override fun setLogLevel(level: String?): Boolean =
+            level?.let { setLogLevelInternal(it) } ?: false
         override fun isRunning(): Boolean = isRunningInternal()
         override fun isHealthy(): Boolean = isHealthyInternal()
         override fun latencyMs(): Long = latencyMsInternal()

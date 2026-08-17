@@ -49,6 +49,7 @@ class TrafficViewModel(application: Application) : AndroidViewModel(application)
 
     fun setLogLevel(level: LogLevel) {
         _selectedLogLevel.value = level
+        vpnRepo.setLogLevel(level)
     }
 
     fun clearLogs() {

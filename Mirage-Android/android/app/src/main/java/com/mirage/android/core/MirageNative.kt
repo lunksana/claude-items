@@ -32,6 +32,9 @@ object MirageNative {
 
     external fun version(): String
 
+    /** 动态设置 Rust 日志等级 (trace/debug/info/warn/error)。 */
+    external fun setLogLevel(level: String): Boolean
+
     /** 设置自定义分流规则 (JSON: domains_direct/domains_proxy/cidrs_direct/cidrs_proxy)。 */
     external fun setRules(json: String): Boolean
 

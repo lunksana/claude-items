@@ -209,6 +209,14 @@
                     android:layout_height="wrap_content"
                     android:text="DEBUG"
                     android:textSize="11sp" />
+
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipLevelTrace"
+                    style="@style/Widget.Material3.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="TRACE"
+                    android:textSize="11sp" />
             </com.google.android.material.chip.ChipGroup>
         </HorizontalScrollView>
 

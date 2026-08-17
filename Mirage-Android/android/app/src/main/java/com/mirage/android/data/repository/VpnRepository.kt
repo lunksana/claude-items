@@ -115,6 +115,17 @@ class VpnRepository(private val context: Context) {
         _logs.value = emptyList()
     }
 
+    fun setLogLevel(level: com.mirage.android.data.model.LogLevel): Boolean {
+        val levelStr = when (level) {
+            com.mirage.android.data.model.LogLevel.ALL, com.mirage.android.data.model.LogLevel.DEBUG -> "debug"
+            com.mirage.android.data.model.LogLevel.TRACE -> "trace"
+            com.mirage.android.data.model.LogLevel.INFO -> "info"
+            com.mirage.android.data.model.LogLevel.WARN -> "warn"
+            com.mirage.android.data.model.LogLevel.ERROR -> "error"
+        }
+        return CoreController.setLogLevel(levelStr)
+    }
+
     private fun startTelemetry() {
         telemetryJob?.cancel()
         telemetryJob = scope.launch(Dispatchers.IO) {

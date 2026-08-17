@@ -75,6 +75,7 @@ object CoreController {
     fun stop() { call { it.stop() } }
     fun setNode(uri: String): Boolean = call { it.setNode(uri) } ?: false
     fun setRules(json: String): Boolean = call { it.setRules(json) } ?: false
+    fun setLogLevel(level: String): Boolean = call { it.setLogLevel(level) } ?: false
 
     // ── 状态 ──
     fun isRunning(): Boolean = call { it.isRunning() } ?: false
