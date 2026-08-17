@@ -1,57 +1,124 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
+    android:background="@color/meow_canvas"
     android:padding="16dp">
 
-    <TextView
-        android:layout_width="wrap_content"
+    <!-- 顶栏标题与快捷操作 -->
+    <LinearLayout
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="节点管理"
-        android:textSize="20sp"
-        android:textStyle="bold" />
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingVertical="4dp">
 
-    <ScrollView
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="节点管理"
+            android:textColor="@color/meow_ink"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnImportClipboard"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="wrap_content"
+            android:layout_height="38dp"
+            android:paddingHorizontal="10dp"
+            android:text="剪贴板导入"
+            android:textSize="12sp"
+            app:cornerRadius="8dp"
+            app:strokeColor="@color/meow_blue" />
+    </LinearLayout>
+
+    <!-- 节点列表 -->
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1">
+        android:layout_weight="1"
+        android:layout_marginVertical="10dp">
 
-        <LinearLayout
-            android:id="@+id/nodeList"
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/recyclerNodes"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical" />
-    </ScrollView>
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            tools:listitem="@layout/item_node" />
 
+        <TextView
+            android:id="@+id/tvEmptyNodes"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="暂无节点，点击下方「添加节点」或「剪贴板导入」"
+            android:textColor="#94A3B8"
+            android:textSize="14sp"
+            android:visibility="gone" />
+    </FrameLayout>
+
+    <!-- 底部功能按钮组 -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal">
 
-        <Button
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/addNodeBtn"
+            style="@style/MirageButton"
             android:layout_width="0dp"
             android:layout_height="48dp"
+            android:layout_marginEnd="4dp"
             android:layout_weight="1"
-            android:gravity="center"
             android:text="添加节点"
-            android:textSize="15sp" />
+            android:textSize="14sp"
+            app:cornerRadius="10dp" />
 
-        <Button
-            android:id="@+id/autoSelectBtn"
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnTestAll"
+            style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="0dp"
             android:layout_height="48dp"
+            android:layout_marginStart="4dp"
             android:layout_weight="1"
-            android:gravity="center"
-            android:maxLines="1"
-            android:text="自动选择"
-            android:textSize="13sp" />
+            android:text="一键测速"
+            android:textSize="14sp"
+            app:cornerRadius="10dp" />
     </LinearLayout>
 
-    <Button
-        android:id="@+id/testMethodBtn"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="测试方法: tcp" />
+        android:layout_marginTop="6dp"
+        android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/autoSelectBtn"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="0dp"
+            android:layout_height="42dp"
+            android:layout_marginEnd="4dp"
+            android:layout_weight="1"
+            android:text="自动选择: 关"
+            android:textSize="12sp"
+            app:cornerRadius="8dp"
+            app:strokeColor="@color/meow_outline" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/testMethodBtn"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="0dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="4dp"
+            android:layout_weight="1"
+            android:text="测试方法: tcp"
+            android:textSize="12sp"
+            app:cornerRadius="8dp"
+            app:strokeColor="@color/meow_outline" />
+    </LinearLayout>
 </LinearLayout>

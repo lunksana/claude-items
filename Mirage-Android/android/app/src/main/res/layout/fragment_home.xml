@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/meow_canvas"
@@ -17,7 +18,8 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center_vertical"
-            android:orientation="horizontal">
+            android:orientation="horizontal"
+            android:paddingVertical="4dp">
 
             <TextView
                 android:layout_width="0dp"
@@ -25,15 +27,14 @@
                 android:layout_weight="1"
                 android:text="Mirage"
                 android:textColor="@color/meow_ink"
-                android:textSize="24sp"
+                android:textSize="26sp"
                 android:textStyle="bold" />
 
-            <Switch
+            <com.google.android.material.switchmaterial.SwitchMaterial
                 android:id="@+id/connectSwitch"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:minWidth="0dp"
-                android:showText="false" />
+                android:minWidth="0dp" />
         </LinearLayout>
 
         <!-- 状态卡片 -->
@@ -41,14 +42,15 @@
             style="@style/MirageCard"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp">
+            android:layout_marginTop="14dp"
+            app:cardCornerRadius="16dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:gravity="center"
                 android:orientation="vertical"
-                android:padding="20dp">
+                android:padding="22dp">
 
                 <TextView
                     android:id="@+id/statusText"
@@ -56,21 +58,66 @@
                     android:layout_height="wrap_content"
                     android:text="@string/status_idle"
                     android:textColor="@color/meow_disconnected"
-                    android:textSize="20sp"
+                    android:textSize="22sp"
                     android:textStyle="bold" />
 
                 <TextView
-                    android:id="@+id/currentNode"
+                    android:id="@+id/tvLatency"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:text="节点: (无) → 点击添加"
-                    android:textColor="@color/meow_ink"
-                    android:textSize="15sp" />
+                    android:layout_marginTop="4dp"
+                    android:textColor="#64748B"
+                    android:textSize="13sp"
+                    android:visibility="gone"
+                    tools:text="隧道 RTT: 42ms"
+                    tools:visibility="visible" />
+
+                <!-- 选中节点卡片 -->
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/nodeSelectCard"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:clickable="true"
+                    android:focusable="true"
+                    app:cardBackgroundColor="#080077CC"
+                    app:cardCornerRadius="10dp"
+                    app:cardElevation="0dp"
+                    app:strokeColor="@color/meow_outline"
+                    app:strokeWidth="1dp">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal"
+                        android:paddingHorizontal="14dp"
+                        android:paddingVertical="10dp">
+
+                        <TextView
+                            android:id="@+id/currentNode"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:ellipsize="end"
+                            android:maxLines="1"
+                            android:text="节点: (无) → 点击添加"
+                            android:textColor="@color/meow_ink"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="切换 ›"
+                            android:textColor="@color/meow_blue"
+                            android:textSize="13sp" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
-        <!-- 上传/下载流量卡片 (meow: 上传琥珀 / 下载蓝) -->
+        <!-- 实时速率卡片: 上传/下载 -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -82,7 +129,8 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginEnd="6dp"
-                android:layout_weight="1">
+                android:layout_weight="1"
+                app:cardCornerRadius="14dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -94,14 +142,16 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="上传"
+                        android:text="上传速率"
                         android:textColor="@color/meow_upload"
-                        android:textSize="13sp" />
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
 
                     <TextView
                         android:id="@+id/upRate"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
                         android:text="0 B/s"
                         android:textColor="@color/meow_upload"
                         android:textSize="22sp"
@@ -114,7 +164,8 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="6dp"
-                android:layout_weight="1">
+                android:layout_weight="1"
+                app:cardCornerRadius="14dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
@@ -126,14 +177,16 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="下载"
+                        android:text="下载速率"
                         android:textColor="@color/meow_download"
-                        android:textSize="13sp" />
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
 
                     <TextView
                         android:id="@+id/downRate"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
                         android:text="0 B/s"
                         android:textColor="@color/meow_download"
                         android:textSize="22sp"
@@ -142,24 +195,25 @@
             </com.google.android.material.card.MaterialCardView>
         </LinearLayout>
 
-        <!-- 累计流量 + 连接统计 小卡片 -->
+        <!-- 累计流量与活跃连接 -->
         <com.google.android.material.card.MaterialCardView
             style="@style/MirageCard"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp">
+            android:layout_marginTop="12dp"
+            app:cardCornerRadius="14dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="12dp">
+                android:padding="16dp">
 
                 <TextView
                     android:id="@+id/totalFlow"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="累计: ↑0B / ↓0B"
+                    android:text="累计流量: ↑0 B / ↓0 B"
                     android:textColor="@color/meow_ink"
                     android:textSize="14sp" />
 
@@ -167,22 +221,23 @@
                     android:id="@+id/connsInfo"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:text="TCP 0 · UDP 0 · DNS 0"
-                    android:textColor="@color/meow_ink"
+                    android:layout_marginTop="6dp"
+                    android:text="活跃连接: TCP 0 · UDP 0 · DNS 0"
+                    android:textColor="#64748B"
                     android:textSize="13sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
         <!-- 连接按钮 -->
-        <Button
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/connectBtn"
             style="@style/MirageButton"
             android:layout_width="match_parent"
-            android:layout_height="52dp"
-            android:layout_marginTop="16dp"
+            android:layout_height="54dp"
+            android:layout_marginTop="18dp"
             android:text="@string/connect"
-            android:textSize="18sp" />
+            android:textSize="17sp"
+            app:cornerRadius="12dp" />
 
     </LinearLayout>
 </ScrollView>

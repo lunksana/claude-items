@@ -88,16 +88,6 @@ class CoreService : VpnService() {
         }
         LogStore.append("[core] 内核已启动")
         notifyState()
-        // protect 轮询 (隧道 socket 防环路)
-        scope.launch {
-            while (isActive) {
-                runCatching {
-                    val fds = MirageNative.drainProtectFds()
-                    for (f in fds) runCatching { protect(f) }
-                }
-                delay(200)
-            }
-        }
         // 文件日志: 内核+App 日志落盘 (adb run-as cat files/core.log 诊断用)
         scope.launch {
             while (isActive) {
@@ -175,11 +165,15 @@ class CoreService : VpnService() {
             .also { getSystemService(NotificationManager::class.java)?.createNotificationChannel(it) }
         val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE)
+        val stopIntent = Intent(this, CoreService::class.java).setAction(ACTION_STOP)
+        val stopPi = PendingIntent.getService(this, 1, stopIntent, PendingIntent.FLAG_IMMUTABLE)
+
         val notif: Notification = NotificationCompat.Builder(this, "mirage")
             .setContentTitle("Mirage 已连接")
             .setContentText("流量经 Mirage 隧道转发")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentIntent(pi)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "断开", stopPi)
             .setOngoing(true)
             .build()
         startForeground(1, notif)
@@ -189,11 +183,15 @@ class CoreService : VpnService() {
         val nm = getSystemService(NotificationManager::class.java) ?: return
         val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE)
+        val stopIntent = Intent(this, CoreService::class.java).setAction(ACTION_STOP)
+        val stopPi = PendingIntent.getService(this, 1, stopIntent, PendingIntent.FLAG_IMMUTABLE)
+
         val notif = NotificationCompat.Builder(this, "mirage")
             .setContentTitle("Mirage 已连接")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentIntent(pi)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "断开", stopPi)
             .setOngoing(true)
             .build()
         nm.notify(1, notif)

@@ -1,59 +1,127 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
+    android:background="@color/meow_canvas"
     android:padding="16dp">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="分流规则"
-        android:textSize="20sp"
-        android:textStyle="bold" />
-
-    <!-- 内置规则: 按钮展开查看 (geo 数据: 中国 IP 段 + 国内域名) -->
-    <Button
-        android:id="@+id/builtinToggleBtn"
-        style="@style/MirageButton"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="查看内置规则 (GeoIP CN / GeoSite CN)" />
-
+    <!-- 顶栏标题 -->
     <LinearLayout
-        android:id="@+id/builtinContainer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical" />
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingVertical="4dp">
 
-    <ScrollView
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="分流规则"
+            android:textColor="@color/meow_ink"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/defaultActionBtn"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="wrap_content"
+            android:layout_height="38dp"
+            android:paddingHorizontal="10dp"
+            android:text="默认: 代理"
+            android:textSize="12sp"
+            app:cornerRadius="8dp"
+            app:strokeColor="@color/meow_outline" />
+    </LinearLayout>
+
+    <!-- 内置规则折叠卡片 -->
+    <com.google.android.material.card.MaterialCardView
+        style="@style/MirageCard"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1">
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        app:cardCornerRadius="10dp">
 
         <LinearLayout
-            android:id="@+id/ruleList"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical" />
-    </ScrollView>
+            android:orientation="vertical">
 
-    <Button
-        android:id="@+id/addRuleBtn"
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/builtinToggleBtn"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="start|center_vertical"
+                android:text="查看内置规则 (GeoIP CN / GeoSite CN) ▾"
+                android:textColor="@color/meow_blue"
+                android:textSize="13sp" />
+
+            <LinearLayout
+                android:id="@+id/builtinContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingHorizontal="12dp"
+                android:paddingBottom="12dp"
+                android:visibility="gone" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- 自定义规则列表 -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginVertical="8dp">
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/recyclerRules"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            tools:listitem="@layout/item_rule" />
+
+        <TextView
+            android:id="@+id/tvEmptyRules"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:text="暂无自定义规则，默认国内直连，其余代理"
+            android:textColor="#94A3B8"
+            android:textSize="14sp"
+            android:visibility="gone" />
+    </FrameLayout>
+
+    <!-- 底部按钮组 -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="添加规则" />
+        android:orientation="horizontal">
 
-    <Button
-        android:id="@+id/defaultActionBtn"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="默认策略" />
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/addRuleBtn"
+            style="@style/MirageButton"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_marginEnd="4dp"
+            android:layout_weight="1"
+            android:text="添加规则"
+            android:textSize="14sp"
+            app:cornerRadius="10dp" />
 
-    <Button
-        android:id="@+id/applyRulesBtn"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="应用规则" />
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/applyRulesBtn"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_marginStart="4dp"
+            android:layout_weight="1"
+            android:text="应用规则"
+            android:textSize="14sp"
+            app:cornerRadius="10dp" />
+    </LinearLayout>
 </LinearLayout>

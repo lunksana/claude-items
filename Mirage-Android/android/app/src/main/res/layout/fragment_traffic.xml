@@ -1,95 +1,202 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
+    android:background="@color/meow_canvas"
     android:padding="16dp">
 
-    <TextView
-        android:id="@+id/upRate"
+    <!-- 顶栏速率统计卡片 -->
+    <com.google.android.material.card.MaterialCardView
+        style="@style/MirageCard"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="↑ 0 B/s"
-        android:textColor="#10B981"
-        android:textSize="36sp"
-        android:textStyle="bold" />
+        app:cardCornerRadius="14dp">
 
-    <TextView
-        android:id="@+id/downRate"
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="14dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="↑ 上行速率"
+                        android:textColor="@color/meow_upload"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/upRate"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="0 B/s"
+                        android:textColor="@color/meow_upload"
+                        android:textSize="26sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="↓ 下行速率"
+                        android:textColor="@color/meow_download"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/downRate"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="0 B/s"
+                        android:textColor="@color/meow_download"
+                        android:textSize="26sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginVertical="10dp"
+                android:background="@color/meow_outline" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/totalUp"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="累计上行: 0 B"
+                    android:textColor="#64748B"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/totalDown"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="累计下行: 0 B"
+                    android:textColor="#64748B"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/conns"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="活跃连接: TCP 0 · UDP 0"
+                    android:textColor="#64748B"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/dnsCount"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="DNS 查询: 0"
+                    android:textColor="#64748B"
+                    android:textSize="12sp" />
+            </LinearLayout>
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- 实时曲线卡片 -->
+    <com.google.android.material.card.MaterialCardView
+        style="@style/MirageCard"
+        android:layout_width="match_parent"
+        android:layout_height="140dp"
+        android:layout_marginTop="10dp"
+        app:cardCornerRadius="12dp">
+
+        <com.mirage.android.TrafficChart
+            android:id="@+id/chart"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:padding="8dp" />
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- 日志卡片与操作 -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="↓ 0 B/s"
-        android:textColor="#3B82F6"
-        android:textSize="36sp"
-        android:textStyle="bold" />
+        android:layout_marginTop="10dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
 
-    <TextView
-        android:id="@+id/totalUp"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="累计上行: 0 B"
-        android:textSize="13sp" />
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="实时运行日志"
+            android:textColor="@color/meow_ink"
+            android:textSize="15sp"
+            android:textStyle="bold" />
 
-    <TextView
-        android:id="@+id/totalDown"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="累计下行: 0 B"
-        android:textSize="13sp" />
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnClearLogs"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:text="清空日志"
+            android:textSize="12sp" />
+    </LinearLayout>
 
-    <TextView
-        android:id="@+id/conns"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:text="活跃连接: TCP 0 / UDP 0"
-        android:textSize="13sp" />
-
-    <TextView
-        android:id="@+id/dnsCount"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="DNS 查询: 0"
-        android:textSize="13sp" />
-
-    <com.mirage.android.TrafficChart
-        android:id="@+id/chart"
+    <com.google.android.material.card.MaterialCardView
+        style="@style/MirageCard"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:layout_marginTop="12dp"
-        android:background="#11000000" />
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
         android:layout_marginTop="4dp"
-        android:text="最近 60 秒速率 (绿=上行, 蓝=下行)"
-        android:textSize="11sp" />
+        app:cardCornerRadius="10dp">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="日志"
-        android:textSize="15sp"
-        android:textStyle="bold" />
-
-    <ScrollView
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1.2"
-        android:layout_marginTop="4dp">
-
-        <TextView
-            android:id="@+id/trafficLogView"
+        <ScrollView
+            android:id="@+id/scrollLogs"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:background="@color/meow_card"
-            android:fontFamily="monospace"
-            android:padding="8dp"
-            android:textSize="11sp"
-            android:typeface="monospace" />
-    </ScrollView>
+            android:layout_height="match_parent"
+            android:padding="8dp">
+
+            <TextView
+                android:id="@+id/trafficLogView"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:textColor="#334155"
+                android:textSize="11sp"
+                tools:text="[core] Mirage 内核运行中..." />
+        </ScrollView>
+    </com.google.android.material.card.MaterialCardView>
 </LinearLayout>

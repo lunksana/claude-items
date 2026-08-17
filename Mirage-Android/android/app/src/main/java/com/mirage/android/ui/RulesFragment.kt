@@ -6,313 +6,232 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
-import android.widget.ImageButton
-import android.widget.LinearLayout
-import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
+import androidx.fragment.app.viewModels
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.recyclerview.widget.LinearLayoutManager
 import com.mirage.android.R
-import com.mirage.android.core.CoreController
-import com.mirage.android.core.RuleStore
+import com.mirage.android.data.model.Rule
+import com.mirage.android.databinding.FragmentRulesBinding
+import com.mirage.android.ui.adapter.RuleAdapter
+import com.mirage.android.ui.viewmodel.RulesViewModel
+import kotlinx.coroutines.launch
 
 /**
- * 分流规则 Tab: 自定义规则 + 默认策略。
+ * 分流规则 Tab: 现代 RecyclerView 列表 + 规则管理。
  */
 class RulesFragment : Fragment() {
 
-    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
-        return inflater.inflate(R.layout.fragment_rules, container, false)
+    private var _binding: FragmentRulesBinding? = null
+    private val binding get() = _binding!!
+
+    private val viewModel: RulesViewModel by viewModels()
+    private lateinit var adapter: RuleAdapter
+    private var isBuiltinExpanded = false
+
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
+        _binding = FragmentRulesBinding.inflate(inflater, container, false)
+        return binding.root
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        view.findViewById<Button>(R.id.addRuleBtn).setOnClickListener { showRuleDialog() }
-        view.findViewById<Button>(R.id.defaultActionBtn).setOnClickListener { chooseDefaultAction() }
-        view.findViewById<Button>(R.id.applyRulesBtn).setOnClickListener {
-            val ok = CoreController.setRules(RuleStore.toJson(requireContext()))
-            Toast.makeText(context, if (ok) "规则已应用" else "规则格式有误", Toast.LENGTH_SHORT).show()
-        }
-        // 内置规则: 按钮展开/收起
-        view.findViewById<Button>(R.id.builtinToggleBtn).setOnClickListener { toggleBuiltin() }
-        renderRules()
+
+        setupRecyclerView()
+        setupButtons()
+        observeState()
     }
 
-    private var builtinShown = false
-
-    private fun toggleBuiltin() {
-        builtinShown = !builtinShown
-        val btn = view?.findViewById<Button>(R.id.builtinToggleBtn) ?: return
-        btn.text = if (builtinShown)
-            "收起内置规则 (GeoIP CN / GeoSite CN) ▴"
-        else
-            "查看内置规则 (GeoIP CN / GeoSite CN) ▾"
-        if (builtinShown) {
-            loadBuiltinRules()
-        } else {
-            view?.findViewById<LinearLayout>(R.id.builtinContainer)?.removeAllViews()
-        }
-    }
-
-    /** 加载并显示内置规则 (国内域名白名单 + 中国 IP 段)。 */
-    private fun loadBuiltinRules() {
-        val v = view ?: return
-        val container = v.findViewById<LinearLayout>(R.id.builtinContainer)
-        container.removeAllViews()
-        try {
-            val domains = CoreController.getBuiltinDomains().toList()
-            val ipCount = CoreController.getBuiltinIpCount()
-
-            // 卡片: 内置规则
-            val card = com.google.android.material.card.MaterialCardView(requireContext()).apply {
-                radius = 8f; cardElevation = 0f; strokeWidth = 1
-                strokeColor = ContextCompat.getColor(requireContext(), R.color.meow_outline)
-                setContentPadding(12, 10, 12, 10)
-            }
-            val inner = LinearLayout(requireContext()).apply { orientation = LinearLayout.VERTICAL }
-
-            inner.addView(TextView(requireContext()).apply {
-                text = "内置规则 (自动生效, 优先级低于自定义; 数据来自 geo 文件)"
-                setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15f)
-                setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_blue))
-            })
-            inner.addView(TextView(requireContext()).apply {
-                text = "● 国内域名 (DOMAIN-SUFFIX) · ${domains.size} 条:"
-                setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13f)
-            })
-            // 域名列表 (最多显示 20 条, 其余折叠)
-            val shown = domains.take(20)
-            val more = domains.size - shown.size
-            inner.addView(TextView(requireContext()).apply {
-                text = shown.joinToString("  ") { it } +
-                    (if (more > 0) "\n… 等 $more 条 (.cn/.com.cn 等国内后缀自动直连)" else "")
-                setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 12f)
-                setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_ink))
-                setPadding(4, 4, 4, 4)
-            })
-            inner.addView(TextView(requireContext()).apply {
-                text = "● 中国 IP 段 (IP-CIDR) · $ipCount 段"
-                setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 13f)
-                setPadding(0, 6, 0, 0)
-            })
-            card.addView(inner)
-            container.addView(card)
-        } catch (e: Exception) {
-            container.addView(TextView(requireContext()).apply { text = "内置规则加载失败: ${e.message}" })
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        view?.let { renderRules() }
-    }
-
-    private fun renderRules() {
-        val v = view ?: return
-        val container = v.findViewById<LinearLayout>(R.id.ruleList)
-        container.removeAllViews()
-        val rules = RuleStore.getRules(requireContext())
-
-        // 自定义规则标题
-        container.addView(TextView(requireContext()).apply {
-            text = "自定义规则 (${rules.size} 条)"
-            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 15f)
-            setTextColor(ContextCompat.getColor(requireContext(), R.color.meow_blue))
-            setPadding(0, 8, 0, 4)
-        })
-        v.findViewById<Button>(R.id.defaultActionBtn).text =
-            "默认策略: ${if (RuleStore.getDefaultAction(requireContext()) == "direct") "直连" else "代理"}"
-
-        if (rules.isEmpty()) {
-            container.addView(TextView(context).apply {
-                text = "无自定义规则, 默认: 国内直连, 其余代理"
-                textSize = 13f
-                setPadding(0, 4, 0, 4)
-            })
-            return
-        }
-        rules.forEachIndexed { index, rule ->
-            val row = com.google.android.material.card.MaterialCardView(requireContext()).apply {
-                radius = 8f
-                cardElevation = 0f
-                strokeWidth = 1
-                strokeColor = ContextCompat.getColor(requireContext(), R.color.meow_outline)
-                setContentPadding(12, 10, 12, 10)
-            }
-            val rowInner = LinearLayout(requireContext()).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = android.view.Gravity.CENTER_VERTICAL
-            }
-            val label = TextView(requireContext()).apply {
-                text = "${rule.pattern}  [${kindLabel(rule.kind)}]"
-                textSize = 14f
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            val actionTv = TextView(requireContext()).apply {
-                text = if (rule.action == "direct") "直连" else "代理"
-                setTextColor(resources.getColor(
-                    if (rule.action == "direct") android.R.color.holo_green_dark
-                    else android.R.color.holo_orange_dark, null))
-            }
-            // 右侧下拉菜单: 三点图标按钮 (上移/下移/编辑/删除)
-            val menuBtn = ImageButton(requireContext()).apply {
-                setImageResource(R.drawable.ic_more_vert)
-                background = null
-                setOnClickListener { showRuleMenu(it, index) }
-                layoutParams = LinearLayout.LayoutParams(
-                    (36 * resources.displayMetrics.density).toInt(),
-                    (36 * resources.displayMetrics.density).toInt())
-            }
-            rowInner.addView(label); rowInner.addView(actionTv); rowInner.addView(menuBtn)
-            row.addView(rowInner)
-            val lp = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT)
-            lp.setMargins(0, 6, 0, 6)
-            container.addView(row, lp)
-        }
-    }
-
-    /** 规则行右侧菜单: 上移/下移/编辑/删除。 */
-    private fun showRuleMenu(anchor: View, index: Int) {
-        val rules = RuleStore.getRules(requireContext())
-        val menu = android.widget.PopupMenu(requireContext(), anchor)
-        menu.menu.add(0, 1, 0, "上移")
-        menu.menu.add(0, 2, 0, "下移")
-        menu.menu.add(0, 3, 0, "编辑")
-        menu.menu.add(0, 4, 0, "删除")
-        menu.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
-                1 -> if (index > 0) { RuleStore.moveRule(requireContext(), index, index - 1); renderRules() }
-                2 -> if (index < rules.size - 1) { RuleStore.moveRule(requireContext(), index, index + 1); renderRules() }
-                3 -> showRuleDialog(index)
-                4 -> {
-                    AlertDialog.Builder(requireContext())
-                        .setMessage("删除规则 ${rules[index].pattern}?")
-                        .setPositiveButton("删除") { _, _ ->
-                            RuleStore.removeRule(requireContext(), index)
-                            renderRules()
-                        }
-                        .setNegativeButton("取消", null)
-                        .show()
-                }
-            }
-            true
-        }
-        menu.menu.getItem(0).isEnabled = index > 0
-        menu.menu.getItem(1).isEnabled = index < rules.size - 1
-        menu.show()
-    }
-
-    private fun kindLabel(kind: String): String = when (kind) {
-        "exact" -> "DOMAIN 精确"
-        "keyword" -> "DOMAIN-KEYWORD"
-        "regex" -> "DOMAIN-REGEX"
-        "cidr" -> "IP-CIDR"
-        else -> "DOMAIN-SUFFIX"
-    }
-
-    private fun showRuleDialog(index: Int? = null) {
-        val existing = index?.let { RuleStore.getRules(requireContext()).getOrNull(it) }
-        val kinds = arrayOf(
-            "DOMAIN-SUFFIX (域名后缀, 含子域)",
-            "DOMAIN (精确匹配, 不含子域)",
-            "DOMAIN-KEYWORD (关键词包含)",
-            "DOMAIN-REGEX (正则)",
-            "IP-CIDR (IP/段)",
+    private fun setupRecyclerView() {
+        adapter = RuleAdapter(
+            onEdit = { index, _ -> showRuleDialog(index) },
+            onDelete = { index, rule ->
+                AlertDialog.Builder(requireContext())
+                    .setTitle("删除规则")
+                    .setMessage("确定要删除规则「${rule.pattern}」吗？")
+                    .setPositiveButton("删除") { _, _ -> viewModel.deleteRule(index) }
+                    .setNegativeButton("取消", null)
+                    .show()
+            },
+            onMoveUp = { index, _ -> viewModel.moveRule(index, index - 1) },
+            onMoveDown = { index, _ -> viewModel.moveRule(index, index + 1) }
         )
-        val kindIndex = when (existing?.kind) {
-            "exact" -> 1; "keyword" -> 2; "regex" -> 3; "cidr" -> 4; else -> 0
+
+        binding.recyclerRules.layoutManager = LinearLayoutManager(requireContext())
+        binding.recyclerRules.adapter = adapter
+    }
+
+    private fun setupButtons() {
+        binding.addRuleBtn.setOnClickListener { showRuleDialog(null) }
+
+        binding.defaultActionBtn.setOnClickListener { chooseDefaultAction() }
+
+        binding.applyRulesBtn.setOnClickListener {
+            val ok = viewModel.applyRules()
+            Toast.makeText(requireContext(), if (ok) "分流规则已立即生效" else "规则应用失败", Toast.LENGTH_SHORT).show()
         }
-        val layout = LinearLayout(requireContext()).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(40, 16, 40, 0)
+
+        binding.builtinToggleBtn.setOnClickListener {
+            isBuiltinExpanded = !isBuiltinExpanded
+            binding.builtinContainer.visibility = if (isBuiltinExpanded) View.VISIBLE else View.GONE
+            binding.builtinToggleBtn.text = if (isBuiltinExpanded) {
+                "收起内置规则 (GeoIP CN / GeoSite CN) ▴"
+            } else {
+                "查看内置规则 (GeoIP CN / GeoSite CN) ▾"
+            }
+            if (isBuiltinExpanded) {
+                viewModel.refreshBuiltin()
+            }
         }
-        val pattern = EditText(requireContext()).apply {
-            hint = "域名 如 google.com; 或 IP/段 如 1.2.3.0/24"
-            setText(existing?.pattern ?: "")
-            textSize = 13f
-        }
-        // 匹配方式 (Clash 常用)
-        fun bigSpinner(items: List<String>): Spinner {
-            val sp = Spinner(requireContext())
-            // 下拉菜单加大: 强制高度 52dp + minHeight + 内边距 (触控友好)
-            val h = AdaptiveSize.px(requireContext(), 52)
-            sp.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, h)
-            sp.minimumHeight = h
-            sp.setPadding(16, 12, 16, 12)
-            // 展开列表项: 动态字号 + 分隔线 + 每项内边距 (边界明显)
-            val base = 17f
-            val textSize = AdaptiveSize.sp(requireContext(), base)
-            val itemPadding = AdaptiveSize.px(requireContext(), 8)
-            val adapter = object : ArrayAdapter<String>(requireContext(),
-                android.R.layout.simple_spinner_item, items) {
-                override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                    val v = super.getView(position, convertView, parent)
-                    (v as? TextView)?.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, textSize)
-                    return v
-                }
-                override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
-                    val v = super.getDropDownView(position, convertView, parent)
-                    (v as? TextView)?.apply {
-                        setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, textSize)
-                        setPadding(itemPadding, itemPadding, itemPadding, itemPadding)
+    }
+
+    private fun observeState() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch {
+                    viewModel.rules.collect { list ->
+                        adapter.submitList(list)
+                        binding.tvEmptyRules.visibility = if (list.isEmpty()) View.VISIBLE else View.GONE
                     }
-                    v.setBackgroundResource(R.drawable.dropdown_item_bg)
-                    return v
+                }
+                launch {
+                    viewModel.defaultAction.collect { act ->
+                        binding.defaultActionBtn.text = "默认: ${if (act == "direct") "直连" else "代理"}"
+                    }
+                }
+                launch {
+                    viewModel.builtinDomains.collect { domains ->
+                        updateBuiltinView(domains, viewModel.builtinIpCount.value)
+                    }
+                }
+                launch {
+                    viewModel.builtinIpCount.collect { ipCount ->
+                        updateBuiltinView(viewModel.builtinDomains.value, ipCount)
+                    }
                 }
             }
-            sp.adapter = adapter
-            return sp
         }
-        val kindSpinner = bigSpinner(kinds.toList()).apply { setSelection(kindIndex) }
-        val action = bigSpinner(listOf("直连 (direct)", "代理 (proxy)")).apply {
-            setSelection(if (existing?.action == "direct") 0 else 1)
+    }
+
+    private fun updateBuiltinView(domains: List<String>, ipCount: Long) {
+        val container = binding.builtinContainer
+        container.removeAllViews()
+        val ctx = requireContext()
+
+        val tvHeader = TextView(ctx).apply {
+            text = "内置系统规则 (自动包含中国大陆域名与 IP 直连白名单):"
+            textSize = 12f
+            setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink))
+            setPadding(0, 4, 0, 4)
         }
-        layout.addView(pattern); layout.addView(kindSpinner); layout.addView(action)
+        val tvDomains = TextView(ctx).apply {
+            val sample = domains.take(15).joinToString("  ")
+            val more = if (domains.size > 15) "\n… 等共 ${domains.size} 条国内域名" else ""
+            text = "● 国内域名后缀 (${domains.size} 条):\n$sample$more"
+            textSize = 11f
+            setTextColor(ContextCompat.getColor(ctx, R.color.meow_blue))
+            setPadding(0, 4, 0, 4)
+        }
+        val tvIps = TextView(ctx).apply {
+            text = "● 中国 IP-CIDR: $ipCount 个网段自动直连"
+            textSize = 11f
+            setTextColor(ContextCompat.getColor(ctx, R.color.meow_blue))
+            setPadding(0, 4, 0, 0)
+        }
+
+        container.addView(tvHeader)
+        container.addView(tvDomains)
+        container.addView(tvIps)
+    }
+
+    private fun chooseDefaultAction() {
+        val items = arrayOf("代理 (默认)", "直连 (默认)")
+        val current = if (viewModel.defaultAction.value == "direct") 1 else 0
 
         AlertDialog.Builder(requireContext())
-            .setTitle(if (index == null) "添加规则" else "编辑规则")
-            .setView(layout)
-            .setPositiveButton("保存") { _, _ ->
-                val p = pattern.text.toString().trim()
-                if (p.isEmpty()) return@setPositiveButton
-                val kind = arrayOf("suffix", "exact", "keyword", "regex", "cidr")[kindSpinner.selectedItemPosition]
-                val a = if (action.selectedItemPosition == 0) "direct" else "proxy"
-                val rule = RuleStore.Rule(
-                    if (kind == "cidr") "cidr" else "domain", kind, p.lowercase(), a)
-                if (index == null) {
-                    RuleStore.addRule(requireContext(), rule)
-                } else {
-                    RuleStore.updateRule(requireContext(), index, rule)
-                }
-                renderRules()
+            .setTitle("默认策略 (未匹配任何规则时)")
+            .setSingleChoiceItems(items, current) { dialog, which ->
+                viewModel.setDefaultAction(if (which == 0) "proxy" else "direct")
+                dialog.dismiss()
             }
             .setNegativeButton("取消", null)
             .show()
     }
 
-    private fun chooseDefaultAction() {
-        val items = arrayOf("代理 (默认)", "直连 (默认)")
-        val textSize = AdaptiveSize.sp(requireContext(), 18f)
-        val pad = AdaptiveSize.px(requireContext(), 10)
-        val adapter = object : ArrayAdapter<String>(requireContext(),
-            android.R.layout.simple_list_item_1, items.toList()) {
-            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                val v = super.getView(position, convertView, parent)
-                (v as? TextView)?.apply {
-                    setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, textSize)
-                    setPadding(pad, pad, pad, pad)
-                }
-                v.setBackgroundResource(R.drawable.dropdown_item_bg)
-                return v
-            }
+    private fun showRuleDialog(index: Int?) {
+        val existing = index?.let { viewModel.rules.value.getOrNull(it) }
+        val ctx = requireContext()
+
+        val layout = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 20, 40, 10)
         }
-        AlertDialog.Builder(requireContext())
-            .setTitle("默认策略 (未命中任何规则时)")
-            .setAdapter(adapter) { _, which ->
-                RuleStore.setDefaultAction(requireContext(), if (which == 0) "proxy" else "direct")
-                renderRules()
+
+        val patternInput = EditText(ctx).apply {
+            hint = "域名 (如 google.com) 或 IP/CIDR (如 1.2.3.0/24)"
+            setText(existing?.pattern ?: "")
+            textSize = 14f
+            setPadding(16, 16, 16, 16)
+        }
+
+        val kinds = arrayOf(
+            "DOMAIN-SUFFIX (域名后缀，含子域名)",
+            "DOMAIN (完整域名精确匹配)",
+            "DOMAIN-KEYWORD (关键词包含匹配)",
+            "DOMAIN-REGEX (正则表达式)",
+            "IP-CIDR (IP/子网掩码)"
+        )
+        val kindKeys = arrayOf("suffix", "exact", "keyword", "regex", "cidr")
+        val currentKindIdx = kindKeys.indexOf(existing?.kind ?: "suffix").coerceAtLeast(0)
+
+        val kindSpinner = Spinner(ctx).apply {
+            adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, kinds)
+            setSelection(currentKindIdx)
+            setPadding(0, 16, 0, 16)
+        }
+
+        val actions = arrayOf("直连 (direct)", "代理 (proxy)")
+        val actionSpinner = Spinner(ctx).apply {
+            adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, actions)
+            setSelection(if (existing?.action == "proxy") 1 else 0)
+            setPadding(0, 16, 0, 16)
+        }
+
+        layout.addView(patternInput)
+        layout.addView(kindSpinner)
+        layout.addView(actionSpinner)
+
+        AlertDialog.Builder(ctx)
+            .setTitle(if (index == null) "添加分流规则" else "编辑分流规则")
+            .setView(layout)
+            .setPositiveButton("保存") { _, _ ->
+                val pattern = patternInput.text.toString().trim()
+                if (pattern.isEmpty()) {
+                    Toast.makeText(ctx, "规则目标不能为空", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+                val kind = kindKeys[kindSpinner.selectedItemPosition]
+                val action = if (actionSpinner.selectedItemPosition == 1) "proxy" else "direct"
+
+                if (index == null) {
+                    viewModel.addRule(pattern, kind, action)
+                } else {
+                    viewModel.updateRule(index, pattern, kind, action)
+                }
             }
+            .setNegativeButton("取消", null)
             .show()
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        _binding = null
     }
 }

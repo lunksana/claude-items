@@ -1,65 +1,112 @@
 package com.mirage.android
 
+import android.app.Activity
 import android.content.Intent
+import android.net.VpnService
 import android.os.Bundle
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
-import com.google.android.material.bottomnavigation.BottomNavigationView
-import com.mirage.android.core.CoreController
-import com.mirage.android.core.NodeStore
+import androidx.viewpager2.adapter.FragmentStateAdapter
+import androidx.viewpager2.widget.ViewPager2
+import com.mirage.android.data.model.Node
+import com.mirage.android.data.repository.NodeRepository
+import com.mirage.android.databinding.ActivityMainBinding
 import com.mirage.android.ui.HomeFragment
 import com.mirage.android.ui.NodesFragment
 import com.mirage.android.ui.RulesFragment
 import com.mirage.android.ui.TrafficFragment
+import com.mirage.android.ui.viewmodel.HomeViewModel
 
 /**
- * 主容器: 底部导航切换 首页/节点/规则/流量 四个 Fragment。
- * 现代单 Activity 架构 (参考 meow 的 Clash 类 App 结构)。
+ * 主容器: ViewPager2 + 底部导航 (状态保持, 消除切换卡顿)。
  */
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var nav: BottomNavigationView
+    private lateinit var binding: ActivityMainBinding
+    private val homeViewModel: HomeViewModel by viewModels()
+
+    private val vpnPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            homeViewModel.startVpn()
+        } else {
+            Toast.makeText(this, "VPN 权限被拒绝", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
 
-        // 绑定内核进程服务 (AIDL)
-        CoreController.bind(this)
-        handleIncomingUri()
+        handleIncomingUri(intent)
 
-        nav = findViewById(R.id.bottomNav)
-        if (savedInstanceState == null) {
-            switchFragment(HomeFragment())
-            nav.selectedItemId = R.id.nav_home
+        setupViewPager()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIncomingUri(intent)
+    }
+
+    private fun setupViewPager() {
+        val fragments = listOf(
+            HomeFragment(),
+            NodesFragment(),
+            RulesFragment(),
+            TrafficFragment()
+        )
+
+        binding.viewPager.adapter = object : FragmentStateAdapter(this) {
+            override fun getItemCount(): Int = fragments.size
+            override fun createFragment(position: Int): Fragment = fragments[position]
         }
-        nav.setOnNavigationItemSelectedListener { item ->
+        binding.viewPager.isUserInputEnabled = false // 禁用滑动切换，依靠底部导航
+        binding.viewPager.offscreenPageLimit = 3
+
+        binding.bottomNav.setOnItemSelectedListener { item ->
             when (item.itemId) {
-                R.id.nav_home -> { switchFragment(HomeFragment()); true }
-                R.id.nav_nodes -> { switchFragment(NodesFragment()); true }
-                R.id.nav_rules -> { switchFragment(RulesFragment()); true }
-                R.id.nav_traffic -> { switchFragment(TrafficFragment()); true }
+                R.id.nav_home -> { binding.viewPager.setCurrentItem(0, false); true }
+                R.id.nav_nodes -> { binding.viewPager.setCurrentItem(1, false); true }
+                R.id.nav_rules -> { binding.viewPager.setCurrentItem(2, false); true }
+                R.id.nav_traffic -> { binding.viewPager.setCurrentItem(3, false); true }
                 else -> false
             }
         }
+
+        binding.viewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+            override fun onPageSelected(position: Int) {
+                binding.bottomNav.menu.getItem(position).isChecked = true
+            }
+        })
     }
 
-    private fun switchFragment(frag: Fragment) {
-        supportFragmentManager.beginTransaction()
-            .replace(R.id.fragmentContainer, frag)
-            .commit()
+    fun requestVpnPermissionAndConnect() {
+        val intent = VpnService.prepare(this)
+        if (intent != null) {
+            vpnPermissionLauncher.launch(intent)
+        } else {
+            homeViewModel.startVpn()
+        }
     }
 
-    override fun onDestroy() {
-        CoreController.unbind(this)
-        super.onDestroy()
+    fun navigateToTab(tabIndex: Int) {
+        if (tabIndex in 0..3) {
+            binding.viewPager.setCurrentItem(tabIndex, false)
+        }
     }
 
-    private fun handleIncomingUri() {
+    private fun handleIncomingUri(intent: Intent?) {
         val uri = intent?.dataString
         if (uri?.startsWith("mirage://") == true) {
-            val idx = NodeStore.addNode(this, NodeStore.Node(uri, NodeStore.defaultName(uri)))
-            NodeStore.setSelected(this, idx)
+            val repo = NodeRepository.getInstance(this)
+            val idx = repo.addNode(Node(uri = uri, name = Node.defaultName(uri)))
+            repo.setSelected(idx)
+            Toast.makeText(this, "已导入并选中节点", Toast.LENGTH_SHORT).show()
         }
     }
 }
