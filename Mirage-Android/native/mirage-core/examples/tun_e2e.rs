@@ -9,7 +9,6 @@
 
 use std::os::fd::RawFd;
 use std::os::unix::io::AsRawFd;
-use std::os::unix::io::FromRawFd;
 
 use clap::Parser;
 use mirage_core::engine::{Engine, NodeInfo};
@@ -31,7 +30,6 @@ struct Args {
 
 /// 创建 Linux TUN 设备 (需要 root/CAP_NET_ADMIN)。
 fn create_tun(name: &str) -> std::io::Result<(RawFd, String)> {
-    use std::os::unix::io::FromRawFd;
     let dev = std::fs::OpenOptions::new().read(true).write(true).open("/dev/net/tun")?;
     let tun_fd = dev.as_raw_fd();
     // TUNSETIFF

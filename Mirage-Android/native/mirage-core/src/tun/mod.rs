@@ -237,6 +237,7 @@ impl TunStack {
 
     /// (仅测试) 判断 socket 是否 Established。
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn is_established(&self, handle: SocketHandle) -> bool {
         let g = lock_inner(&self.inner);
         g.sockets

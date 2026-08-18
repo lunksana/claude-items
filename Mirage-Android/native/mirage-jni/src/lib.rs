@@ -361,7 +361,7 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_recentLogs(
 /// `int[] drainProtectFds()`
 #[no_mangle]
 pub extern "system" fn Java_com_mirage_android_core_MirageNative_drainProtectFds(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
 ) -> jni::sys::jintArray {
     let fds = crate::protect_queue::drain();
@@ -380,7 +380,7 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_drainProtectFds
 /// tcp_conns, udp_flows, dns_queries] (速率单位 B/s)。
 #[no_mangle]
 pub extern "system" fn Java_com_mirage_android_core_MirageNative_getStats(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
 ) -> jni::sys::jdoubleArray {
     let (up, down, up_rate, down_rate) = mirage_core::monitor::sample();

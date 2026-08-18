@@ -357,7 +357,7 @@ fn _sock_buf_const() -> usize {
 }
 
 /// 直连路径: smoltcp socket ⇄ 真实 TCP socket (protect 绕过 TUN)。
-async fn relay_direct(stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::net::IpAddr, u16)) {
+async fn relay_direct(_stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::net::IpAddr, u16)) {
     let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("TCP", &format!("{}:{}", dst.0, dst.1), "直连");
     TCP_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _guard = TcpActiveGuard;

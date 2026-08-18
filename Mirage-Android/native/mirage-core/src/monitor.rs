@@ -189,17 +189,6 @@ pub fn record_conn_start(protocol: &str, target: &str, outbound: &str) -> (u64, 
     (id, up_bytes, down_bytes)
 }
 
-/// 兼容老接口更新
-pub fn record_conn_update(id: u64, up: u64, down: u64) {
-    let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(map) = lock.as_mut() {
-        if let Some(item) = map.get(&id) {
-            item.up_bytes.store(up, Ordering::Relaxed);
-            item.down_bytes.store(down, Ordering::Relaxed);
-        }
-    }
-}
-
 /// 关闭连接：从活跃连接列表中彻底移除，符合真正的“活跃连接”语义。
 pub fn record_conn_close(id: u64, _up: u64, _down: u64) {
     let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());

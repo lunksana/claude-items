@@ -337,7 +337,7 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
         }
     }
 
-    /// 接收、解密并直接写入目标 AsyncWrite (完全零堆内存重新分配与克隆，适用于高吞吐视频流与大文件下载)
+    /// 接收、解密并直接写入目标 AsyncWrite (复用实例内部 buffer 避免每次循环重复分配堆内存，提升高吞吐流式传输效率)
     pub async fn recv_data_to<W: AsyncWrite + Unpin>(&mut self, writer: &mut W) -> Result<Option<usize>> {
         let mut header = [0u8; 5];
         self.reader.read_exact(&mut header).await?;

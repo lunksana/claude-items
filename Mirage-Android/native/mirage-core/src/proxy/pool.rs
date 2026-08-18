@@ -5,7 +5,6 @@ use anyhow::Result;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use tokio::net::TcpStream;
 use tokio::sync::{Mutex, Notify};
 use std::sync::RwLock;
 use tracing::{debug, error, info};
@@ -620,7 +619,7 @@ impl WarmPool {
                 }
             }
         }
-        let mut stream = stream.ok_or_else(|| {
+        let stream = stream.ok_or_else(|| {
             last_err.unwrap_or_else(|| anyhow::anyhow!("connect to {addr} failed"))
         })?;
         stream.set_nodelay(true)?; // 关 Nagle, 降首包延迟
