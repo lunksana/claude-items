@@ -323,6 +323,9 @@ pub struct WarmPool {
     target_size: Arc<AtomicUsize>,            // 动态目标容量 (支持热重载)
     max_size: Arc<AtomicUsize>,               // 动态最大容量 (支持热重载)
     cfg: Arc<PoolConfig>,                     // 节点配置 (支持饥饿时 On-Demand 即时并发拨号)
+    /// On-Demand 并发拨号限流信号量: 防止瞬时突发 (如 20 张图片) 同时发起 20 条 TLS
+    /// 握手 (thundering herd)。上限取 clamp(pool_size, 4, 16), 兼顾图片秒开与平滑。
+    on_demand_sem: Arc<tokio::sync::Semaphore>,
 }
 
 impl WarmPool {
@@ -335,6 +338,10 @@ impl WarmPool {
         let target_size = Arc::new(AtomicUsize::new(initial_size));
         let max_size = Arc::new(AtomicUsize::new(initial_size));
 
+        // 并发拨号上限: 至少 8 (图片秒开), 至多 16 (防 thundering herd)。
+        // 平滑靠回流 + notify (见 refill_or_take), 而非压低并发 —— 太低的并发
+        // (如 4) 会让 20 张图片排队成渐进延迟 (实测 1.6~8s), 违背"秒开"初衷。
+        let on_demand_limit = initial_size.max(8).min(16);
         let pool = Self {
             queue: queue.clone(),
             notify: notify.clone(),
@@ -344,6 +351,7 @@ impl WarmPool {
             target_size: target_size.clone(),
             max_size: max_size.clone(),
             cfg: cfg.clone(),
+            on_demand_sem: Arc::new(tokio::sync::Semaphore::new(on_demand_limit)),
         };
 
         let in_flight = Arc::new(AtomicUsize::new(0));
@@ -799,23 +807,36 @@ impl WarmPool {
             return Ok(tunnel);
         }
 
-        // 路径 2: 预热池耗尽，启动即时并行拨号与后台补货竞争
+        // 路径 2: 预热池耗尽 → 即时并行拨号 (信号量限流) + 与后台补货竞争
+        //
+        // 并发拨号限流: 用信号量把瞬时同时进行的 On-Demand 握手限制在
+        // clamp(pool_size, 4, 16) 条内, 避免 20 张图片瞬间喷 20 条 TLS 握手
+        // (thundering herd: 客户端 CPU/带宽冲击 + 服务端 accept 压力)。
+        // 信号量满(已有 16 条在拨号)时, 本条请求不再新起拨号, 只等后台补货。
         let cfg = self.cfg.clone();
         let brutal = self.brutal_state.clone();
         let stats = self.stats.clone();
-
-        let on_demand = async move {
-            let start = Instant::now();
-            let res = Box::pin(Self::connect_upstream(&cfg, &brutal)).await;
-            if let Ok(ref _t) = res {
-                let elapsed = start.elapsed().as_millis() as u64;
-                stats.write().unwrap_or_else(|e| e.into_inner()).record_latency(elapsed);
-                debug!("WarmPool: On-Demand 即时建连就绪 ({}ms)", elapsed);
-            }
-            res
-        };
+        let permit = self.on_demand_sem.clone().try_acquire_owned().ok();
 
         let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let Some(permit) = permit else {
+                // 并发拨号已满: 不新起 on-demand, 等后台补货队列
+                return self.wait_for_queue().await;
+            };
+
+            let on_demand = async move {
+                // permit 在此持有: block 结束 drop → 信号量释放 (允许下一条 on-demand)
+                let _permit = permit;
+                let start = Instant::now();
+                let res = Box::pin(Self::connect_upstream(&cfg, &brutal)).await;
+                if let Ok(ref _t) = res {
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    stats.write().unwrap_or_else(|e| e.into_inner()).record_latency(elapsed);
+                    debug!("WarmPool: On-Demand 即时建连就绪 ({}ms)", elapsed);
+                }
+                res
+            };
+
             tokio::select! {
                 res_demand = on_demand => {
                     match res_demand {
@@ -823,7 +844,9 @@ impl WarmPool {
                             if wait_start.elapsed() > Duration::from_millis(50) {
                                 self.metrics.wait_events.fetch_add(1, Ordering::Relaxed);
                             }
-                            Ok(tunnel)
+                            // 回流策略: 队列未达目标水位时, on-demand 连接先沉淀进池
+                            // (后续请求复用, 平滑对外流量形态), 再从池取一条返回
+                            self.refill_or_take(tunnel).await
                         }
                         Err(e) => {
                             debug!("WarmPool: On-demand 建连失败, 回落等待池: {e}");
@@ -851,6 +874,35 @@ impl WarmPool {
                 anyhow::bail!("pool.get() timed out after 10s — upstream likely unreachable")
             }
         }
+    }
+
+    /// On-Demand 建连成功后的回流策略:
+    /// - 队列未达目标水位 → 连接沉淀进池 (后续请求复用, 避免每波突发都全新建握手),
+    ///   再从池取一条**健康**连接返回 (pop_valid_tunnel 跳过 stale);
+    /// - 池已满 → 直接使用本连接。
+    async fn refill_or_take(&self, tunnel: Tunnel) -> Result<Tunnel> {
+        let should_refill = {
+            let q = self.queue.lock().await;
+            q.len() < self.target_size.load(Ordering::Relaxed)
+        };
+        if should_refill {
+            {
+                let mut q = self.queue.lock().await;
+                q.push_back(tunnel);
+            }
+            // ⚠️ 回流必须 notify: 否则 wait_for_queue 里挂起的请求不被唤醒,
+            //    池子补充了也拿不到 (实测 20 请求渐进到 8s 的根因之一)
+            self.notify.notify_one();
+            // 从池取一条健康连接 (可能取到刚回流的新连接, 也可能取到后台补货的;
+            // 刚回流的是健康的, 因此池里至少一条可用)
+            if let Some(t) = self.pop_valid_tunnel().await {
+                return Ok(t);
+            }
+            // pop_valid_tunnel 只在队列全 stale 时返回 None —— 刚回流一条健康连接,
+            // 理论不可能; 兜底退化为直接拨号等待 (极罕见)
+            return self.wait_for_queue().await;
+        }
+        Ok(tunnel)
     }
 
     pub async fn update_brutal_rate(&self, new_rate: u64) {
