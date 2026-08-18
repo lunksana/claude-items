@@ -8,6 +8,7 @@ data class Rule(
     val kind: String = "suffix", // "suffix" | "exact" | "keyword" | "regex" | "cidr"
     val pattern: String,
     val action: String = "direct", // "direct" | "proxy"
+    val hits: Long = 0,           // 命中次数 (运行时统计)
 ) {
     val isDirect: Boolean get() = action == "direct"
 

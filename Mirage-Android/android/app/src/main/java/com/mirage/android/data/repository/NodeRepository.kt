@@ -199,6 +199,24 @@ class NodeRepository(private val context: Context) {
         results.filter { it.second >= 0 }.minByOrNull { it.second }?.first
     }
 
+    /** 批量测速并返回全部结果 [(index, rtt)] (rtt>=0 可用)。 */
+    suspend fun testAllNodesDetailed(): List<Pair<Int, Long>> = withContext(Dispatchers.IO) {
+        val list = _nodes.value
+        if (list.isEmpty()) return@withContext emptyList()
+        _isTestingAll.value = true
+        _nodes.value = list.map { it.copy(isTesting = true, testError = null) }
+        val method = _testMethod.value
+        val results = list.mapIndexed { index, node ->
+            async {
+                val rtt = doTest(node, method)
+                updateNodeLatency(index, rtt)
+                Pair(index, rtt)
+            }
+        }.awaitAll()
+        _isTestingAll.value = false
+        results
+    }
+
     /**
      * 执行底层连接测试。
      */

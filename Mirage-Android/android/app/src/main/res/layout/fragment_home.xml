@@ -294,6 +294,15 @@
                     android:text="活跃连接: TCP 0 · UDP 0 · DNS 0"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/todayUsage"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="今日: ↑0B / ↓0B"
+                    android:textColor="@color/meow_ink_secondary"
+                    android:textSize="12sp" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
@@ -367,6 +376,38 @@
             android:text="@string/connect"
             android:textSize="16sp"
             app:cornerRadius="26dp" />
+
+        <!-- 配置备份/恢复 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:orientation="horizontal">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnBackup"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="42dp"
+                android:layout_marginEnd="3dp"
+                android:layout_weight="1"
+                android:text="备份配置"
+                android:textSize="13sp"
+                app:cornerRadius="8dp"
+                app:strokeColor="@color/meow_outline" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnRestore"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="42dp"
+                android:layout_marginStart="3dp"
+                android:layout_weight="1"
+                android:text="恢复配置"
+                android:textSize="13sp"
+                app:cornerRadius="8dp"
+                app:strokeColor="@color/meow_outline" />
+        </LinearLayout>
 
     </LinearLayout>
 </ScrollView>

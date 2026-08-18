@@ -126,6 +126,44 @@ pub fn builtin_ip_count() -> usize {
     cn_ipv4::CN_IPV4.len()
 }
 
+/// 规则命中统计: key = "kind|pattern|action", 值 = 命中次数 (原子)。
+fn rule_hits() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::sync::atomic::AtomicU64>> {
+    use std::sync::OnceLock;
+    static H: OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::atomic::AtomicU64>>> =
+        OnceLock::new();
+    H.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 记录一次规则命中 (分流判定时调用)。
+fn record_rule_hit(kind: &str, pattern: &str, action: &str) {
+    let key = format!("{kind}|{pattern}|{action}");
+    let mut map = rule_hits().lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(key).or_default().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 规则命中统计 JSON (App 展示): [{"kind","pattern","action","hits"}]。
+pub fn get_rule_hits() -> String {
+    let map = rule_hits().lock().unwrap_or_else(|e| e.into_inner());
+    let mut list: Vec<serde_json::Value> = Vec::new();
+    for (key, hits) in map.iter() {
+        let mut parts = key.splitn(3, '|');
+        if let (Some(kind), Some(pattern), Some(action)) =
+            (parts.next(), parts.next(), parts.next())
+        {
+            list.push(serde_json::json!({
+                "kind": kind, "pattern": pattern, "action": action,
+                "hits": hits.load(std::sync::atomic::Ordering::Relaxed),
+            }));
+        }
+    }
+    serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// 清空命中统计 (规则变更时)。
+pub fn reset_rule_hits() {
+    rule_hits().lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
 /// 设置自定义规则 (JNI 调用, App 启动/改规则时注入)。解析失败返回 false。
 pub fn set_custom_rules(json: &str) -> bool {
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(json);
@@ -227,6 +265,13 @@ fn custom_rules_verdict(domain: Option<&str>, ip: Option<IpAddr>) -> Option<bool
     if let Some(d) = domain {
         for (m, pattern, is_direct) in &rules.rules {
             if rule_matches(*m, pattern, d) {
+                let kind = match m {
+                    DomainMatch::Suffix => "suffix",
+                    DomainMatch::Exact => "exact",
+                    DomainMatch::Keyword => "keyword",
+                    DomainMatch::Regex => "regex",
+                };
+                record_rule_hit(kind, pattern, if *is_direct { "direct" } else { "proxy" });
                 return Some(*is_direct);
             }
         }
@@ -234,11 +279,13 @@ fn custom_rules_verdict(domain: Option<&str>, ip: Option<IpAddr>) -> Option<bool
     if let Some(ip) = ip {
         for r in &rules.cidrs_proxy {
             if cidr_match(r, ip) {
+                record_rule_hit("cidr", r, "proxy");
                 return Some(false);
             }
         }
         for r in &rules.cidrs_direct {
             if cidr_match(r, ip) {
+                record_rule_hit("cidr", r, "direct");
                 return Some(true);
             }
         }

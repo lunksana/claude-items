@@ -7,7 +7,6 @@ import com.mirage.android.data.repository.RuleRepository
 import kotlinx.coroutines.flow.StateFlow
 
 class RulesViewModel(application: Application) : AndroidViewModel(application) {
-
     private val ruleRepo = RuleRepository.getInstance(application)
     private val vpnRepo = com.mirage.android.data.repository.VpnRepository.getInstance(application)
 
@@ -16,6 +15,11 @@ class RulesViewModel(application: Application) : AndroidViewModel(application) {
     val builtinDomains: StateFlow<List<String>> = ruleRepo.builtinDomains
     val builtinIpCount: StateFlow<Long> = ruleRepo.builtinIpCount
     val isBlockQuic: StateFlow<Boolean> = vpnRepo.isBlockQuic
+
+    /** 应用内核规则命中统计到规则列表。 */
+    fun applyHits(hitsMap: Map<String, Long>) {
+        ruleRepo.applyHits(hitsMap)
+    }
 
     fun setBlockQuic(block: Boolean) {
         vpnRepo.setBlockQuic(block)

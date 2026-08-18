@@ -82,8 +82,24 @@ class NodesFragment : Fragment() {
         }
 
         binding.btnTestAll.setOnClickListener {
-            viewModel.testAllNodes { best, rtt ->
-                Toast.makeText(requireContext(), "已自动优选: ${best.displayName} (${rtt}ms)", Toast.LENGTH_LONG).show()
+            // 批量测速 + RTT 排序展示
+            viewModel.testAllWithSort { sorted ->
+                if (sorted.isEmpty()) {
+                    Toast.makeText(requireContext(), "全部节点不可用", Toast.LENGTH_LONG).show()
+                    return@testAllWithSort
+                }
+                val msg = sorted.joinToString("\n") { "${it.first.displayName}: ${it.second}ms" }
+                AlertDialog.Builder(requireContext())
+                    .setTitle("测速结果 (${sorted.size} 可用, 按延迟排序)")
+                    .setMessage(msg)
+                    .setPositiveButton("选择最优") { _, _ ->
+                        val best = sorted.first()
+                        val idx = com.mirage.android.core.NodeStore.getNodes(requireContext())
+                            .indexOfFirst { it.uri == best.first.uri }
+                        if (idx >= 0) com.mirage.android.core.NodeStore.setSelected(requireContext(), idx)
+                    }
+                    .setNegativeButton("关闭", null)
+                    .show()
             }
         }
 

@@ -101,6 +101,21 @@ class RulesFragment : Fragment() {
         }
     }
 
+    /** 加载规则命中统计 (内核侧) 并刷新列表。 */
+    private fun loadRuleHits() {
+        runCatching {
+            val json = com.mirage.android.core.CoreController.getRuleHits()
+            val arr = org.json.JSONArray(json)
+            val hitsMap = HashMap<String, Long>()
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val kind = o.optString("kind"); val pat = o.optString("pattern"); val act = o.optString("action")
+                hitsMap["$kind|$pat|$act"] = o.optLong("hits", 0)
+            }
+            viewModel.applyHits(hitsMap)
+        }
+    }
+
     private fun observeState() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {

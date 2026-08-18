@@ -35,6 +35,13 @@ class RuleAdapter(
             binding.tvPattern.text = rule.pattern
             binding.tvKind.text = rule.kindDisplayName
             binding.tvAction.text = rule.actionDisplayName
+            // 命中统计 (规则页面加载后由 Fragment 填充)
+            if (rule.hits > 0) {
+                binding.tvHits.visibility = View.VISIBLE
+                binding.tvHits.text = "命中 ${rule.hits}"
+            } else {
+                binding.tvHits.visibility = View.GONE
+            }
 
             if (rule.isDirect) {
                 binding.tvAction.setTextColor(Color.parseColor("#10B981")) // 绿

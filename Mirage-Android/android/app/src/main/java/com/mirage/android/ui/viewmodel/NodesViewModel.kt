@@ -68,6 +68,19 @@ class NodesViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** 批量测速并返回按 RTT 排序的结果 [(node, rtt)]。 */
+    fun testAllWithSort(onSorted: (List<Pair<Node, Long>>) -> Unit) {
+        viewModelScope.launch {
+            val results = nodeRepo.testAllNodesDetailed()
+            val sorted = results.filter { it.second >= 0 }
+                .map { (idx, rtt) -> (nodes.value.getOrNull(idx) ?: return@map null to 0L) to rtt }
+                .filter { it.first != null }
+                .map { Pair(it.first!!, it.second) }
+                .sortedBy { it.second }
+            onSorted(sorted)
+        }
+    }
+
     fun toggleAutoSelect() {
         nodeRepo.setAutoSelect(!isAutoSelect.value)
     }

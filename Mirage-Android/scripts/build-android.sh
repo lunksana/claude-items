@@ -71,7 +71,7 @@ build_apk() {
             export GRADLE_OPTS="-Dorg.gradle.native=false"
             export PATH=/opt/jdk-17/bin:/opt/gradle-8.9/bin:$PATH
             cd /workspace
-            gradle assembleDebug --no-daemon
+            gradle clean assembleDebug --no-daemon 2>&1 > /tmp/gradle_err.log || (cat /tmp/gradle_err.log | grep -B2 -A6 -iE "e: file|error:|unresolved" | head -40)
             cp app/build/outputs/apk/debug/app-debug.apk /output/latest-build.apk 2>/dev/null || true
         ' 2>&1 | tail -25
 

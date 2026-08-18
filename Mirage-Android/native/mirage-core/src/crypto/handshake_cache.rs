@@ -183,10 +183,29 @@ async fn fetch_real_server_hello(host: &str) -> anyhow::Result<Vec<u8>> {
         format!("{}:443", host)
     };
 
-    let mut stream = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        TcpStream::connect(&target)
-    ).await??;
+    // ⚠️ 移动端修复: 模板获取 socket 必须 **connect 前 protect** (绕过 VPN/TUN)。
+    //    否则 VPN 建立后此 socket 走 0.0.0.0/0→tun0 路由被接管 → 模板拿不到 →
+    //    fallback 模板 → 服务端校验失败 → early eof (实机定位: 宿主无 VPN 正常,
+    //    手机全 early eof 的根因)。
+    use std::os::unix::io::AsRawFd;
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host(&target).await?.collect();
+    let mut last_err: Option<std::io::Error> = None;
+    let mut stream = None;
+    for a in addrs {
+        let sock = match a {
+            std::net::SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+            std::net::SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+        }?;
+        crate::protect::protect(sock.as_raw_fd());
+        match tokio::time::timeout(std::time::Duration::from_secs(5), sock.connect(a)).await {
+            Ok(Ok(s)) => { stream = Some(s); break; }
+            Ok(Err(e)) => last_err = Some(e),
+            Err(_) => last_err = Some(std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timeout")),
+        }
+    }
+    let mut stream = stream.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, format!("模板获取 connect 失败: {last_err:?}"))
+    })?;
 
     let mut session_id = [0u8; 32];
     rand::fill(&mut session_id);

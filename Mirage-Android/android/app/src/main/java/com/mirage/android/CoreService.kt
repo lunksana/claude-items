@@ -18,6 +18,8 @@ import com.mirage.android.core.MirageNative
 import com.mirage.android.core.NativeLoader
 import com.mirage.android.core.NodeStore
 import com.mirage.android.core.RuleStore
+import com.mirage.android.core.SettingsStore
+import com.mirage.android.core.TrafficStatsStore
 import kotlinx.coroutines.*
 import java.net.InetAddress
 import java.util.concurrent.CopyOnWriteArrayList
@@ -136,7 +138,94 @@ class CoreService : VpnService() {
                 delay(2000)
             }
         }
+        // 流量统计持久化 (增量累加到今日/本月)
+        scope.launch {
+            var lastUp = -1L; var lastDown = -1L
+            while (isActive) {
+                runCatching {
+                    val st = MirageNative.getStats()
+                    if (st.size >= 2) {
+                        val up = st[0].toLong(); val down = st[1].toLong()
+                        if (lastUp >= 0 && lastDown >= 0 && up >= lastUp && down >= lastDown) {
+                            TrafficStatsStore.add(this@CoreService, up - lastUp, down - lastDown)
+                        }
+                        lastUp = up; lastDown = down
+                        TrafficStatsStore.prune(this@CoreService)
+                    }
+                }
+                delay(10000)
+            }
+        }
+        // 断线自动重连 / 节点 failover watchdog
+        startFailoverWatchdog()
         return 0
+    }
+
+    /** 断线检测 + 自动重连 + failover watchdog。 */
+    private fun startFailoverWatchdog() {
+        scope.launch {
+            var consecutiveFailures = 0
+            while (isActive) {
+                val interval = SettingsStore.getCheckIntervalSec(this@CoreService).toLong().coerceAtLeast(5)
+                delay(interval * 1000)
+                if (!MirageNative.isRunning()) continue
+                val healthy = runCatching { MirageNative.isHealthy() }.getOrDefault(true)
+                if (healthy) { consecutiveFailures = 0; continue }
+
+                consecutiveFailures++
+                LogStore.append("[failover] 检测到连接异常 (第 $consecutiveFailures 次)")
+                if (!SettingsStore.isAutoReconnect(this@CoreService)) continue
+
+                // 连续 2 次异常才触发 failover (避免瞬时抖动)
+                if (consecutiveFailures >= 2) {
+                    doFailover()
+                    consecutiveFailures = 0
+                }
+            }
+        }
+    }
+
+    /** failover: 测活选最优节点 (best) 或换下一个 (next), 然后热切换。 */
+    private fun doFailover() {
+        val nodes = NodeStore.getNodes(this)
+        if (nodes.size <= 1) {
+            // 单节点: 重启内核尝试
+            LogStore.append("[failover] 仅一个节点, 重启内核重试")
+            runCatching { MirageNative.stop() }
+            return
+        }
+        val mode = SettingsStore.getFailoverMode(this)
+        LogStore.append("[failover] 触发节点切换 (mode=$mode, ${nodes.size} 个节点)")
+        val selectedUri = NodeStore.getSelectedUri(this)
+        // 记录当前连接上下文, failover 后若需要重启连接用
+        val pendingRestart = Runnable { startInternal() }
+        val sorted = if (mode == "best") {
+            // 测活选最优 (connect 握手)
+            nodes.map { n ->
+                val rtt = runCatching { MirageNative.testNode(n.uri, 5000) }.getOrDefault(-1L)
+                n to rtt
+            }.filter { it.second >= 0 }.sortedBy { it.second }
+        } else {
+            // 顺序: 选当前之后的下一个
+            val idx = nodes.indexOfFirst { it.uri == selectedUri }
+            listOfNotNull(nodes.getOrNull(idx + 1) ?: nodes.firstOrNull()).map { it to 0L }
+        }
+        val best = sorted.firstOrNull() ?: return
+        if (best.first.uri != selectedUri) {
+            LogStore.append("[failover] 切换到: ${best.first.displayName} (${best.second}ms)")
+            runCatching { MirageNative.setNode(best.first.uri) }
+            NodeStore.setSelected(this, nodes.indexOfFirst { it.uri == best.first.uri })
+        } else {
+            // 最优还是当前 → 完整重启连接 (撤 TUN 后重建, 清 stale 隧道)
+            LogStore.append("[failover] 当前节点仍最优, 完整重启连接")
+            runCatching { MirageNative.stop() }
+            runCatching { tunFd?.close() }; tunFd = null
+            // 延迟重建
+            scope.launch {
+                delay(3000)
+                if (!MirageNative.isRunning()) startInternal()
+            }
+        }
     }
 
     fun stopInternal() {
@@ -304,6 +393,7 @@ class CoreService : VpnService() {
         override fun setPoolSize(poolSize: Int): Boolean = setPoolSizeInternal(poolSize)
         override fun getPoolSize(): Int = getPoolSizeInternal()
         override fun setRules(json: String): Boolean = setRulesInternal(json)
+        override fun getRuleHits(): String = MirageNative.getRuleHits()
         override fun setLogLevel(level: String?): Boolean =
             level?.let { setLogLevelInternal(it) } ?: false
         override fun setBlockQuic(block: Boolean): Boolean = setBlockQuicInternal(block)
@@ -342,8 +432,32 @@ class CoreService : VpnService() {
                 LogStore.append("[core] protect 失败: active 未设置!")
                 return
             }
+            // ① 传统 protect (SO_MARK 路由)
             val ok = runCatching { inst.protect(fd) }.isSuccess
-            LogStore.append("[core] protect fd=$fd ok=$ok")
+            // ② Android 14+/16 增强: protect(fd) 可能不足以让 socket 绕过 VPN。
+            //    显式把 socket 绑定到**非 VPN 的底层网络** —— 注意: 不能用
+            //    cm.activeNetwork (VPN 激活时它可能返回 VPN 网络, 绑上去反而走 TUN
+            //    环路! 实机 DEBUG 日志证实隧道 SYN 进了 TUN)。遍历找第一个
+            //    TRANSPORT_VPN=false 且 INTERNET 的真实网络绑定。
+            var netOk = false
+            runCatching {
+                val cm = inst.getSystemService(android.net.ConnectivityManager::class.java)
+                val realNet = cm.allNetworks.firstOrNull { net ->
+                    val caps = cm.getNetworkCapabilities(net)
+                    caps != null
+                        && !caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
+                        && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                }
+                if (realNet != null) {
+                    val pfd = android.os.ParcelFileDescriptor.fromFd(fd)
+                    realNet.bindSocket(pfd.fileDescriptor)
+                    pfd.detachFd()
+                    netOk = true
+                } else {
+                    LogStore.append("[core] 未找到非 VPN 底层网络")
+                }
+            }
+            LogStore.append("[core] protect fd=$fd ok=$ok bindNet=$netOk")
         }
 
         @JvmStatic

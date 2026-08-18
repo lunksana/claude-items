@@ -77,6 +77,7 @@ object CoreController {
     fun setPoolSize(poolSize: Int): Boolean = call { it.setPoolSize(poolSize) } ?: false
     fun getPoolSize(): Int = call { it.poolSize } ?: 8
     fun setRules(json: String): Boolean = call { it.setRules(json) } ?: false
+    fun getRuleHits(): String = call { it.ruleHits } ?: "[]"
     fun setLogLevel(level: String): Boolean = call { it.setLogLevel(level) } ?: false
     fun setBlockQuic(block: Boolean): Boolean = call { it.setBlockQuic(block) } ?: false
     fun isBlockQuic(): Boolean = call { it.isBlockQuic } ?: true

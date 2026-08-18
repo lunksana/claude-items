@@ -65,6 +65,14 @@ class RuleRepository(private val context: Context) {
         prefs.edit().putString(KEY_RULES, arr.toString()).apply()
     }
 
+    /** 应用内核规则命中统计到规则列表 (不持久化, 运行时显示)。 */
+    fun applyHits(hitsMap: Map<String, Long>) {
+        _rules.value = _rules.value.map { r ->
+            val key = "${r.kind}|${r.pattern}|${r.action}"
+            r.copy(hits = hitsMap[key] ?: 0L)
+        }
+    }
+
     fun addRule(rule: Rule) {
         val current = _rules.value.toMutableList()
         current.add(rule)

@@ -56,6 +56,8 @@ class HomeFragment : Fragment() {
         }
 
         binding.connectBtn.setOnClickListener {
+        binding.btnBackup.setOnClickListener { showBackupDialog() }
+        binding.btnRestore.setOnClickListener { showRestoreDialog() }
             if (viewModel.vpnState.value.isRunning) {
                 viewModel.disconnect()
             } else {
@@ -110,6 +112,11 @@ class HomeFragment : Fragment() {
                             "累计流量: ↑${stats.upTotalFormatted} / ↓${stats.downTotalFormatted}"
                         binding.connsInfo.text =
                             "活跃连接: TCP ${stats.tcpConns} · UDP ${stats.udpFlows} · DNS ${stats.dnsQueries}"
+                        // 今日/本月用量 (持久化统计)
+                        val today = com.mirage.android.core.TrafficStatsStore.getToday(requireContext())
+                        val month = com.mirage.android.core.TrafficStatsStore.getThisMonth(requireContext())
+                        binding.todayUsage.text =
+                            "今日: ↑${fmtBytes(today.first.toDouble())} / ↓${fmtBytes(today.second.toDouble())} · 本月: ↑${fmtBytes(month.first.toDouble())} / ↓${fmtBytes(month.second.toDouble())}"
                     }
                 }
                 launch {
@@ -191,6 +198,59 @@ class HomeFragment : Fragment() {
 
     private fun showDnsConfigDialog() {
         DnsConfigDialog(requireContext()).show()
+    }
+
+    /** 备份配置: 显示导出的 JSON, 可复制/分享。 */
+    private fun showBackupDialog() {
+        val json = com.mirage.android.core.ConfigBackup.export(requireContext())
+        val input = android.widget.EditText(requireContext()).apply {
+            setText(json)
+            setTextSize(12f)
+            isSingleLine = false
+            minLines = 8
+        }
+        android.app.AlertDialog.Builder(requireContext())
+            .setTitle("备份配置 (节点 + 规则 + 设置)")
+            .setView(input)
+            .setPositiveButton("复制") { _, _ ->
+                val cm = requireContext().getSystemService(android.content.ClipboardManager::class.java)
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("mirage-config", json))
+                Toast.makeText(requireContext(), "已复制", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("关闭", null)
+            .show()
+    }
+
+    /** 恢复配置: 粘贴 JSON 导入。 */
+    private fun showRestoreDialog() {
+        val input = android.widget.EditText(requireContext()).apply {
+            hint = "粘贴备份的 JSON"
+            setTextSize(12f)
+            isSingleLine = false
+            minLines = 8
+        }
+        android.app.AlertDialog.Builder(requireContext())
+            .setTitle("恢复配置")
+            .setView(input)
+            .setPositiveButton("导入") { _, _ ->
+                val json = input.text.toString().trim()
+                if (json.isEmpty()) { Toast.makeText(requireContext(), "内容为空", Toast.LENGTH_SHORT).show(); return@setPositiveButton }
+                runCatching {
+                    val (nodes, rules) = com.mirage.android.core.ConfigBackup.import(requireContext(), json)
+                    Toast.makeText(requireContext(), "已导入 $nodes 个节点, $rules 条规则", Toast.LENGTH_LONG).show()
+                }.onFailure { e ->
+                    Toast.makeText(requireContext(), "导入失败: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun fmtBytes(b: Double): String = when {
+        b >= 1 shl 30 -> "%.2fG".format(b / (1 shl 30))
+        b >= 1 shl 20 -> "%.1fM".format(b / (1 shl 20))
+        b >= 1 shl 10 -> "%.1fK".format(b / (1 shl 10))
+        else -> "%.0fB".format(b)
     }
 
     override fun onDestroyView() {

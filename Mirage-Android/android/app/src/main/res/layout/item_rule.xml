@@ -57,6 +57,16 @@
         </LinearLayout>
 
         <TextView
+            android:id="@+id/tvHits"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="0"
+            android:textColor="@color/meow_ink_secondary"
+            android:textSize="11sp"
+            android:visibility="gone" />
+
+        <TextView
             android:id="@+id/tvAction"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"

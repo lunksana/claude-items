@@ -59,6 +59,9 @@ object MirageNative {
     /** 运行时热切换节点 (无需断开)。 */
     external fun setNode(uri: String): Boolean
 
+    /** 规则命中统计 JSON。 */
+    external fun getRuleHits(): String
+
     /** 运行时热更新连接池容量。 */
     external fun setPoolSize(poolSize: Int): Boolean
 

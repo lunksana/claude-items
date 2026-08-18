@@ -80,7 +80,7 @@ fn init_logging() {
     static LOG_INIT: Once = Once::new();
     LOG_INIT.call_once(|| {
         let default_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "mirage_core=info,mirage_jni=info".into());
+            .unwrap_or_else(|_| "mirage_core=debug,mirage_jni=debug".into());
         let (filter_layer, reload_handle) = reload::Layer::new(default_filter);
         if let Ok(mut lock) = RELOAD_HANDLE.lock() {
             *lock = Some(reload_handle);
@@ -553,6 +553,16 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_getBuiltinIpCou
     _class: JClass,
 ) -> jlong {
     mirage_core::direct::builtin_ip_count() as jlong
+}
+
+/// `String getRuleHits()` — 规则命中统计 JSON。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_getRuleHits(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let s = mirage_core::direct::get_rule_hits();
+    env.new_string(s).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
 }
 
 /// `boolean setRules(String json)` — 设置自定义分流规则 (App 启动/改规则时调用)。
