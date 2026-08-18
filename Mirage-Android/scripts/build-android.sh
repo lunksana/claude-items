@@ -21,7 +21,7 @@ CARGO="${CARGO:-cargo}"
 cmd="${1:-all}"
 
 build_native() {
-    echo "==> [1/2] 交叉编译 mirage-jni (arm64-v8a, x86_64) ..."
+    echo "==> [1/2] 交叉编译 mirage-jni (arm64-v8a) ..."
     export ANDROID_NDK_HOME="$NDK"
     export PATH="/opt/android-toolchain/bin:$PATH"
     local out="$HERE/android/app/src/main/jniLibs"
@@ -30,12 +30,8 @@ build_native() {
     cd "$HERE/native/mirage-jni"
     export RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
     # 用宿主 rustup + NDK 直接构建 (等效 cargo-ndk)
-    for target in aarch64-linux-android x86_64-linux-android; do
-        local abi
-        case "$target" in
-            aarch64*) abi="arm64-v8a" ;;
-            x86_64*) abi="x86_64" ;;
-        esac
+    for target in aarch64-linux-android; do
+        local abi="arm64-v8a"
         echo "  -- $target ($abi) [16KB Page Aligned]"
         cargo build --release --target "$target" --lib
         mkdir -p "$out/$abi"
