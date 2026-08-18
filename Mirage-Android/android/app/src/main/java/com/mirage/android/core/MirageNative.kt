@@ -62,6 +62,9 @@ object MirageNative {
     /** 规则命中统计 JSON。 */
     external fun getRuleHits(): String
 
+    /** 清空规则命中统计。 */
+    external fun resetRuleHits(): Boolean
+
     /** 运行时热更新连接池容量。 */
     external fun setPoolSize(poolSize: Int): Boolean
 

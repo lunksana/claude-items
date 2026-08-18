@@ -18,6 +18,7 @@ import com.mirage.android.data.model.Rule
 import com.mirage.android.databinding.FragmentRulesBinding
 import com.mirage.android.ui.adapter.RuleAdapter
 import com.mirage.android.ui.viewmodel.RulesViewModel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -71,6 +72,11 @@ class RulesFragment : Fragment() {
     private fun setupButtons() {
         binding.addRuleBtn.setOnClickListener { showRuleDialog(null) }
 
+        binding.btnResetHits.setOnClickListener {
+            viewModel.resetRuleHits()
+            Toast.makeText(requireContext(), "已清空规则命中统计", Toast.LENGTH_SHORT).show()
+        }
+
         binding.defaultActionBtn.setOnClickListener { chooseDefaultAction() }
 
         binding.applyRulesBtn.setOnClickListener {
@@ -101,24 +107,15 @@ class RulesFragment : Fragment() {
         }
     }
 
-    /** 加载规则命中统计 (内核侧) 并刷新列表。 */
-    private fun loadRuleHits() {
-        runCatching {
-            val json = com.mirage.android.core.CoreController.getRuleHits()
-            val arr = org.json.JSONArray(json)
-            val hitsMap = HashMap<String, Long>()
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                val kind = o.optString("kind"); val pat = o.optString("pattern"); val act = o.optString("action")
-                hitsMap["$kind|$pat|$act"] = o.optLong("hits", 0)
-            }
-            viewModel.applyHits(hitsMap)
-        }
-    }
-
     private fun observeState() {
         viewLifecycleOwner.lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch {
+                    while (isActive) {
+                        viewModel.refreshRuleHits()
+                        kotlinx.coroutines.delay(2000)
+                    }
+                }
                 launch {
                     viewModel.rules.collect { list ->
                         adapter.submitList(list)

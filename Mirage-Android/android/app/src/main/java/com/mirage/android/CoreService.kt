@@ -139,6 +139,7 @@ class CoreService : VpnService() {
             }
         }
         // 流量统计持久化 (增量累加到今日/本月)
+        TrafficStatsStore.prune(this@CoreService) // 启动时清理一次 30 天前旧数据
         scope.launch {
             var lastUp = -1L; var lastDown = -1L
             while (isActive) {
@@ -150,7 +151,6 @@ class CoreService : VpnService() {
                             TrafficStatsStore.add(this@CoreService, up - lastUp, down - lastDown)
                         }
                         lastUp = up; lastDown = down
-                        TrafficStatsStore.prune(this@CoreService)
                     }
                 }
                 delay(10000)
@@ -189,16 +189,19 @@ class CoreService : VpnService() {
     private fun doFailover() {
         val nodes = NodeStore.getNodes(this)
         if (nodes.size <= 1) {
-            // 单节点: 重启内核尝试
-            LogStore.append("[failover] 仅一个节点, 重启内核重试")
+            // 单节点: 完整重启连接 (撤 TUN 后重建, 清 stale 隧道)
+            LogStore.append("[failover] 仅一个节点, 完整重启连接")
             runCatching { MirageNative.stop() }
+            runCatching { tunFd?.close() }; tunFd = null
+            scope.launch {
+                delay(3000)
+                if (!MirageNative.isRunning()) startInternal()
+            }
             return
         }
         val mode = SettingsStore.getFailoverMode(this)
         LogStore.append("[failover] 触发节点切换 (mode=$mode, ${nodes.size} 个节点)")
         val selectedUri = NodeStore.getSelectedUri(this)
-        // 记录当前连接上下文, failover 后若需要重启连接用
-        val pendingRestart = Runnable { startInternal() }
         val sorted = if (mode == "best") {
             // 测活选最优 (connect 握手)
             nodes.map { n ->
@@ -214,7 +217,11 @@ class CoreService : VpnService() {
         if (best.first.uri != selectedUri) {
             LogStore.append("[failover] 切换到: ${best.first.displayName} (${best.second}ms)")
             runCatching { MirageNative.setNode(best.first.uri) }
-            NodeStore.setSelected(this, nodes.indexOfFirst { it.uri == best.first.uri })
+            val newIdx = nodes.indexOfFirst { it.uri == best.first.uri }
+            if (newIdx >= 0) {
+                NodeStore.setSelected(this, newIdx)
+                callbacks.forEach { runCatching { it.onNodeChanged(newIdx, best.first.uri) } }
+            }
         } else {
             // 最优还是当前 → 完整重启连接 (撤 TUN 后重建, 清 stale 隧道)
             LogStore.append("[failover] 当前节点仍最优, 完整重启连接")
@@ -394,6 +401,7 @@ class CoreService : VpnService() {
         override fun getPoolSize(): Int = getPoolSizeInternal()
         override fun setRules(json: String): Boolean = setRulesInternal(json)
         override fun getRuleHits(): String = MirageNative.getRuleHits()
+        override fun resetRuleHits(): Boolean = MirageNative.resetRuleHits()
         override fun setLogLevel(level: String?): Boolean =
             level?.let { setLogLevelInternal(it) } ?: false
         override fun setBlockQuic(block: Boolean): Boolean = setBlockQuicInternal(block)

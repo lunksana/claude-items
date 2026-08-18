@@ -94,9 +94,8 @@ class NodesFragment : Fragment() {
                     .setMessage(msg)
                     .setPositiveButton("选择最优") { _, _ ->
                         val best = sorted.first()
-                        val idx = com.mirage.android.core.NodeStore.getNodes(requireContext())
-                            .indexOfFirst { it.uri == best.first.uri }
-                        if (idx >= 0) com.mirage.android.core.NodeStore.setSelected(requireContext(), idx)
+                        val idx = viewModel.nodes.value.indexOfFirst { it.uri == best.first.uri }
+                        if (idx >= 0) viewModel.selectNode(idx)
                     }
                     .setNegativeButton("关闭", null)
                     .show()

@@ -18,6 +18,7 @@ interface ICoreService {
     /** 注入路由规则 (JSON)。 */
     boolean setRules(String json);
     String getRuleHits();
+    boolean resetRuleHits();
     /** 动态设置日志等级 (trace/debug/info/warn/error)。 */
     boolean setLogLevel(String level);
     boolean setBlockQuic(boolean block);

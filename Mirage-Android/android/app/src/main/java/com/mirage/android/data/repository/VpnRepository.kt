@@ -64,6 +64,16 @@ class VpnRepository(private val context: Context) {
                 _logs.value = current.takeLast(150)
             }
         }
+
+        override fun onNodeChanged(index: Int, uri: String?) {
+            scope.launch {
+                nodeRepo.setSelected(index)
+                val node = nodeRepo.getSelectedNode()
+                if (_vpnState.value is VpnState.Connected) {
+                    _vpnState.value = VpnState.Connected(node)
+                }
+            }
+        }
     }
 
     init {

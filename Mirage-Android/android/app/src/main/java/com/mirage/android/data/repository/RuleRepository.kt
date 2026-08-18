@@ -32,6 +32,10 @@ class RuleRepository(private val context: Context) {
         loadData()
     }
 
+    fun reload() {
+        loadData()
+    }
+
     private fun loadData() {
         val raw = prefs.getString(KEY_RULES, "[]") ?: "[]"
         val list = runCatching {
@@ -71,6 +75,12 @@ class RuleRepository(private val context: Context) {
             val key = "${r.kind}|${r.pattern}|${r.action}"
             r.copy(hits = hitsMap[key] ?: 0L)
         }
+    }
+
+    /** 清空规则命中统计。 */
+    fun resetRuleHits() {
+        _rules.value = _rules.value.map { it.copy(hits = 0L) }
+        CoreController.resetRuleHits()
     }
 
     fun addRule(rule: Rule) {

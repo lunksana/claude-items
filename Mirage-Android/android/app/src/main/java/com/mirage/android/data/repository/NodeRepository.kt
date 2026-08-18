@@ -4,6 +4,7 @@ import android.content.Context
 import com.mirage.android.core.CoreController
 import com.mirage.android.data.model.Node
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -40,6 +41,10 @@ class NodeRepository(private val context: Context) {
     private val coroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     init {
+        loadData()
+    }
+
+    fun reload() {
         loadData()
     }
 
@@ -199,6 +204,8 @@ class NodeRepository(private val context: Context) {
         results.filter { it.second >= 0 }.minByOrNull { it.second }?.first
     }
 
+    private val updateMutex = kotlinx.coroutines.sync.Mutex()
+
     /** 批量测速并返回全部结果 [(index, rtt)] (rtt>=0 可用)。 */
     suspend fun testAllNodesDetailed(): List<Pair<Int, Long>> = withContext(Dispatchers.IO) {
         val list = _nodes.value
@@ -209,7 +216,7 @@ class NodeRepository(private val context: Context) {
         val results = list.mapIndexed { index, node ->
             async {
                 val rtt = doTest(node, method)
-                updateNodeLatency(index, rtt)
+                updateNodeLatencySafe(index, rtt)
                 Pair(index, rtt)
             }
         }.awaitAll()
@@ -246,6 +253,20 @@ class NodeRepository(private val context: Context) {
         if (index in list.indices) {
             list[index] = list[index].copy(isTesting = isTesting)
             _nodes.value = list
+        }
+    }
+
+    private suspend fun updateNodeLatencySafe(index: Int, latency: Long) {
+        updateMutex.withLock {
+            val list = _nodes.value.toMutableList()
+            if (index in list.indices) {
+                list[index] = list[index].copy(
+                    latencyMs = if (latency >= 0) latency else null,
+                    isTesting = false,
+                    testError = if (latency < 0) "不可用" else null
+                )
+                _nodes.value = list
+            }
         }
     }
 

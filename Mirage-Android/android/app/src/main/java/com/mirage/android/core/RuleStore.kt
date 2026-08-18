@@ -68,10 +68,10 @@ object RuleStore {
         }
     }
 
-    private fun saveRules(ctx: Context, list: List<Rule>) {
+    fun saveRules(ctx: Context, list: List<Rule>) {
         val arr = JSONArray()
         for (r in list) {
-            arr.put(JSONObject().put("type", r.type).put("pattern", r.pattern).put("action", r.action))
+            arr.put(JSONObject().put("type", r.type).put("kind", r.kind).put("pattern", r.pattern).put("action", r.action))
         }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putString(KEY_RULES, arr.toString()).apply()

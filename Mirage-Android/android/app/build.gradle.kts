@@ -11,8 +11,10 @@ android {
         applicationId = "com.mirage.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0-modern"
+        versionCode = 3
+        versionName = "0.2.1-modern"
+        buildConfigField("String", "BUILD_TIME", "\"2026.08.19\"")
+        buildConfigField("String", "BUILD_TAG", "\"Release 3\"")
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

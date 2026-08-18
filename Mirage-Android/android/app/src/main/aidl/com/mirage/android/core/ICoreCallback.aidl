@@ -4,4 +4,5 @@ package com.mirage.android.core;
 interface ICoreCallback {
     void onStateChanged(boolean running);
     void onLog(String line);
+    void onNodeChanged(int index, String uri);
 }

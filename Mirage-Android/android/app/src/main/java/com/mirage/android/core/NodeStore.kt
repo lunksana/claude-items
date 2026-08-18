@@ -128,7 +128,7 @@ object NodeStore {
         }
     }
 
-    private fun saveNodes(ctx: Context, list: List<Node>) {
+    fun saveNodes(ctx: Context, list: List<Node>) {
         val arr = JSONArray()
         for (n in list) {
             arr.put(JSONObject().put("uri", n.uri).put("name", n.name))

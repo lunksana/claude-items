@@ -565,6 +565,16 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_getRuleHits(
     env.new_string(s).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
 }
 
+/// `boolean resetRuleHits()` — 清空规则命中统计。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_resetRuleHits(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jboolean {
+    mirage_core::direct::reset_rule_hits();
+    1
+}
+
 /// `boolean setRules(String json)` — 设置自定义分流规则 (App 启动/改规则时调用)。
 #[no_mangle]
 pub extern "system" fn Java_com_mirage_android_core_MirageNative_setRules(
