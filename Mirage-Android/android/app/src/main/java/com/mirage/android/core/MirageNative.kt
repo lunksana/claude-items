@@ -59,6 +59,12 @@ object MirageNative {
     /** 运行时热切换节点 (无需断开)。 */
     external fun setNode(uri: String): Boolean
 
+    /** 运行时热更新连接池容量。 */
+    external fun setPoolSize(poolSize: Int): Boolean
+
+    /** 获取当前连接池容量。 */
+    external fun getPoolSize(): Int
+
     /** 内置国内域名列表 (规则界面展示)。 */
     external fun getBuiltinDomains(): Array<String>
 

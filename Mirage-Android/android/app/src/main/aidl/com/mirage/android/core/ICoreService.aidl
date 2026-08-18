@@ -12,6 +12,9 @@ interface ICoreService {
     void stop();
     /** 运行时热切换节点 (mirage:// uri)。 */
     boolean setNode(String uri);
+    /** 运行时热更新连接池容量。 */
+    boolean setPoolSize(int poolSize);
+    int getPoolSize();
     /** 注入路由规则 (JSON)。 */
     boolean setRules(String json);
     /** 动态设置日志等级 (trace/debug/info/warn/error)。 */

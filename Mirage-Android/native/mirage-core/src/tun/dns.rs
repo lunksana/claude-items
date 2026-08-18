@@ -174,7 +174,10 @@ fn build_response(query: &[u8], domain: &str, qtype: u16, a_record: Option<[u8; 
         resp.extend_from_slice(&[0xC0, 0x0C]);
         resp.extend_from_slice(&qtype.to_be_bytes());
         resp.extend_from_slice(&[0, 1]); // IN
-        resp.extend_from_slice(&60u32.to_be_bytes()); // TTL
+        // Fake-IP (198.18.0.0/16) 使用 1 秒极短 TTL，防止 VPN 断开后 App 仍残留 Fake-IP 导致无法联网
+        let is_fake = ip[0] == 198 && ip[1] == 18;
+        let ttl: u32 = if is_fake { 1 } else { 60 };
+        resp.extend_from_slice(&ttl.to_be_bytes()); // TTL
         resp.extend_from_slice(&[0, 4]);
         resp.extend_from_slice(&ip);
     }

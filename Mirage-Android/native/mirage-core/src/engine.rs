@@ -46,7 +46,7 @@ impl NodeInfo {
             server_port: uri.port,
             password: uri.password.clone(),
             sni: uri.sni.clone(),
-            pool_size: 4,
+            pool_size: uri.pool_size.unwrap_or(8),
             pfs: false,
         }
     }

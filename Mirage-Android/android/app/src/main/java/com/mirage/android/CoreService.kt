@@ -159,6 +159,16 @@ class CoreService : VpnService() {
         } else true
     }
 
+    fun setPoolSizeInternal(poolSize: Int): Boolean {
+        NodeStore.setPoolSize(this, poolSize)
+        return if (MirageNative.isRunning()) {
+            runCatching { MirageNative.setPoolSize(poolSize) }.getOrDefault(false)
+        } else true
+    }
+
+    fun getPoolSizeInternal(): Int =
+        if (MirageNative.isRunning()) MirageNative.getPoolSize() else NodeStore.getPoolSize(this)
+
     fun setRulesInternal(json: String): Boolean = MirageNative.setRules(json)
     fun setBlockQuicInternal(block: Boolean): Boolean = MirageNative.setBlockQuic(block)
     fun isBlockQuicInternal(): Boolean = MirageNative.isBlockQuic()
@@ -286,6 +296,8 @@ class CoreService : VpnService() {
         override fun start(): Int = startInternal()
         override fun stop() = stopInternal()
         override fun setNode(uri: String): Boolean = setNodeInternal(uri)
+        override fun setPoolSize(poolSize: Int): Boolean = setPoolSizeInternal(poolSize)
+        override fun getPoolSize(): Int = getPoolSizeInternal()
         override fun setRules(json: String): Boolean = setRulesInternal(json)
         override fun setLogLevel(level: String?): Boolean =
             level?.let { setLogLevelInternal(it) } ?: false

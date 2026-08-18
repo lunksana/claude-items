@@ -31,6 +31,8 @@ pub mod protect_queue;
 static STARTED: AtomicBool = AtomicBool::new(false);
 /// 引擎与 TUN 栈句柄 (stop 时置空)。
 static RUNTIME: Mutex<Option<Arc<RunState>>> = Mutex::new(None);
+static CURRENT_POOL_SIZE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(8);
+static CURRENT_NODE_URI: Mutex<Option<String>> = Mutex::new(None);
 
 struct RunState {
     engine: Arc<Engine>,
@@ -176,8 +178,12 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
     };
     let mut node = NodeInfo::from_node_uri(&node_uri);
     if pool_size > 0 {
+        CURRENT_POOL_SIZE.store(pool_size as usize, Ordering::Relaxed);
         node.pool_size = pool_size as usize;
+    } else {
+        node.pool_size = CURRENT_POOL_SIZE.load(Ordering::Relaxed);
     }
+    *CURRENT_NODE_URI.lock().unwrap_or_else(|e| e.into_inner()) = Some(uri_str);
 
     // 注册 protect 回调: **同步 JNI 调用** Kotlin 侧 `MirageNative.protectFd(fd)`。
     // 必须在 socket connect 之前完成 (SO_MARK 影响路由), 轮询队列来不及。
@@ -408,6 +414,8 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_setNode(
         Err(_) => return 0,
     };
     let mut node = mirage_core::engine::NodeInfo::from_node_uri(&node_uri);
+    node.pool_size = CURRENT_POOL_SIZE.load(Ordering::Relaxed);
+    *CURRENT_NODE_URI.lock().unwrap_or_else(|e| e.into_inner()) = Some(uri_str);
 
     // 在建的 runtime 上重建引擎 (Engine::new 需要 tokio 上下文)
     let guard = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
@@ -426,6 +434,55 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_setNode(
             0
         }
     }
+}
+
+/// `boolean setPoolSize(int poolSize)` — 动态热更新当前运行中的连接池容量。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_setPoolSize(
+    _env: JNIEnv,
+    _class: JClass,
+    pool_size: jint,
+) -> jboolean {
+    if pool_size <= 0 {
+        return 0;
+    }
+    let size = pool_size as usize;
+    CURRENT_POOL_SIZE.store(size, Ordering::Relaxed);
+
+    let guard = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(state) = guard.as_ref() {
+        let uri_opt = CURRENT_NODE_URI.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(uri_str) = uri_opt {
+            if let Ok(node_uri) = mirage_core::node_uri::NodeUri::parse(&uri_str) {
+                let mut node = mirage_core::engine::NodeInfo::from_node_uri(&node_uri);
+                node.pool_size = size;
+                let result = state.rt.block_on(async move {
+                    mirage_core::engine::Engine::new(&node).map_err(|e| e.to_string())
+                });
+                match result {
+                    Ok(new_engine) => {
+                        state.stack.swap_engine(new_engine);
+                        tracing::info!("MirageCore 已热更新连接池容量为: {size}");
+                        return 1;
+                    }
+                    Err(e) => {
+                        tracing::error!("setPoolSize 引擎重建失败: {e}");
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+    1
+}
+
+/// `int getPoolSize()` — 获取当前内核连接池容量。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_getPoolSize(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    CURRENT_POOL_SIZE.load(Ordering::Relaxed) as jint
 }
 
 /// `long testNode(String uri, int timeoutMs)` — 完整协议握手测活。

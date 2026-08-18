@@ -67,7 +67,9 @@ class NodeRepository(private val context: Context) {
         _selectedIndex.value = prefs.getInt(KEY_SELECTED, if (finalNodes.isNotEmpty()) 0 else -1)
         _testMethod.value = prefs.getString(KEY_TEST_METHOD, "tcp") ?: "tcp"
         _isAutoSelect.value = prefs.getBoolean(KEY_AUTO_SELECT, false)
-        _poolSize.value = prefs.getInt(KEY_POOL, 8)
+        val pool = prefs.getInt(KEY_POOL, 8)
+        _poolSize.value = pool
+        com.mirage.android.core.NodeStore.setPoolSize(context, pool)
         saveNodes(finalNodes)
     }
 
@@ -143,12 +145,14 @@ class NodeRepository(private val context: Context) {
         prefs.edit().putString(KEY_TEST_METHOD, method).apply()
     }
 
-    fun getPoolSize(): Int = prefs.getInt(KEY_POOL, 8)
+    fun getPoolSize(): Int = _poolSize.value
 
     fun setPoolSize(size: Int) {
         val safeSize = size.coerceIn(1, 64)
         _poolSize.value = safeSize
         prefs.edit().putInt(KEY_POOL, safeSize).apply()
+        com.mirage.android.core.NodeStore.setPoolSize(context, safeSize)
+        CoreController.setPoolSize(safeSize)
     }
 
     /**

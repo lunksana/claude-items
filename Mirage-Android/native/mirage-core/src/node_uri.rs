@@ -14,6 +14,7 @@ pub struct NodeUri {
     pub host: String,
     pub port: u16,
     pub sni: String,
+    pub pool_size: Option<usize>,
 }
 
 /// 百分号解码。`+` **不**当空格 —— 这是 URI 的 query 部分而非
@@ -81,10 +82,17 @@ impl NodeUri {
         }
 
         let mut sni = String::new();
+        let mut pool_size = None;
         for pair in query.split('&').filter(|p| !p.is_empty()) {
             if let Some((k, v)) = pair.split_once('=') {
                 if k == "sni" {
                     sni = percent_decode(v)?;
+                } else if k == "pool_size" || k == "pool" {
+                    if let Ok(s) = v.parse::<usize>() {
+                        if s > 0 {
+                            pool_size = Some(s);
+                        }
+                    }
                 }
             }
         }
@@ -100,7 +108,7 @@ impl NodeUri {
             return Err(anyhow!("缺少 sni 参数 (伪装域名, 必须与服务端一致)"));
         }
 
-        Ok(NodeUri { password, host: host.to_string(), port, sni })
+        Ok(NodeUri { password, host: host.to_string(), port, sni, pool_size })
     }
 }
 
