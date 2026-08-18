@@ -289,12 +289,13 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
     } else {
         format!("{}:{}", dst.0, dst.1)
     };
-    let cid = crate::monitor::record_conn_start("TCP", &target_name, "隧道代理");
+    let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("TCP", &target_name, "隧道代理");
 
     // 拆成读写半程: upload (app→tunnel) / download (tunnel→app)
     let (mut tun_reader, mut tun_writer) = (tunnel.reader, tunnel.writer);
     let (mut local_rd, mut local_wr) = tokio::io::split(stream);
 
+    let up_atomic = conn_up.clone();
     let upload = async {
         let mut up_bytes: u64 = 0;
         let mut buf = [0u8; 65536];
@@ -309,6 +310,7 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
                         break;
                     }
                     up_bytes += n as u64;
+                    up_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(Err(_)) => {
                     let _ = tun_writer.send_close_notify().await;
@@ -320,12 +322,14 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
         up_bytes
     };
 
+    let down_atomic = conn_down.clone();
     let download = async {
         let mut down_bytes: u64 = 0;
         loop {
             match tokio::time::timeout(RELAY_IDLE, tun_reader.recv_data_to(&mut local_wr)).await {
                 Ok(Ok(Some(n))) => {
                     down_bytes += n as u64;
+                    down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(Ok(None)) => break, // 对端正常 close_notify
                 Ok(Err(_)) => break,
@@ -354,7 +358,7 @@ fn _sock_buf_const() -> usize {
 
 /// 直连路径: smoltcp socket ⇄ 真实 TCP socket (protect 绕过 TUN)。
 async fn relay_direct(stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::net::IpAddr, u16)) {
-    let cid = crate::monitor::record_conn_start("TCP", &format!("{}:{}", dst.0, dst.1), "直连");
+    let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("TCP", &format!("{}:{}", dst.0, dst.1), "直连");
     TCP_ACTIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _guard = TcpActiveGuard;
     use std::os::unix::io::AsRawFd;
@@ -385,6 +389,7 @@ async fn relay_direct(stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::net
     let mut down: u64 = 0;
     let (mut lr, mut lw) = tokio::io::split(&mut local);
     let (mut rr, mut rw) = remote.split();
+    let up_atomic = conn_up.clone();
     let to_tunnel = async {
         let mut buf = [0u8; 16384];
         loop {
@@ -393,6 +398,7 @@ async fn relay_direct(stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::net
                 Ok(n) => {
                     if rw.write_all(&buf[..n]).await.is_err() { break; }
                     up += n as u64;
+                    up_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_up(n as u64);
                 }
                 Err(_) => break,
@@ -400,6 +406,7 @@ async fn relay_direct(stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::net
         }
         up
     };
+    let down_atomic = conn_down.clone();
     let from_tunnel = async {
         let mut buf = [0u8; 16384];
         loop {
@@ -408,6 +415,7 @@ async fn relay_direct(stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::net
                 Ok(n) => {
                     if lw.write_all(&buf[..n]).await.is_err() { break; }
                     down += n as u64;
+                    down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_down(n as u64);
                 }
                 Err(_) => break,

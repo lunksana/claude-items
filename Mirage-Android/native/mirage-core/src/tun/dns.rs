@@ -247,7 +247,7 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, quer
     debug!("[TUN-DNS] 查询 {} (type {})", domain, qtype);
 
     let is_direct = qtype == 1 && direct::should_direct(Some(&domain), None);
-    let cid = crate::monitor::record_conn_start(
+    let (cid, _conn_up, _conn_down) = crate::monitor::record_conn_start(
         "DNS",
         &format!("{domain}:53"),
         if is_direct { "直连解析" } else { "Fake-IP 代理" },

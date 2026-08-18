@@ -165,11 +165,18 @@ async fn udp_flow_relay(
     } else {
         (None, Some(key.dst))
     };
+    let target_display = if let Some(d) = &target_domain {
+        format!("{}:{}", d, key.dst_port)
+    } else {
+        format!("{}:{}", key.dst, key.dst_port)
+    };
+    let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("UDP", &target_display, "隧道代理");
     let _ = flow_id;
     debug!("[TUN-UDP] #{} 新会话 {} → {}", flow_id, fmt_flow(&key), target_domain.as_deref().unwrap_or(""));
 
     // 下行: rx → 封帧 → 隧道 (机会式合帧)
     let dn_writer = writer.clone();
+    let up_atomic = conn_up.clone();
     let dn = async move {
         let mut sent: u64 = 0;
         loop {
@@ -195,12 +202,15 @@ async fn udp_flow_relay(
             if dn_writer.lock().await.send_data(&batch).await.is_err() {
                 break;
             }
-            sent += payload.len() as u64;
+            let plen = payload.len() as u64;
+            sent += plen;
+            up_atomic.fetch_add(plen, Ordering::Relaxed);
         }
         sent
     };
 
     // 上行: 隧道 → 解帧 → 构造回程 IP 包 → 写 TUN
+    let down_atomic = conn_down.clone();
     let up = async move {
         let mut acc: Vec<u8> = Vec::new();
         let mut got_downlink = false;
@@ -223,7 +233,9 @@ async fn udp_flow_relay(
                     if let Some(pkt) = build_reply_ip(reply_src, reply_dst, &payload) {
                         stack.write_raw(&pkt);
                     }
-                    recv += payload.len() as u64;
+                    let plen = payload.len() as u64;
+                    recv += plen;
+                    down_atomic.fetch_add(plen, Ordering::Relaxed);
                 }
             }
         }
@@ -231,6 +243,7 @@ async fn udp_flow_relay(
     };
 
     let (sent, recv) = tokio::join!(dn, up);
+    crate::monitor::record_conn_close(cid, sent, recv);
     debug!(
         "[TUN-UDP] {} 关闭 (↑{} ↓{})",
         fmt_flow(&key),
@@ -580,13 +593,13 @@ async fn udp_flow_direct(
     let client = SocketAddr::new(key.src, key.src_port);
     debug!("[TUN-UDP/direct] 新流 {} → {}", fmt_flow(&key), dst);
 
+    let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("UDP", &format!("{}:{}", key.dst, key.dst_port), "直连");
     let sock_rc = std::sync::Arc::new(sock);
-    let mut sent: u64 = 0;
-    let mut recv: u64 = 0;
 
     // 下行: 客户端 → 目标
     let dn_sock = sock_rc.clone();
     let dn_dst = dst;
+    let up_atomic = conn_up.clone();
     let dn = async move {
         let mut n_sent: u64 = 0;
         loop {
@@ -597,8 +610,10 @@ async fn udp_flow_direct(
             if dn_sock.send_to(&payload, dn_dst).await.is_err() {
                 break;
             }
-            n_sent += payload.len() as u64;
-            crate::monitor::add_up(payload.len() as u64);
+            let plen = payload.len() as u64;
+            n_sent += plen;
+            up_atomic.fetch_add(plen, Ordering::Relaxed);
+            crate::monitor::add_up(plen);
         }
         n_sent
     };
@@ -607,6 +622,7 @@ async fn udp_flow_direct(
     let up_sock = sock_rc.clone();
     let up_client = client;
     let up_dst = dst;
+    let down_atomic = conn_down.clone();
     let up = async move {
         let mut n_recv: u64 = 0;
         let mut buf = vec![0u8; 65536];
@@ -619,13 +635,16 @@ async fn udp_flow_direct(
             if let Some(pkt) = build_reply_ip_public(up_dst, up_client, &buf[..n]) {
                 stack.write_raw(&pkt);
             }
-            n_recv += n as u64;
-            crate::monitor::add_down(n as u64);
+            let n_u64 = n as u64;
+            n_recv += n_u64;
+            down_atomic.fetch_add(n_u64, Ordering::Relaxed);
+            crate::monitor::add_down(n_u64);
         }
         n_recv
     };
 
     let (sent, recv) = tokio::join!(dn, up);
+    crate::monitor::record_conn_close(cid, sent, recv);
     debug!("[TUN-UDP/direct] {} 关闭 (↑{} ↓{})", fmt_flow(&key),
         human_bytes(sent), human_bytes(recv));
 }

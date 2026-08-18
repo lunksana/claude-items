@@ -172,6 +172,8 @@ class VpnRepository(private val context: Context) {
                             }
                         }
                         _connections.value = parsedList
+                    } else {
+                        _connections.value = emptyList()
                     }
                 } else {
                     if (_vpnState.value !is VpnState.Disconnected && _vpnState.value !is VpnState.Connecting) {

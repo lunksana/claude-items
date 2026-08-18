@@ -133,7 +133,7 @@ pub fn recent_logs_push(line: &str) {
     global_logger().write_line(&s);
 }
 
-// ── 活跃/最近连接监控 ────────────────────────────────────────────────────────
+// ── 活跃连接监控 ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConnectionRecord {
@@ -148,72 +148,94 @@ pub struct ConnectionRecord {
     pub duration_secs: u64,
 }
 
-static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
-static CONNECTIONS: Mutex<Option<VecDeque<ConnectionRecord>>> = Mutex::new(None);
+pub struct LiveConnection {
+    pub id: u64,
+    pub protocol: String,
+    pub target: String,
+    pub outbound: String,
+    pub up_bytes: Arc<AtomicU64>,
+    pub down_bytes: Arc<AtomicU64>,
+    pub start_time: u64,
+}
 
-pub fn record_conn_start(protocol: &str, target: &str, outbound: &str) -> u64 {
+static NEXT_CONN_ID: AtomicU64 = AtomicU64::new(1);
+static ACTIVE_CONNECTIONS: Mutex<Option<std::collections::HashMap<u64, LiveConnection>>> = Mutex::new(None);
+
+/// 注册新连接，返回 (id, up_atomic, down_atomic)。
+/// 读写协程可直接原子累加，无需争抢全局大锁，实现实时无锁流量统计。
+pub fn record_conn_start(protocol: &str, target: &str, outbound: &str) -> (u64, Arc<AtomicU64>, Arc<AtomicU64>) {
     let id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
     let start_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    let record = ConnectionRecord {
+    let up_bytes = Arc::new(AtomicU64::new(0));
+    let down_bytes = Arc::new(AtomicU64::new(0));
+
+    let record = LiveConnection {
         id,
         protocol: protocol.to_string(),
         target: target.to_string(),
         outbound: outbound.to_string(),
-        status: "已连接".to_string(),
-        up_bytes: 0,
-        down_bytes: 0,
+        up_bytes: up_bytes.clone(),
+        down_bytes: down_bytes.clone(),
         start_time,
-        duration_secs: 0,
     };
 
-    let mut lock = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
-    let list = lock.get_or_insert_with(|| VecDeque::with_capacity(100));
-    list.push_front(record);
-    while list.len() > 100 {
-        list.pop_back();
-    }
-    id
+    let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = lock.get_or_insert_with(|| std::collections::HashMap::with_capacity(128));
+    map.insert(id, record);
+    (id, up_bytes, down_bytes)
 }
 
+/// 兼容老接口更新
 pub fn record_conn_update(id: u64, up: u64, down: u64) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let mut lock = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(list) = lock.as_mut() {
-        if let Some(item) = list.iter_mut().find(|c| c.id == id) {
-            item.up_bytes = up;
-            item.down_bytes = down;
-            item.duration_secs = now.saturating_sub(item.start_time);
+    let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = lock.as_mut() {
+        if let Some(item) = map.get(&id) {
+            item.up_bytes.store(up, Ordering::Relaxed);
+            item.down_bytes.store(down, Ordering::Relaxed);
         }
     }
 }
 
-pub fn record_conn_close(id: u64, up: u64, down: u64) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let mut lock = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(list) = lock.as_mut() {
-        if let Some(item) = list.iter_mut().find(|c| c.id == id) {
-            item.up_bytes = up;
-            item.down_bytes = down;
-            item.status = "已断开".to_string();
-            item.duration_secs = now.saturating_sub(item.start_time);
-        }
+/// 关闭连接：从活跃连接列表中彻底移除，符合真正的“活跃连接”语义。
+pub fn record_conn_close(id: u64, _up: u64, _down: u64) {
+    let mut lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = lock.as_mut() {
+        map.remove(&id);
     }
 }
 
+/// 获取当前所有活跃连接的实时 JSON 快照
 pub fn get_connections_json() -> String {
-    let lock = CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(list) = lock.as_ref() {
-        serde_json::to_string(list).unwrap_or_else(|_| "[]".to_string())
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = lock.as_ref() {
+        let mut list: Vec<ConnectionRecord> = map
+            .values()
+            .map(|c| ConnectionRecord {
+                id: c.id,
+                protocol: c.protocol.clone(),
+                target: c.target.clone(),
+                outbound: c.outbound.clone(),
+                status: "已连接".to_string(),
+                up_bytes: c.up_bytes.load(Ordering::Relaxed),
+                down_bytes: c.down_bytes.load(Ordering::Relaxed),
+                start_time: c.start_time,
+                duration_secs: now.saturating_sub(c.start_time),
+            })
+            .collect();
+        // 按照最新的连接排在前面
+        list.sort_by(|a, b| b.id.cmp(&a.id));
+        if list.len() > 100 {
+            list.truncate(100);
+        }
+        serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
     } else {
         "[]".to_string()
     }
