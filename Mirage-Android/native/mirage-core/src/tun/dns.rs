@@ -38,7 +38,7 @@ fn remote_dns_server() -> &'static StdMutex<std::net::IpAddr> {
 }
 
 pub const DNS_RESPONSE_TTL: u32 = 60;
-const CACHE_TTL: Duration = Duration::from_secs(60);
+const CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// 设置国内直连 DNS
 pub fn set_direct_dns(ip: std::net::Ipv4Addr) {
@@ -98,7 +98,33 @@ fn build_a_query(domain: &str, id: u16) -> Vec<u8> {
     q
 }
 
-/// 解析上游应答, 取第一个 A 记录。
+/// 遵循 RFC 1035 跳过 DNS 名字 (支持完整指针 0xC0、标签、及混合压缩格式)。
+fn skip_dns_name(buf: &[u8], mut offset: usize) -> Option<usize> {
+    let mut steps = 0;
+    while offset < buf.len() {
+        if steps > 128 {
+            return None; // 环路防御
+        }
+        steps += 1;
+        let len = buf[offset] as usize;
+        if len == 0 {
+            return Some(offset + 1);
+        }
+        if len & 0xC0 == 0xC0 {
+            if offset + 2 > buf.len() {
+                return None;
+            }
+            return Some(offset + 2);
+        }
+        if offset + 1 + len > buf.len() {
+            return None;
+        }
+        offset += 1 + len;
+    }
+    None
+}
+
+/// 解析上游应答, 遍历并提取首个有效 A 记录 (完美支持 CNAME 链与压缩指针)。
 fn parse_a_answer(buf: &[u8], qname_len: usize) -> Option<[u8; 4]> {
     if buf.len() < 12 {
         return None;
@@ -108,20 +134,8 @@ fn parse_a_answer(buf: &[u8], qname_len: usize) -> Option<[u8; 4]> {
         return None;
     }
     let mut off = 12 + qname_len + 4;
-    for _ in 0..ancount.min(8) {
-        if off + 10 > buf.len() {
-            return None;
-        }
-        let name_len = if buf[off] & 0xC0 == 0xC0 {
-            2
-        } else {
-            let mut p = off;
-            while p < buf.len() && buf[p] != 0 {
-                p += 1 + buf[p] as usize;
-            }
-            p - off + 1
-        };
-        let r = off + name_len;
+    for _ in 0..ancount.min(16) {
+        let r = skip_dns_name(buf, off)?;
         if r + 10 > buf.len() {
             return None;
         }
@@ -139,7 +153,7 @@ fn parse_a_answer(buf: &[u8], qname_len: usize) -> Option<[u8; 4]> {
     None
 }
 
-/// 异步向上游查询真实 IP (protect UDP socket)。
+/// 异步向上游查询真实 IP (protect UDP socket, 自动重试与兜底)。
 async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     {
         let map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
@@ -158,15 +172,30 @@ async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     static NEXT_ID: AtomicU16 = AtomicU16::new(0x9000);
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let query = build_a_query(domain, id);
+    let primary_dns = get_direct_dns();
     let up: std::net::SocketAddr =
-        std::net::SocketAddr::from((get_direct_dns(), 53));
+        std::net::SocketAddr::from((primary_dns, 53));
     if sock.send_to(&query, up).await.is_err() {
         return None;
     }
-    let mut buf = [0u8; 512];
-    let (n, _) = match tokio::time::timeout(Duration::from_secs(3), sock.recv_from(&mut buf)).await {
+
+    let mut buf = [0u8; 1024];
+    let (n, _) = match tokio::time::timeout(Duration::from_millis(1500), sock.recv_from(&mut buf)).await {
         Ok(Ok(v)) => v,
-        _ => return None,
+        _ => {
+            // 主 DNS 超时 → 立即向备用公共 DNS (223.5.5.5 或 119.29.29.29) 兜底重试
+            let fallback_ip = if primary_dns != std::net::Ipv4Addr::new(223, 5, 5, 5) {
+                std::net::Ipv4Addr::new(223, 5, 5, 5)
+            } else {
+                std::net::Ipv4Addr::new(119, 29, 29, 29)
+            };
+            let fallback_up: std::net::SocketAddr = std::net::SocketAddr::from((fallback_ip, 53));
+            let _ = sock.send_to(&query, fallback_up).await;
+            match tokio::time::timeout(Duration::from_millis(1500), sock.recv_from(&mut buf)).await {
+                Ok(Ok(v)) => v,
+                _ => return None,
+            }
+        }
     };
     if n < 2 || u16::from_be_bytes([buf[0], buf[1]]) != id {
         return None;
@@ -180,13 +209,14 @@ async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
         p - 12 + 1
     };
     if let Some(ip) = parse_a_answer(&buf[..n], qname_end) {
+        let direct_v4 = std::net::Ipv4Addr::from(ip);
         direct_cache()
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(domain.to_string(), (std::net::Ipv4Addr::from(ip), Instant::now()));
+            .insert(domain.to_string(), (direct_v4, Instant::now()));
         // 标记该 IP 为直连 (TCP 层对裸 IP 判定用, 保证 DNS/TCP 分流一致)
-        crate::direct::mark_direct_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::from(ip)));
-        return Some(std::net::Ipv4Addr::from(ip));
+        crate::direct::mark_direct_ip(std::net::IpAddr::V4(direct_v4));
+        return Some(direct_v4);
     }
     None
 }

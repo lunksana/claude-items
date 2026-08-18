@@ -83,7 +83,7 @@ class MainActivity : AppCompatActivity() {
             val navBars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.navigationBars())
             
             val density = resources.displayMetrics.density
-            val floatingNavHeightWithMargin = (78 * density).toInt()
+            val floatingNavHeightWithMargin = (84 * density).toInt()
             binding.viewPager.setPadding(0, statusBars.top, 0, floatingNavHeightWithMargin + navBars.bottom)
 
             val lp = binding.cardFloatingNav.layoutParams as? androidx.coordinatorlayout.widget.CoordinatorLayout.LayoutParams
@@ -93,6 +93,12 @@ class MainActivity : AppCompatActivity() {
                 lp.setMargins(sideMargin, 0, sideMargin, bottomMargin)
                 binding.cardFloatingNav.layoutParams = lp
             }
+            insets
+        }
+
+        // 禁止 BottomNavigationView 内部自动追加导航栏高度内边距 (防止图标向上偏移/文字被裁剪)
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(binding.bottomNav) { view, insets ->
+            view.setPadding(0, 0, 0, 0)
             insets
         }
 

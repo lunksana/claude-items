@@ -391,7 +391,7 @@ async fn relay_direct(_stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::ne
     let (mut rr, mut rw) = remote.split();
     let up_atomic = conn_up.clone();
     let to_tunnel = async {
-        let mut buf = [0u8; 16384];
+        let mut buf = [0u8; 65536];
         loop {
             match lr.read(&mut buf).await {
                 Ok(0) => break,
@@ -408,7 +408,7 @@ async fn relay_direct(_stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::ne
     };
     let down_atomic = conn_down.clone();
     let from_tunnel = async {
-        let mut buf = [0u8; 16384];
+        let mut buf = [0u8; 65536];
         loop {
             match rr.read(&mut buf).await {
                 Ok(0) => break,
