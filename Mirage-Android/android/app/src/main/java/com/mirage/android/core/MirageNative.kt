@@ -68,6 +68,15 @@ object MirageNative {
     /** 清空 Fake-IP 映射与直连 DNS 缓存。 */
     external fun clearDnsCache(): Boolean
 
+    /** 设置国内与国外 DNS 服务器地址。 */
+    external fun setDnsServers(directDns: String, remoteDns: String): Boolean
+
+    /** 获取当前国内直连 DNS 地址。 */
+    external fun getDirectDns(): String
+
+    /** 获取当前国外远程 DNS 地址。 */
+    external fun getRemoteDns(): String
+
     /** 内置国内域名列表 (规则界面展示)。 */
     external fun getBuiltinDomains(): Array<String>
 

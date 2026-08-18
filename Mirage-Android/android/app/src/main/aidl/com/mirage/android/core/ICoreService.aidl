@@ -22,6 +22,9 @@ interface ICoreService {
     boolean setBlockQuic(boolean block);
     boolean isBlockQuic();
     boolean clearDnsCache();
+    boolean setDnsServers(String directDns, String remoteDns);
+    String getDirectDns();
+    String getRemoteDns();
     boolean isRunning();
     boolean isHealthy();
     long latencyMs();

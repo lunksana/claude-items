@@ -19,6 +19,7 @@ class VpnRepository(private val context: Context) {
 
     private val nodeRepo = NodeRepository.getInstance(context)
     private val ruleRepo = RuleRepository.getInstance(context)
+    private val dnsRepo = DnsRepository.getInstance(context)
 
     private val _vpnState = MutableStateFlow<VpnState>(VpnState.Disconnected)
     val vpnState: StateFlow<VpnState> = _vpnState.asStateFlow()
@@ -46,6 +47,7 @@ class VpnRepository(private val context: Context) {
         override fun onStateChanged(running: Boolean) {
             scope.launch {
                 if (running) {
+                    dnsRepo.applyDns()
                     _vpnState.value = VpnState.Connected(nodeRepo.getSelectedNode())
                     startTelemetry()
                 } else {
@@ -89,8 +91,9 @@ class VpnRepository(private val context: Context) {
         }
 
         _vpnState.value = VpnState.Connecting
-        // 注入规则
+        // 注入规则与 DNS 配置
         ruleRepo.applyRules()
+        dnsRepo.applyDns()
         // 启动前清理残留 Fake-IP 与 DNS 缓存
         runCatching { CoreController.clearDnsCache() }
 

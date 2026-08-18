@@ -67,6 +67,10 @@ class HomeFragment : Fragment() {
             (activity as? MainActivity)?.navigateToTab(1)
         }
 
+        binding.dnsCard.setOnClickListener {
+            showDnsConfigDialog()
+        }
+
         observeState()
     }
 
@@ -106,6 +110,18 @@ class HomeFragment : Fragment() {
                             "累计流量: ↑${stats.upTotalFormatted} / ↓${stats.downTotalFormatted}"
                         binding.connsInfo.text =
                             "活跃连接: TCP ${stats.tcpConns} · UDP ${stats.udpFlows} · DNS ${stats.dnsQueries}"
+                    }
+                }
+                launch {
+                    val dnsRepo = com.mirage.android.data.repository.DnsRepository.getInstance(requireContext())
+                    dnsRepo.directDns.collect { direct ->
+                        binding.tvDnsSummary.text = "国内: $direct · 国外: ${dnsRepo.getRemoteDns()}"
+                    }
+                }
+                launch {
+                    val dnsRepo = com.mirage.android.data.repository.DnsRepository.getInstance(requireContext())
+                    dnsRepo.remoteDns.collect { remote ->
+                        binding.tvDnsSummary.text = "国内: ${dnsRepo.getDirectDns()} · 国外: $remote"
                     }
                 }
                 launch {
@@ -171,6 +187,10 @@ class HomeFragment : Fragment() {
         val activeCore = com.mirage.android.core.CoreManager.getInstance(ctx).getActiveCore()
         val coreTag = if (activeCore.isBuiltin) "内置" else "自定义"
         _binding?.tvVersion?.text = "v${com.mirage.android.BuildConfig.VERSION_NAME} · $coreTag"
+    }
+
+    private fun showDnsConfigDialog() {
+        DnsConfigDialog(requireContext()).show()
     }
 
     override fun onDestroyView() {

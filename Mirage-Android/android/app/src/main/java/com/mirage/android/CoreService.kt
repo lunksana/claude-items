@@ -173,6 +173,10 @@ class CoreService : VpnService() {
     fun setBlockQuicInternal(block: Boolean): Boolean = MirageNative.setBlockQuic(block)
     fun isBlockQuicInternal(): Boolean = MirageNative.isBlockQuic()
     fun clearDnsCacheInternal(): Boolean = MirageNative.clearDnsCache()
+    fun setDnsServersInternal(directDns: String, remoteDns: String): Boolean =
+        MirageNative.setDnsServers(directDns, remoteDns)
+    fun getDirectDnsInternal(): String = MirageNative.getDirectDns()
+    fun getRemoteDnsInternal(): String = MirageNative.getRemoteDns()
 
     fun isRunningInternal(): Boolean = MirageNative.isRunning()
     fun isHealthyInternal(): Boolean = MirageNative.isHealthy()
@@ -305,6 +309,10 @@ class CoreService : VpnService() {
         override fun setBlockQuic(block: Boolean): Boolean = setBlockQuicInternal(block)
         override fun isBlockQuic(): Boolean = isBlockQuicInternal()
         override fun clearDnsCache(): Boolean = clearDnsCacheInternal()
+        override fun setDnsServers(directDns: String?, remoteDns: String?): Boolean =
+            setDnsServersInternal(directDns ?: "223.5.5.5", remoteDns ?: "1.1.1.1")
+        override fun getDirectDns(): String = getDirectDnsInternal()
+        override fun getRemoteDns(): String = getRemoteDnsInternal()
         override fun isRunning(): Boolean = isRunningInternal()
         override fun isHealthy(): Boolean = isHealthyInternal()
         override fun latencyMs(): Long = latencyMsInternal()

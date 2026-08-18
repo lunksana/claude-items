@@ -620,3 +620,49 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_isBlockQuic(
         0
     }
 }
+
+/// `boolean setDnsServers(String directDns, String remoteDns)` — 设置国内与国外 DNS 服务器地址。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_setDnsServers(
+    mut env: JNIEnv,
+    _class: JClass,
+    direct_dns: JString,
+    remote_dns: JString,
+) -> jboolean {
+    let direct_str: String = match env.get_string(&direct_dns) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    let remote_str: String = match env.get_string(&remote_dns) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
+    if let Ok(ip) = direct_str.trim().parse::<std::net::Ipv4Addr>() {
+        mirage_core::tun::dns::set_direct_dns(ip);
+    }
+    if let Ok(ip) = remote_str.trim().parse::<std::net::IpAddr>() {
+        mirage_core::tun::dns::set_remote_dns(ip);
+    }
+    1
+}
+
+/// `String getDirectDns()` — 获取当前国内直连 DNS 地址。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_getDirectDns(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let ip = mirage_core::tun::dns::get_direct_dns().to_string();
+    env.new_string(ip).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
+}
+
+/// `String getRemoteDns()` — 获取当前国外远程 DNS 地址。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_getRemoteDns(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let ip = mirage_core::tun::dns::get_remote_dns().to_string();
+    env.new_string(ip).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
+}
+

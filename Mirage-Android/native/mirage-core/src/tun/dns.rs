@@ -25,10 +25,43 @@ fn direct_cache() -> &'static StdMutex<HashMap<String, (std::net::Ipv4Addr, Inst
     C.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
-/// 上游 DNS (国内公共 DNS, protect socket 真实网络查询)。
-const UPSTREAM_DNS: [u8; 4] = [223, 5, 5, 5];
-const CACHE_TTL: Duration = Duration::from_secs(60);
+/// 国内直连 DNS 服务器地址 (默认 223.5.5.5)
+fn direct_dns_server() -> &'static StdMutex<std::net::Ipv4Addr> {
+    static S: OnceLock<StdMutex<std::net::Ipv4Addr>> = OnceLock::new();
+    S.get_or_init(|| StdMutex::new(std::net::Ipv4Addr::new(223, 5, 5, 5)))
+}
+
+/// 国外/远程 DNS 服务器地址 (默认 1.1.1.1)
+fn remote_dns_server() -> &'static StdMutex<std::net::IpAddr> {
+    static S: OnceLock<StdMutex<std::net::IpAddr>> = OnceLock::new();
+    S.get_or_init(|| StdMutex::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(1, 1, 1, 1))))
+}
+
 pub const DNS_RESPONSE_TTL: u32 = 60;
+const CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// 设置国内直连 DNS
+pub fn set_direct_dns(ip: std::net::Ipv4Addr) {
+    let mut s = direct_dns_server().lock().unwrap_or_else(|e| e.into_inner());
+    *s = ip;
+    clear_direct_cache();
+    tracing::info!("[TUN-DNS] 国内直连 DNS 设置为: {}", ip);
+}
+
+pub fn get_direct_dns() -> std::net::Ipv4Addr {
+    *direct_dns_server().lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 设置国外远程 DNS
+pub fn set_remote_dns(ip: std::net::IpAddr) {
+    let mut s = remote_dns_server().lock().unwrap_or_else(|e| e.into_inner());
+    *s = ip;
+    tracing::info!("[TUN-DNS] 国外远程 DNS 设置为: {}", ip);
+}
+
+pub fn get_remote_dns() -> std::net::IpAddr {
+    *remote_dns_server().lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// 清空直连 DNS 缓存 (VPN 重连/断开时调用)
 pub fn clear_direct_cache() {
@@ -126,7 +159,7 @@ async fn resolve_upstream(domain: &str) -> Option<std::net::Ipv4Addr> {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let query = build_a_query(domain, id);
     let up: std::net::SocketAddr =
-        std::net::SocketAddr::from((std::net::Ipv4Addr::from(UPSTREAM_DNS), 53));
+        std::net::SocketAddr::from((get_direct_dns(), 53));
     if sock.send_to(&query, up).await.is_err() {
         return None;
     }

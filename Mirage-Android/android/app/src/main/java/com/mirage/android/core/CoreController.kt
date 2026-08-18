@@ -81,6 +81,10 @@ object CoreController {
     fun setBlockQuic(block: Boolean): Boolean = call { it.setBlockQuic(block) } ?: false
     fun isBlockQuic(): Boolean = call { it.isBlockQuic } ?: true
     fun clearDnsCache(): Boolean = call { it.clearDnsCache() } ?: false
+    fun setDnsServers(directDns: String, remoteDns: String): Boolean =
+        call { it.setDnsServers(directDns, remoteDns) } ?: false
+    fun getDirectDns(): String = call { it.directDns } ?: "223.5.5.5"
+    fun getRemoteDns(): String = call { it.remoteDns } ?: "1.1.1.1"
 
     // ── 状态 ──
     fun isRunning(): Boolean = call { it.isRunning() } ?: false
