@@ -74,14 +74,17 @@ impl UdpEngine {
     }
 
     /// 泵线程调用: 把一个 TUN 数据报送进对应流。无流则建 (超限丢)。
-    pub fn feed(&self, stack: Arc<TunStack>, src: SocketAddr, dst: SocketAddr, payload: &[u8]) {
-        // 屏蔽海外 QUIC (UDP 443): 仅对海外/代理连接 0ms 丢弃, 促使客户端 Cronet/OkHttp 瞬间降级到 HTTP/2 TCP 隧道;
+    pub fn feed(&self, stack: Arc<TunStack>, src: SocketAddr, dst: SocketAddr, payload: &[u8], raw_pkt: &[u8]) {
+        // 屏蔽海外 QUIC (UDP 443): 仅对海外/代理连接回送 ICMP Port Unreachable, 促使客户端 Cronet/OkHttp 瞬间降级到 HTTP/2 TCP 隧道;
         // 国内直连 (如国内视频、腾讯、阿里等 QUIC) 正常放行直连传输
         if dst.port() == 443 && crate::direct::is_block_quic() {
             let fake_domain = self.engine.fake_ip_reverse(&dst.ip());
             let is_direct = crate::direct::should_direct(fake_domain.as_deref(), Some(dst.ip()));
             if !is_direct {
-                debug!("[TUN-UDP] 屏蔽海外 QUIC: 拦截 {} → {}, 触发即时 HTTP/2 降级", src, dst);
+                if let Some(icmp) = build_icmp_port_unreachable(raw_pkt) {
+                    stack.write_raw(&icmp);
+                }
+                debug!("[TUN-UDP] 屏蔽海外 QUIC: 拦截 {} → {} (回送 ICMP Port Unreachable), 触发即时 HTTP/2 降级", src, dst);
                 return;
             }
         }
@@ -458,6 +461,53 @@ fn build_ipv6_udp(src: std::net::SocketAddrV6, dst: std::net::SocketAddrV6, payl
     let csum = checksum(&pseudo);
     pkt[40 + 6..40 + 8].copy_from_slice(&csum.to_be_bytes());
     pkt
+}
+
+/// 构造 ICMP Port Unreachable (Type 3, Code 3) 数据报, 回送给发送者 (触发客户端 QUIC 瞬间降级到 TCP HTTP/2)
+pub fn build_icmp_port_unreachable(orig_pkt: &[u8]) -> Option<Vec<u8>> {
+    if orig_pkt.len() < 28 {
+        return None;
+    }
+    match orig_pkt[0] >> 4 {
+        4 => {
+            // IPv4: IP header (20B) + ICMP header (8B) + original IP header (20B) + original 8 bytes payload (8B)
+            let orig_ip_header_len = ((orig_pkt[0] & 0x0F) * 4) as usize;
+            if orig_pkt.len() < orig_ip_header_len + 8 {
+                return None;
+            }
+            let orig_src = [orig_pkt[12], orig_pkt[13], orig_pkt[14], orig_pkt[15]];
+            let orig_dst = [orig_pkt[16], orig_pkt[17], orig_pkt[18], orig_pkt[19]];
+
+            let icmp_payload_len = (orig_ip_header_len + 8).min(orig_pkt.len());
+            let total_len = 20 + 8 + icmp_payload_len;
+            let mut pkt = vec![0u8; total_len];
+
+            // Outer IPv4 Header
+            pkt[0] = 0x45;
+            pkt[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+            pkt[8] = 64; // TTL
+            pkt[9] = 1;  // Protocol: ICMP (1)
+            pkt[12..16].copy_from_slice(&orig_dst); // Src = original Dst
+            pkt[16..20].copy_from_slice(&orig_src); // Dst = original Src
+            let ip_csum = checksum(&pkt[0..20]);
+            pkt[10..12].copy_from_slice(&ip_csum.to_be_bytes());
+
+            // ICMP Header (Type 3: Destination Unreachable, Code 3: Port Unreachable)
+            pkt[20] = 3;
+            pkt[21] = 3;
+            // 22..24 checksum (computed below)
+            // 24..28 unused (0)
+
+            // ICMP Payload: copy original IP header + first 8 bytes of original datagram
+            pkt[28..28 + icmp_payload_len].copy_from_slice(&orig_pkt[..icmp_payload_len]);
+
+            let icmp_csum = checksum(&pkt[20..]);
+            pkt[22..24].copy_from_slice(&icmp_csum.to_be_bytes());
+
+            Some(pkt)
+        }
+        _ => None,
+    }
 }
 
 // ── 入站 UDP 数据报解析 (泵线程调用) ────────────────────────────────────────

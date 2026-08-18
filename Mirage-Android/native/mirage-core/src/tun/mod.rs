@@ -289,7 +289,7 @@ impl TunStack {
                 crate::tun::dns::handle_dns_query(Arc::clone(self), src, &payload);
                 return;
             }
-            self.udp.feed(Arc::clone(self), src, dst, payload);
+            self.udp.feed(Arc::clone(self), src, dst, payload, &pkt);
             return;
         }
 
@@ -444,8 +444,8 @@ impl TunStack {
             // DNS over TCP: 精确绑定 DNS 地址
             smoltcp::wire::IpListenEndpoint { addr: Some(dst), port: 53 }
         } else {
-            // 通用 catcher: 任意地址的该端口
-            smoltcp::wire::IpListenEndpoint { addr: None, port: dst_port }
+            // 通用 catcher: 精确绑定目标 IP 与端口, 避免多目标 IP 在 443 端口产生监听竞争与错配
+            smoltcp::wire::IpListenEndpoint { addr: Some(dst), port: dst_port }
         };
         if let Err(e) = g.sockets.get_mut::<stcp::Socket>(handle).listen(listen_endpoint) {
             g.sockets.remove(handle);
