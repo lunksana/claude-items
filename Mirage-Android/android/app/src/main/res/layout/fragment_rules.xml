@@ -62,7 +62,7 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="屏蔽 QUIC 协议 (UDP 443)"
+                    android:text="屏蔽海外 QUIC (UDP 443)"
                     android:textColor="@color/meow_ink"
                     android:textSize="14sp"
                     android:textStyle="bold" />
@@ -71,7 +71,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
-                    android:text="消除 X/YouTube 握手超时，秒级回退至极速 HTTP/2 TCP 隧道"
+                    android:text="仅对海外代理流量拦截以消除 X/YouTube 握手超时，国内直连正常放行"
                     android:textColor="@color/meow_ink_secondary"
                     android:textSize="11sp" />
             </LinearLayout>

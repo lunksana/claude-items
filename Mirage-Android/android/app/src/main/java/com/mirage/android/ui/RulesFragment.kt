@@ -82,7 +82,7 @@ class RulesFragment : Fragment() {
             viewModel.setBlockQuic(isChecked)
             Toast.makeText(
                 requireContext(),
-                if (isChecked) "已开启 QUIC 屏蔽 (促使 HTTP/2 秒级降级)" else "已允许 QUIC 流量",
+                if (isChecked) "已开启海外 QUIC 屏蔽 (国内正常放行，海外促使 HTTP/2 秒级降级)" else "已放行全局 QUIC 流量",
                 Toast.LENGTH_SHORT
             ).show()
         }
