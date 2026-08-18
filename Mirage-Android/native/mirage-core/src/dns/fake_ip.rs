@@ -242,6 +242,18 @@ impl FakeIpMapper {
         let ip_u32 = u32::from(*ip);
         (ip_u32 & self.mask) == self.network
     }
+
+    /// 清空并重置所有 Fake-IP 映射表 (VPN 重连/启动时使用，防止历史残留)
+    pub fn clear(&self) {
+        let mut d2i = self.domain_to_ip.write().unwrap_or_else(|e| e.into_inner());
+        let mut i2d = self.ip_to_domain.write().unwrap_or_else(|e| e.into_inner());
+        let mut next = self.next_ip.write().unwrap_or_else(|e| e.into_inner());
+        d2i.clear();
+        i2d.clear();
+        *next = self.network + 2;
+        self.dirty.store(false, Ordering::SeqCst);
+        tracing::info!("[FAKEIP] 映射表已清空重置");
+    }
 }
 
 #[cfg(test)]
@@ -371,5 +383,22 @@ mod persist_tests {
         let m = FakeIpMapper::with_persist("198.18.0.0/16", None).unwrap();
         m.lookup_or_assign("x.com");
         m.flush(); // 无路径 → no-op, 不 panic
+    }
+
+    #[test]
+    fn clear_resets_all_mappings() {
+        let m = FakeIpMapper::new("198.18.0.0/16").unwrap();
+        let ip1 = m.lookup_or_assign("alpha.com");
+        let ip2 = m.lookup_or_assign("beta.com");
+        assert_eq!(m.lookup_domain(&ip1).as_deref(), Some("alpha.com"));
+        assert_eq!(m.lookup_domain(&ip2).as_deref(), Some("beta.com"));
+
+        m.clear();
+        assert!(m.lookup_domain(&ip1).is_none());
+        assert!(m.lookup_domain(&ip2).is_none());
+
+        // 清空后重新从起始 IP (network + 2) 开始分配
+        let ip3 = m.lookup_or_assign("gamma.com");
+        assert_eq!(ip3, ip1);
     }
 }

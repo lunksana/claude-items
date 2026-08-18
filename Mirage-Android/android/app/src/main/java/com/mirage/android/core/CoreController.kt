@@ -80,6 +80,7 @@ object CoreController {
     fun setLogLevel(level: String): Boolean = call { it.setLogLevel(level) } ?: false
     fun setBlockQuic(block: Boolean): Boolean = call { it.setBlockQuic(block) } ?: false
     fun isBlockQuic(): Boolean = call { it.isBlockQuic } ?: true
+    fun clearDnsCache(): Boolean = call { it.clearDnsCache() } ?: false
 
     // ── 状态 ──
     fun isRunning(): Boolean = call { it.isRunning() } ?: false

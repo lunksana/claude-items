@@ -172,6 +172,7 @@ class CoreService : VpnService() {
     fun setRulesInternal(json: String): Boolean = MirageNative.setRules(json)
     fun setBlockQuicInternal(block: Boolean): Boolean = MirageNative.setBlockQuic(block)
     fun isBlockQuicInternal(): Boolean = MirageNative.isBlockQuic()
+    fun clearDnsCacheInternal(): Boolean = MirageNative.clearDnsCache()
 
     fun isRunningInternal(): Boolean = MirageNative.isRunning()
     fun isHealthyInternal(): Boolean = MirageNative.isHealthy()
@@ -303,6 +304,7 @@ class CoreService : VpnService() {
             level?.let { setLogLevelInternal(it) } ?: false
         override fun setBlockQuic(block: Boolean): Boolean = setBlockQuicInternal(block)
         override fun isBlockQuic(): Boolean = isBlockQuicInternal()
+        override fun clearDnsCache(): Boolean = clearDnsCacheInternal()
         override fun isRunning(): Boolean = isRunningInternal()
         override fun isHealthy(): Boolean = isHealthyInternal()
         override fun latencyMs(): Long = latencyMsInternal()

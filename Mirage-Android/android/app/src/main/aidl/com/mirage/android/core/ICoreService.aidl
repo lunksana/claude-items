@@ -21,6 +21,7 @@ interface ICoreService {
     boolean setLogLevel(String level);
     boolean setBlockQuic(boolean block);
     boolean isBlockQuic();
+    boolean clearDnsCache();
     boolean isRunning();
     boolean isHealthy();
     long latencyMs();

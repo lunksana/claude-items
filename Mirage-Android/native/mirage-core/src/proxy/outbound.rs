@@ -107,6 +107,22 @@ impl OutboundNode {
         }
     }
 
+    /// 动态更新连接池容量
+    pub fn set_pool_size(&self, new_size: usize) {
+        match self {
+            Self::Mirage { pool, .. } => pool.set_pool_size(new_size),
+            Self::Urltest { children, .. }
+            | Self::Fallback { children, .. }
+            | Self::Selector { children, .. }
+            | Self::LoadBalance { children, .. } => {
+                for c in children {
+                    c.set_pool_size(new_size);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub fn resolve_leaf(self: &Arc<Self>) -> Arc<OutboundNode> {
         match &**self {
             Self::Urltest { tag, children, tolerance_ms, test_type, current } => {
@@ -509,6 +525,13 @@ impl OutboundManager {
 
     pub fn get(&self, tag: &str) -> Option<Arc<OutboundNode>> {
         self.outbounds.get(tag).cloned()
+    }
+
+    /// 动态热更新所有出站节点的连接池容量
+    pub fn set_pool_size(&self, new_size: usize) {
+        for node in self.outbounds.values() {
+            node.set_pool_size(new_size);
+        }
     }
 }
 

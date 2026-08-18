@@ -451,27 +451,21 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_setPoolSize(
 
     let guard = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(state) = guard.as_ref() {
-        let uri_opt = CURRENT_NODE_URI.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(uri_str) = uri_opt {
-            if let Ok(node_uri) = mirage_core::node_uri::NodeUri::parse(&uri_str) {
-                let mut node = mirage_core::engine::NodeInfo::from_node_uri(&node_uri);
-                node.pool_size = size;
-                let result = state.rt.block_on(async move {
-                    mirage_core::engine::Engine::new(&node).map_err(|e| e.to_string())
-                });
-                match result {
-                    Ok(new_engine) => {
-                        state.stack.swap_engine(new_engine);
-                        tracing::info!("MirageCore 已热更新连接池容量为: {size}");
-                        return 1;
-                    }
-                    Err(e) => {
-                        tracing::error!("setPoolSize 引擎重建失败: {e}");
-                        return 0;
-                    }
-                }
-            }
-        }
+        state.stack.engine().set_pool_size(size);
+        tracing::info!("MirageCore 已无缝热更新连接池容量为: {size}");
+    }
+    1
+}
+
+/// `boolean clearDnsCache()` — 清空并重置 Fake-IP 映射和直连 DNS 缓存。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_clearDnsCache(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jboolean {
+    let guard = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(state) = guard.as_ref() {
+        state.stack.engine().reset_dns_and_fake_ip();
     }
     1
 }

@@ -65,6 +65,9 @@ object MirageNative {
     /** 获取当前连接池容量。 */
     external fun getPoolSize(): Int
 
+    /** 清空 Fake-IP 映射与直连 DNS 缓存。 */
+    external fun clearDnsCache(): Boolean
+
     /** 内置国内域名列表 (规则界面展示)。 */
     external fun getBuiltinDomains(): Array<String>
 

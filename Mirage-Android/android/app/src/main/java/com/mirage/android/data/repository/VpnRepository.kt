@@ -91,6 +91,8 @@ class VpnRepository(private val context: Context) {
         _vpnState.value = VpnState.Connecting
         // 注入规则
         ruleRepo.applyRules()
+        // 启动前清理残留 Fake-IP 与 DNS 缓存
+        runCatching { CoreController.clearDnsCache() }
 
         val intent = Intent(context, CoreService::class.java).apply {
             putExtra("uri", selected.uri)
@@ -102,11 +104,13 @@ class VpnRepository(private val context: Context) {
 
     fun stopVpn() {
         _vpnState.value = VpnState.Stopping
+        runCatching { CoreController.clearDnsCache() }
         runCatching { CoreController.stop() }
         val stopIntent = Intent(context, CoreService::class.java).setAction(CoreService.ACTION_STOP)
         runCatching { context.startService(stopIntent) }
         runCatching { context.stopService(stopIntent) }
         _vpnState.value = VpnState.Disconnected
+        _connections.value = emptyList()
         stopTelemetry()
     }
 

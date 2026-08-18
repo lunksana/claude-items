@@ -126,6 +126,18 @@ impl Engine {
     pub fn latency_ms(&self) -> Option<u64> {
         self.outbounds.get(&self.default_tag).and_then(|n| n.latency_rtt_ms())
     }
+
+    /// 动态热更新连接池容量 (直接修改 WarmPool 运行时参数，无锁秒级生效)
+    pub fn set_pool_size(&self, new_size: usize) {
+        self.outbounds.set_pool_size(new_size);
+    }
+
+    /// 重置 Fake-IP 映射与直连 DNS 缓存 (VPN 启动/重连时清理历史残留)
+    pub fn reset_dns_and_fake_ip(&self) {
+        self.fake_ip.clear();
+        crate::tun::dns::clear_direct_cache();
+        tracing::info!("[Engine] Fake-IP 映射与直连 DNS 缓存已重置");
+    }
 }
 
 /// 出站列表快照 (App 展示用)。

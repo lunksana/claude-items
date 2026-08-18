@@ -27,7 +27,15 @@ fn direct_cache() -> &'static StdMutex<HashMap<String, (std::net::Ipv4Addr, Inst
 
 /// 上游 DNS (国内公共 DNS, protect socket 真实网络查询)。
 const UPSTREAM_DNS: [u8; 4] = [223, 5, 5, 5];
-const CACHE_TTL: Duration = Duration::from_secs(300);
+const CACHE_TTL: Duration = Duration::from_secs(60);
+pub const DNS_RESPONSE_TTL: u32 = 60;
+
+/// 清空直连 DNS 缓存 (VPN 重连/断开时调用)
+pub fn clear_direct_cache() {
+    let mut map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
+    map.clear();
+    tracing::info!("[TUN-DNS] 直连 DNS 缓存已清空");
+}
 
 /// 读直连 DNS 缓存 (同步, 兜底用)。
 pub fn direct_dns_lookup(domain: &str) -> Option<std::net::IpAddr> {
@@ -174,10 +182,8 @@ fn build_response(query: &[u8], domain: &str, qtype: u16, a_record: Option<[u8; 
         resp.extend_from_slice(&[0xC0, 0x0C]);
         resp.extend_from_slice(&qtype.to_be_bytes());
         resp.extend_from_slice(&[0, 1]); // IN
-        // Fake-IP (198.18.0.0/16) 使用 1 秒极短 TTL，防止 VPN 断开后 App 仍残留 Fake-IP 导致无法联网
-        let is_fake = ip[0] == 198 && ip[1] == 18;
-        let ttl: u32 = if is_fake { 1 } else { 60 };
-        resp.extend_from_slice(&ttl.to_be_bytes()); // TTL
+        // 统一使用 60s TTL，降低客户端 DNS 轮询负载与耗电；重连/启停时由 FakeIpMapper 重置机制兜底
+        resp.extend_from_slice(&DNS_RESPONSE_TTL.to_be_bytes()); // TTL = 60s
         resp.extend_from_slice(&[0, 4]);
         resp.extend_from_slice(&ip);
     }
@@ -344,5 +350,39 @@ pub async fn relay_tcp_dns(stack: Arc<TunStack>, handle: SocketHandle) {
         if stream.write_all(&framed).await.is_err() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dns_response_ttl_is_60s() {
+        let query = build_a_query("example.com", 0x1234);
+        let qname_end = {
+            let mut p = 12usize;
+            while p < query.len() && query[p] != 0 {
+                p += 1 + query[p] as usize;
+            }
+            p - 12 + 1
+        };
+        let resp = build_response(&query, "example.com", 1, Some([198, 18, 0, 2]), 12 + qname_end + 4).unwrap();
+        // A 记录部分: [C0 0C][00 01][00 01][TTL 4B][00 04][IP 4B]
+        let a_offset = resp.len() - 16;
+        let ttl_bytes = &resp[a_offset + 6..a_offset + 10];
+        let ttl = u32::from_be_bytes([ttl_bytes[0], ttl_bytes[1], ttl_bytes[2], ttl_bytes[3]]);
+        assert_eq!(ttl, 60, "Fake-IP 应答 TTL 必须为 60s");
+    }
+
+    #[test]
+    fn direct_cache_clear_works() {
+        {
+            let mut map = direct_cache().lock().unwrap_or_else(|e| e.into_inner());
+            map.insert("baidu.com".to_string(), (std::net::Ipv4Addr::new(220, 181, 38, 148), Instant::now()));
+        }
+        assert!(direct_dns_lookup("baidu.com").is_some());
+        clear_direct_cache();
+        assert!(direct_dns_lookup("baidu.com").is_none());
     }
 }

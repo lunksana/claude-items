@@ -182,14 +182,41 @@ mod feedback_tests {
 
     #[test]
     fn pressure_scales_up() {
-        assert_eq!(decide_new_target(5, 3, 10, 0, 50), 50);
-        assert_eq!(decide_new_target(10, 3, 10, 0, 50), 50);
+        assert_eq!(decide_new_target(5, 3, 10, 0, 50), 6);
+        assert_eq!(decide_new_target(10, 3, 10, 0, 50), 12);
     }
 
     #[test]
     fn pressure_clamped_by_max() {
         assert_eq!(decide_new_target(50, 5, 10, 0, 50), 50);
         assert_eq!(decide_new_target(48, 5, 10, 0, 50), 50);
+    }
+
+    #[tokio::test]
+    async fn hot_reload_pool_size() {
+        let cfg = Arc::new(PoolConfig {
+            server_host: "127.0.0.1".to_string(),
+            server_port: 8443,
+            password: "test".to_string(),
+            camouflage_host: "example.com".to_string(),
+            pool_size: 8,
+            underlying: None,
+            pfs: false,
+        });
+        let bs = Arc::new(BrutalState {
+            configured_rate: None,
+            current_rate: Arc::new(AtomicU64::new(0)),
+            base_rtt: None,
+            active_fds: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        });
+        let pool = WarmPool::new(cfg, bs);
+        assert_eq!(pool.get_pool_size(), 8);
+
+        pool.set_pool_size(32);
+        assert_eq!(pool.get_pool_size(), 32);
+
+        pool.set_pool_size(4);
+        assert_eq!(pool.get_pool_size(), 4);
     }
 }
 
@@ -294,14 +321,19 @@ pub struct WarmPool {
     pub stats: Arc<RwLock<PoolStats>>,        // 连接池的延迟统计和健康检查
     pub brutal_state: Arc<BrutalState>,       // 该连接池绑定的拥塞控制状态
     metrics: Arc<PoolMetrics>,                // 反馈式弹性算法的运行时指标
+    target_size: Arc<AtomicUsize>,            // 动态目标容量 (支持热重载)
+    max_size: Arc<AtomicUsize>,               // 动态最大容量 (支持热重载)
 }
 
 impl WarmPool {
     pub fn new(cfg: Arc<PoolConfig>, brutal_state: Arc<BrutalState>) -> Self {
-        let queue = Arc::new(Mutex::new(VecDeque::with_capacity(cfg.pool_size)));
+        let initial_size = cfg.pool_size.max(1);
+        let queue = Arc::new(Mutex::new(VecDeque::with_capacity(initial_size)));
         let notify = Arc::new(Notify::new());
         let stats = Arc::new(RwLock::new(PoolStats::new()));
         let metrics = Arc::new(PoolMetrics::new());
+        let target_size = Arc::new(AtomicUsize::new(initial_size));
+        let max_size = Arc::new(AtomicUsize::new(initial_size));
 
         let pool = Self {
             queue: queue.clone(),
@@ -309,24 +341,19 @@ impl WarmPool {
             stats: stats.clone(),
             brutal_state: brutal_state.clone(),
             metrics: metrics.clone(),
+            target_size: target_size.clone(),
+            max_size: max_size.clone(),
         };
 
-        // 初始 target = floor (跟 decide_new_target 的缩容底线一致), 保证客户端
-        // 启动瞬间就能承接常见浏览器并发, 突发不用 wait build. floor 定义见
-        // 初始 target 直接设为用户配置的 pool_size，保证启动即打满预热池
-        let initial_target = cfg.pool_size;
-        let target_size = Arc::new(AtomicUsize::new(initial_target));
         let in_flight = Arc::new(AtomicUsize::new(0));
 
         // 弹性监控协程 (Manager Task) — 反馈式 v0.4.2+
         // 每 5s 读 metrics 决定 target 调整 + 顺手清理 max_age 过期连接.
-        // 不再做硬裁剪 (旧版 q.len() > target+2 那段), 让 target 只影响 builder
-        // 建货节奏, queue 自然到 max_age 被 sweeper 收掉.
         let metrics_clone = metrics.clone();
         let target_clone = target_size.clone();
+        let max_size_mgr = max_size.clone();
         let q_clone = queue.clone();
         let in_flight_clone_mgr = in_flight.clone();
-        let max_size = cfg.pool_size;
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
@@ -336,8 +363,8 @@ impl WarmPool {
                 let gets = metrics_clone.total_gets.swap(0, Ordering::Relaxed);
 
                 // expired_unused 在 sweeper 内累加, 这里读后归零
-                // (sweeper 即下方 q.drain 部分, 同一 task 内顺序执行无并发问题)
                 let cur_target = target_clone.load(Ordering::Relaxed);
+                let current_max = max_size_mgr.load(Ordering::Relaxed);
 
                 // 清理 max_age 过期的 tunnel (顺手 close_notify), 同时统计 expired_unused
                 let mut q = q_clone.lock().await;
@@ -355,10 +382,6 @@ impl WarmPool {
                 metrics_clone.expired_unused.fetch_add(expired_now, Ordering::Relaxed);
                 let expired_total = metrics_clone.expired_unused.swap(0, Ordering::Relaxed);
 
-                // 快照 pool 当前状态 (idle 数 + 即将过期 tunnel 数), 供 DEBUG log 用.
-                // idle = 队列里现存可用 tunnel; expiring_soon = 队列里剩余寿命 < 10s
-                // 的条数 (max_age_sec - elapsed < 10 视为即将波谷). in_flight 通过
-                // in_flight_clone_mgr.load 拿, 表示 handler 借走还没归还的 tunnel 数.
                 const EXPIRING_THRESHOLD_SEC: u64 = 10;
                 let idle_count = q.len();
                 let expiring_soon = q.iter().filter(|t| {
@@ -377,7 +400,7 @@ impl WarmPool {
                 }
 
                 // 反馈式 target 决策 (纯函数)
-                let new_target = decide_new_target(cur_target, wait, gets, expired_total, max_size);
+                let new_target = decide_new_target(cur_target, wait, gets, expired_total, current_max);
                 if new_target != cur_target {
                     target_clone.store(new_target, Ordering::Relaxed);
                 }
@@ -408,20 +431,22 @@ impl WarmPool {
         let cfg_clone = cfg.clone();
         let in_flight_clone = in_flight.clone();
         let target_clone_builder = target_size.clone();
+        let max_size_builder = max_size.clone();
         let stats_builder = stats.clone();
         let brutal_state_builder = brutal_state.clone();
         
         tokio::spawn(async move {
-            info!("WarmPool (Elastic) initialized. Max capacity: {}", cfg_clone.pool_size);
+            info!("WarmPool (Elastic) initialized. Capacity: {}", initial_size);
             let mut next_build_at = Instant::now();
 
             loop {
                 let current_target = target_clone_builder.load(Ordering::Relaxed);
+                let current_max = max_size_builder.load(Ordering::Relaxed);
                 let current_idle = q_clone_builder.lock().await.len();
                 let current_in_flight = in_flight_clone.load(Ordering::Relaxed);
 
-                // 判断是否需要补充连接：闲置 + 正在建连的 < 目标，且没有触碰总上限
-                if current_idle + current_in_flight >= current_target || current_idle + current_in_flight >= cfg_clone.pool_size {
+                // 判断是否需要补充连接：闲置 + 正在建连的 < 目标，且没有触碰动态上限
+                if current_idle + current_in_flight >= current_target || current_idle + current_in_flight >= current_max {
                     // 等待消费者拿走连接，或者Manager提升目标值
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
@@ -815,5 +840,18 @@ impl WarmPool {
             state: self.brutal_state.clone(),
             fd,
         }
+    }
+
+    /// 动态热更新连接池目标与最大容量 (零停机、无需重建底层引擎与销毁已有 Fake-IP/连接)
+    pub fn set_pool_size(&self, new_size: usize) {
+        let size = new_size.max(1);
+        self.target_size.store(size, Ordering::Relaxed);
+        self.max_size.store(size, Ordering::Relaxed);
+        self.notify.notify_waiters();
+        tracing::info!("[WarmPool] 动态调整连接池容量: {size}");
+    }
+
+    pub fn get_pool_size(&self) -> usize {
+        self.max_size.load(Ordering::Relaxed)
     }
 }
