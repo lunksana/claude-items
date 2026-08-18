@@ -28,8 +28,7 @@ build_native() {
     rm -rf "$out"; mkdir -p "$out"
 
     cd "$HERE/native/mirage-jni"
-    export RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
-    # 用宿主 rustup + NDK 直接构建 (等效 cargo-ndk)
+    # 用宿主 rustup + NDK 直接构建 (16KB 页对齐 link-arg 由 .cargo/config.toml 统一声明)
     for target in aarch64-linux-android; do
         local abi="arm64-v8a"
         echo "  -- $target ($abi) [16KB Page Aligned]"
