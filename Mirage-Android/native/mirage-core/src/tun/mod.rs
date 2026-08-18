@@ -429,14 +429,17 @@ impl TunStack {
             return;
         }
 
-        // 建 catcher
+        let is_dns = dst == IpAddress::Ipv4(self.cfg.dns_addr) && dst_port == 53;
+        let buf_size = if is_dns { 4 * 1024 } else { SOCK_BUF };
+
+        // 建 catcher (普通数据流 512KB 极速滑动窗口，DNS 流 4KB 精简缓冲)
         let sock = stcp::Socket::new(
-            stcp::SocketBuffer::new(vec![0u8; SOCK_BUF]),
-            stcp::SocketBuffer::new(vec![0u8; SOCK_BUF]),
+            stcp::SocketBuffer::new(vec![0u8; buf_size]),
+            stcp::SocketBuffer::new(vec![0u8; buf_size]),
         );
         let handle = g.sockets.add(sock);
         let g = &mut *g;
-        let listen_endpoint = if dst == IpAddress::Ipv4(self.cfg.dns_addr) && dst_port == 53 {
+        let listen_endpoint = if is_dns {
             // DNS over TCP: 精确绑定 DNS 地址
             smoltcp::wire::IpListenEndpoint { addr: Some(dst), port: 53 }
         } else {
@@ -449,7 +452,6 @@ impl TunStack {
             return;
         }
         g.created_at.insert(handle, Instant::now());
-        let is_dns = dst == IpAddress::Ipv4(self.cfg.dns_addr) && dst_port == 53;
 
         // spawn relay (TCP: 等 Established 后转发)
         let stack = self.clone_arc();

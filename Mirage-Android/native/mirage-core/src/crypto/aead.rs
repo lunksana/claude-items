@@ -240,6 +240,7 @@ pub struct CryptoReader<R> {
     master: [u8; 32],
     cipher_kind: Cipher,
     is_initiator: bool,
+    buffer: Vec<u8>,
 }
 
 impl<R: AsyncRead + Unpin> CryptoReader<R> {
@@ -253,6 +254,7 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
             master: *master_key,
             cipher_kind: Cipher::ChaCha20Poly1305,
             is_initiator,
+            buffer: Vec::with_capacity(MAX_RECORD_SIZE + 64),
         }
     }
 
@@ -273,7 +275,7 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
         self.cipher_kind
     }
 
-    /// 接收并解密 TLS 1.3 格式的加密数据块
+    /// 接收并解密 TLS 1.3 格式的加密数据块 (复用内部 buffer，避免每帧重复堆内存分配)
     pub async fn recv_data(&mut self) -> Result<Vec<u8>> {
         let mut header = [0u8; 5];
         self.reader.read_exact(&mut header).await?;
@@ -288,9 +290,9 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
             return Err(anyhow!("TLS record exceeds max size"));
         }
 
-        // 读取密文
-        let mut buffer = vec![0u8; len];
-        self.reader.read_exact(&mut buffer).await?;
+        // 复用内部缓冲区读取密文
+        self.buffer.resize(len, 0);
+        self.reader.read_exact(&mut self.buffer).await?;
 
         if self.nonce == u64::MAX {
             return Err(anyhow!("AEAD nonce 耗尽, 拒绝复用"));
@@ -300,31 +302,26 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
 
         // In-place 极速解密
         let plaintext_slice = self.cipher
-            .open_in_place(nonce_bytes, aead::Aad::empty(), &mut buffer)
+            .open_in_place(nonce_bytes, aead::Aad::empty(), &mut self.buffer)
             .map_err(|e| anyhow!("decryption failed: {:?}", e))?;
         
         let plaintext_len = plaintext_slice.len();
-        buffer.truncate(plaintext_len);
+        self.buffer.truncate(plaintext_len);
 
-        if buffer.is_empty() {
+        if self.buffer.is_empty() {
             return Err(anyhow!("empty plaintext received"));
         }
 
-        // TLS 1.3 原生 padding: content_type 后可能跟任意数量的零填充。从尾剥零, 第一个非零
-        // 字节即 content_type。content 自身的尾零在 content_type **之前**, 不会被误剥。
-        // 收端恒剥零 (与是否开启发端 padding 无关) —— 这是两阶段上线的兼容基座: 老发端不发零,
-        // 剥零对其无影响; 新发端发零, 老收端(无此逻辑)才会解析失败, 故收端须先普及。
-        while buffer.last() == Some(&0) {
-            buffer.pop();
+        // TLS 1.3 原生 padding: 从尾剥零
+        while self.buffer.last() == Some(&0) {
+            self.buffer.pop();
         }
-        // 剥零后若空 = 整帧全零, 畸形。
-        if buffer.is_empty() {
+        if self.buffer.is_empty() {
             return Err(anyhow!("padding-only record (no content type)"));
         }
-        // 提取 inner_content_type
-        let inner_type = buffer.pop().unwrap();
+        let inner_type = self.buffer.pop().unwrap();
 
-        let payload_len = buffer.len() as u64;
+        let payload_len = self.buffer.len() as u64;
         if self.is_initiator {
             crate::monitor::add_down(payload_len);
         } else {
@@ -332,9 +329,69 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
         }
 
         if inner_type == 0x17 {
-            Ok(buffer)
+            Ok(self.buffer.clone())
         } else if inner_type == 0x15 {
             Err(anyhow!("peer sent TLS alert (close_notify)"))
+        } else {
+            Err(anyhow!("unknown TLS inner content type {:#x}", inner_type))
+        }
+    }
+
+    /// 接收、解密并直接写入目标 AsyncWrite (完全零堆内存重新分配与克隆，适用于高吞吐视频流与大文件下载)
+    pub async fn recv_data_to<W: AsyncWrite + Unpin>(&mut self, writer: &mut W) -> Result<Option<usize>> {
+        let mut header = [0u8; 5];
+        self.reader.read_exact(&mut header).await?;
+
+        if header[0] != 0x17 || header[1] != 0x03 || header[2] != 0x03 {
+            return Err(anyhow!("invalid TLS header magic bytes"));
+        }
+
+        let len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        if len > MAX_RECORD_SIZE + 1 + TAG_SIZE {
+            return Err(anyhow!("TLS record exceeds max size"));
+        }
+
+        self.buffer.resize(len, 0);
+        self.reader.read_exact(&mut self.buffer).await?;
+
+        if self.nonce == u64::MAX {
+            return Err(anyhow!("AEAD nonce 耗尽, 拒绝复用"));
+        }
+        let nonce_bytes = format_nonce(self.nonce);
+        self.nonce += 1;
+
+        let plaintext_slice = self.cipher
+            .open_in_place(nonce_bytes, aead::Aad::empty(), &mut self.buffer)
+            .map_err(|e| anyhow!("decryption failed: {:?}", e))?;
+        
+        let plaintext_len = plaintext_slice.len();
+        self.buffer.truncate(plaintext_len);
+
+        if self.buffer.is_empty() {
+            return Err(anyhow!("empty plaintext received"));
+        }
+
+        while self.buffer.last() == Some(&0) {
+            self.buffer.pop();
+        }
+        if self.buffer.is_empty() {
+            return Err(anyhow!("padding-only record (no content type)"));
+        }
+        let inner_type = self.buffer.pop().unwrap();
+
+        let payload_len = self.buffer.len() as u64;
+        if self.is_initiator {
+            crate::monitor::add_down(payload_len);
+        } else {
+            crate::monitor::add_up(payload_len);
+        }
+
+        if inner_type == 0x17 {
+            writer.write_all(&self.buffer).await?;
+            Ok(Some(self.buffer.len()))
+        } else if inner_type == 0x15 {
+            // 对端正常 close_notify 优雅关闭
+            Ok(None)
         } else {
             Err(anyhow!("unknown TLS inner content type {:#x}", inner_type))
         }

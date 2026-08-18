@@ -323,13 +323,11 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
     let download = async {
         let mut down_bytes: u64 = 0;
         loop {
-            match tokio::time::timeout(RELAY_IDLE, tun_reader.recv_data()).await {
-                Ok(Ok(data)) => {
-                    if local_wr.write_all(&data).await.is_err() {
-                        break;
-                    }
-                    down_bytes += data.len() as u64;
+            match tokio::time::timeout(RELAY_IDLE, tun_reader.recv_data_to(&mut local_wr)).await {
+                Ok(Ok(Some(n))) => {
+                    down_bytes += n as u64;
                 }
+                Ok(Ok(None)) => break, // 对端正常 close_notify
                 Ok(Err(_)) => break,
                 Err(_) => break,
             }
