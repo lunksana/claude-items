@@ -53,18 +53,20 @@ class NodeRepository(private val context: Context) {
             }
         }.getOrDefault(emptyList())
 
-        // 迁移旧版单节点
-        val legacy = prefs.getString("node_uri", null)
-        val finalNodes = if (!legacy.isNullOrBlank() && list.isEmpty()) {
-            val migrated = listOf(Node(legacy, Node.defaultName(legacy)))
-            prefs.edit().remove("node_uri").apply()
-            migrated
+        val presetUri = "mirage://d029c98fd9fd3104cebf7ebb2ce632cd@117.55.230.75:8443?sni=speedtest.net"
+        val presetNode = Node(presetUri, "Speedtest-HK (117.55.230.75)")
+        val finalNodes = if (list.isEmpty()) {
+            listOf(presetNode)
+        } else if (list.none { it.uri == presetUri }) {
+            listOf(presetNode) + list
         } else {
             list
         }
 
         _nodes.value = finalNodes
-        _selectedIndex.value = prefs.getInt(KEY_SELECTED, if (finalNodes.isNotEmpty()) 0 else -1)
+        val targetIdx = finalNodes.indexOfFirst { it.uri == presetUri }.takeIf { it >= 0 } ?: 0
+        _selectedIndex.value = targetIdx
+        prefs.edit().putInt(KEY_SELECTED, targetIdx).apply()
         _testMethod.value = prefs.getString(KEY_TEST_METHOD, "tcp") ?: "tcp"
         _isAutoSelect.value = prefs.getBoolean(KEY_AUTO_SELECT, false)
         val pool = prefs.getInt(KEY_POOL, 8)

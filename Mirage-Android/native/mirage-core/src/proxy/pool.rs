@@ -322,6 +322,7 @@ pub struct WarmPool {
     metrics: Arc<PoolMetrics>,                // 反馈式弹性算法的运行时指标
     target_size: Arc<AtomicUsize>,            // 动态目标容量 (支持热重载)
     max_size: Arc<AtomicUsize>,               // 动态最大容量 (支持热重载)
+    cfg: Arc<PoolConfig>,                     // 节点配置 (支持饥饿时 On-Demand 即时并发拨号)
 }
 
 impl WarmPool {
@@ -342,6 +343,7 @@ impl WarmPool {
             metrics: metrics.clone(),
             target_size: target_size.clone(),
             max_size: max_size.clone(),
+            cfg: cfg.clone(),
         };
 
         let in_flight = Arc::new(AtomicUsize::new(0));
@@ -447,20 +449,21 @@ impl WarmPool {
                 // 判断是否需要补充连接：闲置 + 正在建连的 < 目标，且没有触碰动态上限
                 if current_idle + current_in_flight >= current_target || current_idle + current_in_flight >= current_max {
                     // 等待消费者拿走连接，或者Manager提升目标值
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 }
 
                 in_flight_clone.fetch_add(1, Ordering::Relaxed);
 
-                // SYN Staggering: 阶梯延迟防止暖池一次性喷 SYN (突发本身是特征)。
-                // 用抖动区间 200~500ms 而非固定 200ms —— 固定间隔会形成精确节拍器,
-                // 时序图谱分析能识别为定时器调度; 抖动把尖峰打散成宽带分布。
-                let now = Instant::now();
-                if next_build_at > now {
-                    tokio::time::sleep_until(next_build_at).await;
+                // SYN Staggering: 阶梯延迟防止暖池在平稳期一次性喷 SYN。
+                // 若池子处于饥饿状态 (current_idle == 0)，则缩短补货延迟，快速填满基础容量。
+                if current_idle > 0 {
+                    let now = Instant::now();
+                    if next_build_at > now {
+                        tokio::time::sleep_until(next_build_at).await;
+                    }
+                    next_build_at = Instant::now() + Duration::from_millis(150 + fastrand::u64(0..=150));
                 }
-                next_build_at = Instant::now() + Duration::from_millis(200 + fastrand::u64(0..=300));
 
                 let cfg_task = cfg_clone.clone();
                 let q_task = q_clone_builder.clone();
@@ -742,59 +745,112 @@ impl WarmPool {
     ///
     /// 反馈式弹性 (v0.4.2+) 仪表化: 入口记录开始时间, 拿到 tunnel 后若总耗时
     /// > 50ms 计一次 wait_event. Manager task 用此比率决定下周期 target 调整.
+    /// 从空闲队列中弹出一个未过期且健康的隧道 (0 延迟)。
+    async fn pop_valid_tunnel(&self) -> Option<Tunnel> {
+        let mut q = self.queue.lock().await;
+        while let Some(tunnel) = q.pop_front() {
+            if tunnel.created_at.elapsed().as_secs() > tunnel.max_age_sec {
+                tracing::debug!(
+                    "Tunnel reached max age ({}s), gracefully closing",
+                    tunnel.created_at.elapsed().as_secs()
+                );
+                tokio::spawn(async move {
+                    let mut t = tunnel;
+                    let _ = t.writer.send_close_notify().await;
+                });
+                continue;
+            }
+            if tunnel.is_stale() {
+                tracing::debug!("WarmPool: discarded stale tunnel (FIN/RST before dispatch)");
+                tokio::spawn(async move {
+                    let mut t = tunnel;
+                    let _ = t.writer.send_close_notify().await;
+                });
+                continue;
+            }
+            return Some(tunnel);
+        }
+        None
+    }
+
+    /// 阻塞等待空闲队列就绪。
+    async fn wait_for_queue(&self) -> Result<Tunnel> {
+        loop {
+            let notified = self.notify.notified();
+            if let Some(tunnel) = self.pop_valid_tunnel().await {
+                return Ok(tunnel);
+            }
+            notified.await;
+        }
+    }
+
+    /// O(1) 复杂度提取连接.
+    ///
+    /// 1. 队列有现成连接时 0 延迟直接返回。
+    /// 2. 突发高并发 (例如社交 App 同时加载 10-20 张图片) 导致预热池瞬间耗尽时:
+    ///    立即发起并行的即时拨号 (On-Demand Dial)，同时与后台补货队列竞争 (Select Race)！
+    ///    彻底消除单协程阶梯排队导致的"图片逐个断断续续加载"卡顿。
     pub async fn get(&self) -> Result<Tunnel> {
         self.metrics.total_gets.fetch_add(1, Ordering::Relaxed);
         let wait_start = Instant::now();
 
-        let result = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                // 先获取通知句柄（关键：避免检查队列为空和发生通知之间的竞态条件 Race Condition）
-                let notified = self.notify.notified();
+        // 路径 1: 0ms 直接命中预热就绪隧道
+        if let Some(tunnel) = self.pop_valid_tunnel().await {
+            return Ok(tunnel);
+        }
 
-                if let Some(tunnel) = self.queue.lock().await.pop_front() {
-                    if tunnel.created_at.elapsed().as_secs() > tunnel.max_age_sec {
-                        tracing::debug!("Tunnel reached max age ({}s), gracefully closing",
-                            tunnel.created_at.elapsed().as_secs());
-                        tokio::spawn(async move {
-                            let mut t = tunnel;
-                            let _ = t.writer.send_close_notify().await;
-                        });
-                        continue;
+        // 路径 2: 预热池耗尽，启动即时并行拨号与后台补货竞争
+        let cfg = self.cfg.clone();
+        let brutal = self.brutal_state.clone();
+        let stats = self.stats.clone();
+
+        let on_demand = async move {
+            let start = Instant::now();
+            let res = Box::pin(Self::connect_upstream(&cfg, &brutal)).await;
+            if let Ok(ref _t) = res {
+                let elapsed = start.elapsed().as_millis() as u64;
+                stats.write().unwrap_or_else(|e| e.into_inner()).record_latency(elapsed);
+                debug!("WarmPool: On-Demand 即时建连就绪 ({}ms)", elapsed);
+            }
+            res
+        };
+
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::select! {
+                res_demand = on_demand => {
+                    match res_demand {
+                        Ok(tunnel) => {
+                            if wait_start.elapsed() > Duration::from_millis(50) {
+                                self.metrics.wait_events.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(tunnel)
+                        }
+                        Err(e) => {
+                            debug!("WarmPool: On-demand 建连失败, 回落等待池: {e}");
+                            self.wait_for_queue().await
+                        }
                     }
-                    // 死链主动剔除 (stale detection): 隧道在池里空闲期间可能被 RST/FIN
-                    // (GFW 主动断 / 路由跳变 / 服务端 reap), 此时 max_age 还没到但连接已死。
-                    // 派发前非阻塞探测一次, 脏则丢弃取下一条 —— 避免把死隧道交给下游导致
-                    // 首个请求报废。所有 pool.get() caller (handler / dns / udp_relay) 自动受益。
-                    // 注: 只缩窄竞态窗口 (探测→派发→使用之间仍可能死), handler 侧另有首次
-                    // 写失败重试兜底闭环。
-                    if tunnel.is_stale() {
-                        tracing::debug!("WarmPool: discarded stale tunnel (FIN/RST before dispatch)");
-                        tokio::spawn(async move {
-                            let mut t = tunnel;
-                            let _ = t.writer.send_close_notify().await;
-                        });
-                        continue;
-                    }
-                    // 拿到可用 tunnel, 看是否经历过显著等待
+                }
+                res_pool = self.wait_for_queue() => {
                     if wait_start.elapsed() > Duration::from_millis(50) {
                         self.metrics.wait_events.fetch_add(1, Ordering::Relaxed);
                     }
-                    return tunnel;
+                    res_pool
                 }
-
-                // 队列真的空了，挂起当前协程等待补货
-                notified.await;
             }
         }).await;
 
-        // 修 Issue 2: 老版本 timeout 分支只 total_gets++ 没 wait_events++.
-        // 池饿死 100 个请求全 10s timeout → total=100 wait=0 → wait_ratio=0.0
-        // → Manager 认为"供给完美"甚至触发缩容, 反馈算法逻辑倒挂. timeout 到
-        // 这里意味着确实等了 10s 全被阻塞过, 显式计一次.
-        result.map_err(|_| {
-            self.metrics.wait_events.fetch_add(1, Ordering::Relaxed);
-            anyhow::anyhow!("pool.get() timed out after 10s — upstream likely unreachable")
-        })
+        match result {
+            Ok(Ok(tunnel)) => Ok(tunnel),
+            Ok(Err(e)) => {
+                self.metrics.wait_events.fetch_add(1, Ordering::Relaxed);
+                Err(e)
+            }
+            Err(_) => {
+                self.metrics.wait_events.fetch_add(1, Ordering::Relaxed);
+                anyhow::bail!("pool.get() timed out after 10s — upstream likely unreachable")
+            }
+        }
     }
 
     pub async fn update_brutal_rate(&self, new_rate: u64) {
