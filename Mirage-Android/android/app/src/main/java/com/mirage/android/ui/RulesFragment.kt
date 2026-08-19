@@ -83,6 +83,8 @@ class RulesFragment : Fragment() {
     }
 
     private fun setupButtons() {
+        binding.btnQuickGeoPreset.setOnClickListener { showQuickGeoPresetDialog() }
+
         binding.addRuleBtn.setOnClickListener { showRuleDialog(null) }
 
         binding.btnResetHits.setOnClickListener {
@@ -217,7 +219,107 @@ class RulesFragment : Fragment() {
     }
 
     /**
-     * 添加/编辑分流规则弹窗 (支持 GEOSITE/GEOIP/DOMAIN/CIDR 及 direct/proxy/block 动作)。
+     * 常用 Geo 预设规则快捷添加弹窗 (提供完整下拉列表与一键批量添加常用组合)。
+     */
+    private fun showQuickGeoPresetDialog() {
+        val ctx = requireContext()
+        val layout = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 20, 40, 10)
+        }
+
+        val tvDesc = TextView(ctx).apply {
+            text = "选择常用的 GeoSite / GeoIP 规则模板，可快速添加为自定义分流规则："
+            textSize = 13f
+            setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink))
+            setPadding(0, 0, 0, 16)
+        }
+        layout.addView(tvDesc)
+
+        // 常用 Tag 下拉选择
+        val presetTitles = GeoManager.PRESET_GEO_TAGS.map { it.title }
+        val presetSpinner = Spinner(ctx).apply {
+            adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, presetTitles)
+            setSelection(0)
+            setPadding(0, 16, 0, 16)
+        }
+        layout.addView(TextView(ctx).apply {
+            text = "选择常用 Tag 模板 (下拉选择):"
+            textSize = 12f
+            setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink_secondary))
+        })
+        layout.addView(presetSpinner)
+
+        val tvTagDesc = TextView(ctx).apply {
+            text = GeoManager.PRESET_GEO_TAGS.firstOrNull()?.description ?: ""
+            textSize = 12f
+            setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink_secondary))
+            setPadding(0, 8, 0, 16)
+        }
+        layout.addView(tvTagDesc)
+
+        // 路由动作选择
+        val actions = arrayOf("直连 (direct)", "代理 (proxy)", "拦截 (block)")
+        val actionKeys = arrayOf("direct", "proxy", "block")
+        val actionSpinner = Spinner(ctx).apply {
+            adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, actions)
+            setPadding(0, 16, 0, 16)
+        }
+        layout.addView(TextView(ctx).apply {
+            text = "路由动作:"
+            textSize = 12f
+            setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink_secondary))
+        })
+        layout.addView(actionSpinner)
+
+        // 联动更新推荐动作与描述
+        presetSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (position in GeoManager.PRESET_GEO_TAGS.indices) {
+                    val preset = GeoManager.PRESET_GEO_TAGS[position]
+                    tvTagDesc.text = preset.description
+                    val aIdx = actionKeys.indexOf(preset.defaultAction).coerceAtLeast(0)
+                    actionSpinner.setSelection(aIdx)
+                }
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+        if (GeoManager.PRESET_GEO_TAGS.isNotEmpty()) {
+            val aIdx = actionKeys.indexOf(GeoManager.PRESET_GEO_TAGS[0].defaultAction).coerceAtLeast(0)
+            actionSpinner.setSelection(aIdx)
+        }
+
+        AlertDialog.Builder(ctx)
+            .setTitle("常用 Geo 规则预设")
+            .setView(layout)
+            .setPositiveButton("添加此规则") { _, _ ->
+                val pos = presetSpinner.selectedItemPosition
+                if (pos in GeoManager.PRESET_GEO_TAGS.indices) {
+                    val preset = GeoManager.PRESET_GEO_TAGS[pos]
+                    val action = actionKeys[actionSpinner.selectedItemPosition]
+                    viewModel.addRule(preset.tag, preset.kind, action)
+                    Toast.makeText(ctx, "已添加规则: ${preset.kind}:${preset.tag} -> $action", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNeutralButton("一键添加推荐组合") { _, _ ->
+                val bundle = listOf(
+                    Triple("category-ads-all", "geosite", "block"),
+                    Triple("google", "geosite", "proxy"),
+                    Triple("openai", "geosite", "proxy"),
+                    Triple("telegram", "geosite", "proxy"),
+                    Triple("cn", "geosite", "direct")
+                )
+                for ((tag, kind, act) in bundle) {
+                    viewModel.addRule(tag, kind, act)
+                }
+                Toast.makeText(ctx, "已一键添加 5 条推荐常用 Geo 规则！", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /**
+     * 添加/编辑分流规则弹窗 (支持 GEOSITE/GEOIP/DOMAIN/CIDR 及 direct/proxy/block 动作，集成常用 Geo 下拉快捷选择)。
      */
     private fun showRuleDialog(index: Int?) {
         val existing = index?.let { viewModel.rules.value.getOrNull(it) }
@@ -316,6 +418,33 @@ class RulesFragment : Fragment() {
             setPadding(0, 16, 0, 16)
         }
 
+        // 常用 Geo Tag 预设下拉选择器
+        val presetTitles = mutableListOf("▼ 从常用 Geo Tag 下拉选择 (自动配置类型与动作)...")
+        presetTitles.addAll(GeoManager.PRESET_GEO_TAGS.map { it.title })
+        presetTitles.add("✍️ 自定义手动输入...")
+
+        val presetSpinner = Spinner(ctx).apply {
+            adapter = ArrayAdapter(ctx, android.R.layout.simple_spinner_dropdown_item, presetTitles)
+            setSelection(0)
+            setPadding(0, 12, 0, 12)
+        }
+
+        presetSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                if (position > 0 && position <= GeoManager.PRESET_GEO_TAGS.size) {
+                    val preset = GeoManager.PRESET_GEO_TAGS[position - 1]
+                    val kIdx = kindKeys.indexOf(preset.kind).coerceAtLeast(0)
+                    kindSpinner.setSelection(kIdx)
+                    patternInput.setText(preset.tag)
+                    val aIdx = actionKeys.indexOf(preset.defaultAction).coerceAtLeast(0)
+                    actionSpinner.setSelection(aIdx)
+                }
+            }
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+
+        layout.addView(TextView(ctx).apply { text = "常用 Geo Tag 下拉快捷选择:"; textSize = 12f; setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink_secondary)) })
+        layout.addView(presetSpinner)
         layout.addView(TextView(ctx).apply { text = "匹配类型:"; textSize = 12f; setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink_secondary)) })
         layout.addView(kindSpinner)
         layout.addView(TextView(ctx).apply { text = "快捷 Tag 标签:"; textSize = 12f; setTextColor(ContextCompat.getColor(ctx, R.color.meow_ink_secondary)) })

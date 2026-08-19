@@ -39,22 +39,53 @@ object GeoManager {
         "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
     )
 
+    data class PresetGeoTag(
+        val kind: String, // "geosite" or "geoip"
+        val tag: String,  // "category-ads-all", "google", etc.
+        val title: String, // "🚫 全网广告/追踪拦截 (category-ads-all)"
+        val defaultAction: String, // "block", "proxy", "direct"
+        val description: String = ""
+    )
+
+    val PRESET_GEO_TAGS = listOf(
+        PresetGeoTag("geosite", "category-ads-all", "🚫 全网广告/追踪拦截 (category-ads-all)", "block", "屏蔽各类广告、数据追踪与分析上报域名"),
+        PresetGeoTag("geosite", "google", "🚀 Google 境外全套服务 (google)", "proxy", "包含 Google 搜索、Play 商店、Gmail 等"),
+        PresetGeoTag("geosite", "openai", "🚀 OpenAI / ChatGPT (openai)", "proxy", "ChatGPT 官网、API 及相关服务"),
+        PresetGeoTag("geosite", "telegram", "🚀 Telegram 官方域名 (telegram)", "proxy", "Telegram 官网与 Web 客户端"),
+        PresetGeoTag("geosite", "netflix", "🚀 Netflix 奈飞流媒体 (netflix)", "proxy", "Netflix 影视与 CDN 节点"),
+        PresetGeoTag("geosite", "youtube", "🚀 YouTube 视频平台 (youtube)", "proxy", "YouTube 视频流与播放服务"),
+        PresetGeoTag("geosite", "github", "🚀 GitHub 开发者平台 (github)", "proxy", "GitHub 仓库、Gist、Assets 资源加速"),
+        PresetGeoTag("geosite", "twitter", "🚀 Twitter / X 社交平台 (twitter)", "proxy", "X (原 Twitter) 社交网络"),
+        PresetGeoTag("geosite", "geolocation-!cn", "🚀 境外非大陆域名全集 (geolocation-!cn)", "proxy", "所有非中国大陆地区的海外网站与服务"),
+        PresetGeoTag("geosite", "cn", "⚡ 中国大陆域名全集 (cn)", "direct", "国内各大主流网站与政企服务"),
+        PresetGeoTag("geosite", "bilibili", "⚡ 哔哩哔哩弹幕网 (bilibili)", "direct", "Bilibili 国内视频、直播与 CDN"),
+        PresetGeoTag("geosite", "steam", "⚡ Steam 游戏商店/下载 (steam)", "direct", "Steam 国内商店与满速 CDN 下载"),
+        PresetGeoTag("geosite", "apple", "⚡ Apple 苹果国内服务 (apple)", "direct", "App Store、iCloud 国内加速节点"),
+        PresetGeoTag("geosite", "microsoft", "⚡ Microsoft 微软服务 (microsoft)", "direct", "Windows Update、Office 国内节点"),
+        PresetGeoTag("geoip", "cn", "⚡ 中国大陆 IP 地址段 (cn)", "direct", "中国大陆境内所有已知公网 IP"),
+        PresetGeoTag("geoip", "private", "⚡ 局域网/保留私有 IP (private)", "direct", "192.168.x.x, 10.x.x.x, 172.16.x.x 等内网"),
+        PresetGeoTag("geoip", "telegram", "🚀 Telegram 服务器 IP 段 (telegram)", "proxy", "Telegram 全球数据中心 IP"),
+        PresetGeoTag("geoip", "google", "🚀 Google 全球服务器 IP (google)", "proxy", "Google 全球网络及机房 IP"),
+        PresetGeoTag("geoip", "netflix", "🚀 Netflix 全球节点 IP (netflix)", "proxy", "Netflix 流媒体服务 IP"),
+        PresetGeoTag("geoip", "twitter", "🚀 Twitter / X 服务器 IP (twitter)", "proxy", "Twitter 境外机房 IP")
+    )
+
     // 常用热门 Tag 推荐
     val POPULAR_GEOSITE_TAGS = listOf(
-        "cn",
         "category-ads-all",
         "google",
-        "apple",
+        "openai",
         "telegram",
         "netflix",
         "youtube",
-        "openai",
         "github",
-        "microsoft",
         "twitter",
-        "steam",
+        "geolocation-!cn",
+        "cn",
         "bilibili",
-        "geolocation-!cn"
+        "steam",
+        "apple",
+        "microsoft"
     )
 
     val POPULAR_GEOIP_TAGS = listOf(
