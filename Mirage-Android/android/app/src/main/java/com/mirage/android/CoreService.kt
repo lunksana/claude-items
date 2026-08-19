@@ -57,25 +57,9 @@ class CoreService : VpnService() {
         failoverRestartJob?.cancel(); failoverRestartJob = null
     }
 
-    private val stopReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == ACTION_STOP) {
-                log("[core] 收到内部停止广播 ACTION_STOP")
-                stopInternal()
-            }
-        }
-    }
-
     override fun onCreate() {
         super.onCreate()
         setActive(this)
-        val filter = IntentFilter(ACTION_STOP)
-        // 修复 S1: 改为 RECEIVER_NOT_EXPORTED, 防止第三方外部 App 恶意伪造广播强停 VPN
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(stopReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(stopReceiver, filter)
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -232,7 +216,7 @@ class CoreService : VpnService() {
     }
 
     /** failover: 测活选最优节点 (best) 或换下一个 (next), 然后热切换。 */
-    private fun doFailover() {
+    private suspend fun doFailover() {
         val nodes = NodeStore.getNodes(this)
         if (nodes.size <= 1) {
             // 单节点: 完整重启连接 (撤 TUN 后重建, 清 stale 隧道)
@@ -251,10 +235,14 @@ class CoreService : VpnService() {
         LogStore.append("[failover] 触发节点切换 (mode=$mode, ${nodes.size} 个节点)")
         val selectedUri = NodeStore.getSelectedUri(this)
         val sorted = if (mode == "best") {
-            // 测活选最优 (connect 握手)
-            nodes.map { n ->
-                val rtt = runCatching { MirageNative.testNode(n.uri, 5000) }.getOrDefault(-1L)
-                n to rtt
+            // 修复 M3: 并发并行测活 (各节点独立 3000ms 超时, 避免 N*5s 阻塞 watchdog 导致监控停摆)
+            withContext(Dispatchers.IO) {
+                nodes.map { n ->
+                    async {
+                        val rtt = runCatching { MirageNative.testNode(n.uri, 3000) }.getOrDefault(-1L)
+                        n to rtt
+                    }
+                }.awaitAll()
             }.filter { it.second >= 0 }.sortedBy { it.second }
         } else {
             // 顺序: 选当前之后的下一个
@@ -477,7 +465,6 @@ class CoreService : VpnService() {
     override fun onDestroy() {
         clearActive()
         log("[core] onDestroy()")
-        runCatching { unregisterReceiver(stopReceiver) }
         cancelAllJobs()
         runCatching { MirageNative.stop() }
         runCatching { tunFd?.close() }

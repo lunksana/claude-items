@@ -78,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
         sni: args.sni.clone(),
         pool_size: 4,
         pfs: false,
+        udp_mux: true,
     };
     let engine = Engine::new(&node)?;
     println!("[e2e] 引擎已构建 (server={}:{})", args.server, args.port);

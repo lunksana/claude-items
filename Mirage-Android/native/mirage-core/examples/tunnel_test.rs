@@ -12,6 +12,7 @@ async fn main() {
         sni: std::env::var("MIRAGE_SNI").unwrap_or("speedtest.net".into()),
         pool_size: 1,
         pfs: false,
+        udp_mux: true,
     };
     eprintln!("[test] 连接 {}:{} (sni={})", node.server, node.server_port, node.sni);
     let engine = match Engine::new(&node) {

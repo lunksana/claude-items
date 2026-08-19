@@ -20,7 +20,7 @@ use std::net::IpAddr;
 mod cn_ipv4 { include!("direct_cn_ipv4.rs"); }
 mod cn_domains { include!("direct_cn_domains.rs"); }
 
-/// 判断 IP 是否属于中国段 (二分查找预排序范围, ~7700 段在 O(log N) ≈ 13 次比对完成)。
+/// 判断 IP 是否属于中国段 (二分查找预排序并合并后的互斥范围, ~7700 段在 O(log N) ≈ 13 次比对完成)。
 pub fn is_cn_ip(ip: IpAddr) -> bool {
     let ip_u32 = match ip {
         IpAddr::V4(v4) => u32::from(v4),
@@ -37,7 +37,21 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
             })
             .collect();
         ranges.sort_unstable_by_key(|&(start, _)| start);
-        ranges
+
+        // 修复 R1: 合并重叠与相邻区间，保证区间互斥与二分查找谓词传递性
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+        for (s, e) in ranges {
+            if let Some(last) = merged.last_mut() {
+                if s <= last.1.saturating_add(1) {
+                    if e > last.1 {
+                        last.1 = e;
+                    }
+                    continue;
+                }
+            }
+            merged.push((s, e));
+        }
+        merged
     });
 
     CN_RANGES.binary_search_by(|&(start, end)| {
@@ -51,11 +65,11 @@ pub fn is_cn_ip(ip: IpAddr) -> bool {
     }).is_ok()
 }
 
-/// 判断域名是否"国内" (命中白名单或国内后缀 → 直连)。零堆内存分配。
+/// 判断域名是否"国内" (命中白名单或国内后缀 → 直连)。
 pub fn is_cn_domain(domain: &str) -> bool {
-    let d = domain.trim_end_matches('.');
+    let d = domain.trim_end_matches('.').to_ascii_lowercase();
     for suffix in cn_domains::CN_DOMAINS {
-        if d.eq_ignore_ascii_case(suffix)
+        if d == *suffix
             || (d.len() > suffix.len()
                 && d.ends_with(suffix)
                 && d.as_bytes()[d.len() - suffix.len() - 1] == b'.')
@@ -65,7 +79,7 @@ pub fn is_cn_domain(domain: &str) -> bool {
     }
     // 国内顶级后缀
     for tld in ["cn", "com.cn", "net.cn", "org.cn", "edu.cn", "gov.cn", "mil.cn"] {
-        if d.eq_ignore_ascii_case(tld)
+        if d == tld
             || (d.len() > tld.len()
                 && d.ends_with(tld)
                 && d.as_bytes()[d.len() - tld.len() - 1] == b'.')
@@ -378,6 +392,8 @@ mod tests {
     #[test]
     fn cn_domain_matches() {
         assert!(is_cn_domain("www.baidu.com"));
+        assert!(is_cn_domain("WWW.BAIDU.COM"));
+        assert!(is_cn_domain("www.Baidu.com"));
         assert!(is_cn_domain("mp.weixin.qq.com"));
         assert!(is_cn_domain("www.12306.cn"));
         assert!(!is_cn_domain("www.google.com"));

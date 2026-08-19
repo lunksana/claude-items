@@ -353,19 +353,7 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_recentLogs(
     arr.into_raw()
 }
 
-/// 供 Kotlin 获取待 protect 的 fd 队列 (VpnService.protect 必须在 Java 侧调用)。
-/// `int[] drainProtectFds()`
-#[no_mangle]
-pub extern "system" fn Java_com_mirage_android_core_MirageNative_drainProtectFds(
-    env: JNIEnv,
-    _class: JClass,
-) -> jni::sys::jintArray {
-    // 修复 W3: 已由同步 JNI 回调取代，此处安全返回空数组
-    match env.new_int_array(0) {
-        Ok(a) => a.into_raw(),
-        Err(_) => jni::sys::jintArray::default(),
-    }
-}
+
 
 /// `double[] getStats()` — 流量统计: [up_total, down_total, up_rate, down_rate,
 /// tcp_conns, udp_flows, dns_queries] (速率单位 B/s)。

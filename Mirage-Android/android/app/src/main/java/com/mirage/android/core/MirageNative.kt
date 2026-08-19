@@ -27,9 +27,6 @@ object MirageNative {
     /** 取最近日志行 */
     external fun recentLogs(): Array<String>
 
-    /** 取待 protect 的 socket fd (VpnService.protect 必须在 Java 侧调用) */
-    external fun drainProtectFds(): IntArray
-
     external fun version(): String
 
     /** 动态设置 Rust 日志等级 (trace/debug/info/warn/error)。 */
