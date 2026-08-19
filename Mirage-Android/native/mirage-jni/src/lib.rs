@@ -24,8 +24,6 @@ use mirage_core::engine::{Engine, NodeInfo};
 use mirage_core::tun::{TunConfig, TunStack};
 use mirage_core::node_uri::NodeUri;
 
-pub mod protect_queue;
-
 // ── 全局运行时状态 ──────────────────────────────────────────────────────────
 
 static STARTED: AtomicBool = AtomicBool::new(false);
@@ -231,8 +229,6 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_start(
             eprintln!("[mirage-jni] protect({fd}) 失败: {e}");
         }
     }));
-    // 队列方式保留 (备用, 不再使用)
-    crate::protect_queue::clear();
 
     // 专用 tokio runtime (独立线程, 不占主线程)。必须先建 runtime 再在其内部
     // 调 Engine::new —— WarmPool::new 会 tokio::spawn 预热任务, 无 runtime 上下文
@@ -364,16 +360,11 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_drainProtectFds
     env: JNIEnv,
     _class: JClass,
 ) -> jni::sys::jintArray {
-    let fds = crate::protect_queue::drain();
-    let arr = match env.new_int_array(fds.len() as i32) {
-        Ok(a) => a,
-        Err(_) => return jni::sys::jintArray::default(),
-    };
-    let raw: Vec<jint> = fds.into_iter().map(|v| v as jint).collect();
-    if !raw.is_empty() {
-        let _ = env.set_int_array_region(&arr, 0, &raw);
+    // 修复 W3: 已由同步 JNI 回调取代，此处安全返回空数组
+    match env.new_int_array(0) {
+        Ok(a) => a.into_raw(),
+        Err(_) => jni::sys::jintArray::default(),
     }
-    arr.into_raw()
 }
 
 /// `double[] getStats()` — 流量统计: [up_total, down_total, up_rate, down_rate,
@@ -417,16 +408,21 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_setNode(
     node.pool_size = CURRENT_POOL_SIZE.load(Ordering::Relaxed);
     *CURRENT_NODE_URI.lock().unwrap_or_else(|e| e.into_inner()) = Some(uri_str);
 
-    // 在建的 runtime 上重建引擎 (Engine::new 需要 tokio 上下文)
-    let guard = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(state) = guard.as_ref() else { return 0 };
-    let result = state.rt.block_on(async move {
+    // 修复 M4: 在锁内仅获取 Arc 引用并立即释放全局 RUNTIME 锁，
+    // 避免在持有全局锁期间执行长时间的 block_on(Engine::new) 导致 UI 进程 getStats/isHealthy 被阻塞
+    let (rt, stack) = {
+        let guard = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(state) = guard.as_ref() else { return 0 };
+        (state.rt.clone(), state.stack.clone())
+    };
+
+    let result = rt.block_on(async move {
         mirage_core::engine::Engine::new(&node).map_err(|e| e.to_string())
     });
     match result {
         Ok(new_engine) => {
-            // 同步注入最新规则
-            state.stack.swap_engine(new_engine);
+            // 同步热替换引擎
+            stack.swap_engine(new_engine);
             1
         }
         Err(e) => {
@@ -558,7 +554,7 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_getBuiltinIpCou
 /// `String getRuleHits()` — 规则命中统计 JSON。
 #[no_mangle]
 pub extern "system" fn Java_com_mirage_android_core_MirageNative_getRuleHits(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
 ) -> jstring {
     let s = mirage_core::direct::get_rule_hits();

@@ -52,11 +52,11 @@
                 android:value="Mirage VPN Proxy Tunnel" />
         </service>
 
-        <!-- 通知栏快捷动作广播接收器 (与 CoreService 同进程) -->
+        <!-- 通知栏快捷动作广播接收器 (与 CoreService 同进程, 显式 Intent 触发, 禁止外部调用) -->
         <receiver
             android:name=".receiver.CoreActionReceiver"
             android:process=":core"
-            android:exported="true">
+            android:exported="false">
             <intent-filter>
                 <action android:name="com.mirage.android.STOP" />
             </intent-filter>

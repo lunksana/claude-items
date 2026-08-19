@@ -47,18 +47,20 @@ class CoreService : VpnService() {
     private var notifJob: Job? = null
     private var trafficJob: Job? = null
     private var watchdogJob: Job? = null
+    private var failoverRestartJob: Job? = null
 
     private fun cancelAllJobs() {
         logJob?.cancel(); logJob = null
         notifJob?.cancel(); notifJob = null
         trafficJob?.cancel(); trafficJob = null
         watchdogJob?.cancel(); watchdogJob = null
+        failoverRestartJob?.cancel(); failoverRestartJob = null
     }
 
     private val stopReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == ACTION_STOP) {
-                log("[core] 收到停止广播 ACTION_STOP")
+                log("[core] 收到内部停止广播 ACTION_STOP")
                 stopInternal()
             }
         }
@@ -68,8 +70,9 @@ class CoreService : VpnService() {
         super.onCreate()
         setActive(this)
         val filter = IntentFilter(ACTION_STOP)
+        // 修复 S1: 改为 RECEIVER_NOT_EXPORTED, 防止第三方外部 App 恶意伪造广播强停 VPN
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(stopReceiver, filter, Context.RECEIVER_EXPORTED)
+            registerReceiver(stopReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             registerReceiver(stopReceiver, filter)
         }
@@ -134,9 +137,15 @@ class CoreService : VpnService() {
         tunFd = fd
         startForegroundCompat()
 
-        // 注入规则与 Geo 文件
+        // 注入规则、Geo 文件与 DNS 配置 (修复 M5: 自主完成全量注入，杜绝冷启动 AIDL 竞态)
         runCatching { GeoManager.loadGeoFilesToNative(this) }
         runCatching { MirageNative.setRules(RuleStore.toJson(this)) }
+        runCatching {
+            val dnsPrefs = getSharedPreferences("mirage_dns_prefs", Context.MODE_PRIVATE)
+            val directDns = dnsPrefs.getString("direct_dns", "223.5.5.5") ?: "223.5.5.5"
+            val remoteDns = dnsPrefs.getString("remote_dns", "1.1.1.1") ?: "1.1.1.1"
+            MirageNative.setDnsServers(directDns, remoteDns)
+        }
 
         val poolSize = if (poolSizeOverride > 0) poolSizeOverride else NodeStore.getPoolSize(this)
         log("[core] 开始启动内核 (uri=${uri.take(30)}..., poolSize=$poolSize)")
@@ -206,7 +215,8 @@ class CoreService : VpnService() {
             val interval = SettingsStore.getCheckIntervalSec(this@CoreService).toLong().coerceAtLeast(5)
             delay(interval * 1000)
             if (!MirageNative.isRunning()) continue
-            val healthy = runCatching { MirageNative.isHealthy() }.getOrDefault(true)
+            // 修复 M1: Fail-Closed (异常/JNI失败时视为不健康，防止假死与自愈失效)
+            val healthy = runCatching { MirageNative.isHealthy() }.getOrDefault(false)
             if (healthy) { consecutiveFailures = 0; continue }
 
             consecutiveFailures++
@@ -229,9 +239,11 @@ class CoreService : VpnService() {
             LogStore.append("[failover] 仅一个节点, 完整重启连接")
             runCatching { MirageNative.stop() }
             runCatching { tunFd?.close() }; tunFd = null
-            scope.launch {
+            // 修复 S2: 纳入 failoverRestartJob 统一管理, 支持手动停止时立即 cancel
+            failoverRestartJob?.cancel()
+            failoverRestartJob = scope.launch {
                 delay(3000)
-                if (!MirageNative.isRunning()) startInternal()
+                if (isActive && !MirageNative.isRunning()) startInternal()
             }
             return
         }
@@ -263,10 +275,11 @@ class CoreService : VpnService() {
             LogStore.append("[failover] 当前节点仍最优, 完整重启连接")
             runCatching { MirageNative.stop() }
             runCatching { tunFd?.close() }; tunFd = null
-            // 延迟重建
-            scope.launch {
+            // 修复 S2: 纳入 failoverRestartJob 统一管理
+            failoverRestartJob?.cancel()
+            failoverRestartJob = scope.launch {
                 delay(3000)
-                if (!MirageNative.isRunning()) startInternal()
+                if (isActive && !MirageNative.isRunning()) startInternal()
             }
         }
     }
@@ -555,15 +568,24 @@ class CoreService : VpnService() {
                         && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 }
                 if (realNet != null) {
-                    android.os.ParcelFileDescriptor.fromFd(fd).use { pfd ->
+                    // 修复 S3: 使用 ParcelFileDescriptor 必须在 close 前调用 detachFd() 剥离底层描述符所有权，
+                    // 严禁关闭底层 socket，否则 Rust 随后 connect() 时会因 EBADF 失败！
+                    val pfd = android.os.ParcelFileDescriptor.fromFd(fd)
+                    try {
                         realNet.bindSocket(pfd.fileDescriptor)
+                        netOk = true
+                    } finally {
+                        pfd.detachFd()
+                        pfd.close()
                     }
-                    netOk = true
                 } else {
                     LogStore.append("[core] 未找到非 VPN 底层网络")
                 }
             }
-            LogStore.append("[core] protect fd=$fd ok=$ok bindNet=$netOk")
+            // 修复 M6: 降低日志刷屏，仅在绑定或保护失败时记录关键告警
+            if (!ok || !netOk) {
+                LogStore.append("[core] protect fd=$fd 告警 (protectOk=$ok, bindNetOk=$netOk)")
+            }
         }
 
         @JvmStatic

@@ -29,13 +29,20 @@ class MirageTileService : TileService() {
         super.onClick()
         val running = isVpnRunning()
         if (running) {
-            // 断开连接
+            // 修复 S1: 仅保留单条服务意图停止路径，彻底消除多重触发
             val stopIntent = Intent(this, CoreService::class.java).setAction(CoreService.ACTION_STOP)
             runCatching { startService(stopIntent) }
-            val stopBroadcast = Intent(CoreService.ACTION_STOP).setPackage(packageName)
-            runCatching { sendBroadcast(stopBroadcast) }
             updateTileState(false)
         } else {
+            // 修复 M7: 若 VPN 尚未在系统授权，拉起主页面引导授权，避免静默失败
+            if (android.net.VpnService.prepare(this) != null) {
+                val appIntent = Intent(this, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                startActivityAndCollapse(appIntent)
+                return
+            }
+
             // 检查是否有节点
             val selected = NodeStore.getSelectedUri(this)
             if (selected.isBlank()) {

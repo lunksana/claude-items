@@ -20,32 +20,56 @@ use std::net::IpAddr;
 mod cn_ipv4 { include!("direct_cn_ipv4.rs"); }
 mod cn_domains { include!("direct_cn_domains.rs"); }
 
-/// 判断 IP 是否属于中国段 (线性扫描; 段数 ~7700, 每次连接判定一次, ARM 上 <100µs)。
+/// 判断 IP 是否属于中国段 (二分查找预排序范围, ~7700 段在 O(log N) ≈ 13 次比对完成)。
 pub fn is_cn_ip(ip: IpAddr) -> bool {
     let ip_u32 = match ip {
         IpAddr::V4(v4) => u32::from(v4),
         IpAddr::V6(_) => return false,
     };
-    for (net, prefix) in cn_ipv4::CN_IPV4 {
-        let mask = if *prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
-        if (ip_u32 & mask) == (*net & mask) {
-            return true;
+    static CN_RANGES: std::sync::LazyLock<Vec<(u32, u32)>> = std::sync::LazyLock::new(|| {
+        let mut ranges: Vec<(u32, u32)> = cn_ipv4::CN_IPV4
+            .iter()
+            .map(|&(net, prefix)| {
+                let mask = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+                let start = net & mask;
+                let end = start | !mask;
+                (start, end)
+            })
+            .collect();
+        ranges.sort_unstable_by_key(|&(start, _)| start);
+        ranges
+    });
+
+    CN_RANGES.binary_search_by(|&(start, end)| {
+        if ip_u32 < start {
+            std::cmp::Ordering::Greater
+        } else if ip_u32 > end {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Equal
         }
-    }
-    false
+    }).is_ok()
 }
 
-/// 判断域名是否"国内" (命中白名单或国内后缀 → 直连)。
+/// 判断域名是否"国内" (命中白名单或国内后缀 → 直连)。零堆内存分配。
 pub fn is_cn_domain(domain: &str) -> bool {
-    let d = domain.trim_end_matches('.').to_ascii_lowercase();
+    let d = domain.trim_end_matches('.');
     for suffix in cn_domains::CN_DOMAINS {
-        if d == *suffix || d.ends_with(&format!(".{suffix}")) {
+        if d.eq_ignore_ascii_case(suffix)
+            || (d.len() > suffix.len()
+                && d.ends_with(suffix)
+                && d.as_bytes()[d.len() - suffix.len() - 1] == b'.')
+        {
             return true;
         }
     }
     // 国内顶级后缀
     for tld in ["cn", "com.cn", "net.cn", "org.cn", "edu.cn", "gov.cn", "mil.cn"] {
-        if d == tld || d.ends_with(&format!(".{tld}")) {
+        if d.eq_ignore_ascii_case(tld)
+            || (d.len() > tld.len()
+                && d.ends_with(tld)
+                && d.as_bytes()[d.len() - tld.len() - 1] == b'.')
+        {
             return true;
         }
     }
@@ -79,12 +103,12 @@ impl RuleAction {
 }
 
 /// 规则类型
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum RuleKind {
     Suffix(String),
     Exact(String),
     Keyword(String),
-    Regex(String),
+    Regex(String, Option<regex::Regex>),
     GeoSite(String),
     GeoIp(String),
     Cidr(String),
@@ -96,7 +120,7 @@ impl RuleKind {
             RuleKind::Suffix(_) => "suffix",
             RuleKind::Exact(_) => "exact",
             RuleKind::Keyword(_) => "keyword",
-            RuleKind::Regex(_) => "regex",
+            RuleKind::Regex(..) => "regex",
             RuleKind::GeoSite(_) => "geosite",
             RuleKind::GeoIp(_) => "geoip",
             RuleKind::Cidr(_) => "cidr",
@@ -108,7 +132,7 @@ impl RuleKind {
             RuleKind::Suffix(s)
             | RuleKind::Exact(s)
             | RuleKind::Keyword(s)
-            | RuleKind::Regex(s)
+            | RuleKind::Regex(s, _)
             | RuleKind::GeoSite(s)
             | RuleKind::GeoIp(s)
             | RuleKind::Cidr(s) => s,
@@ -217,7 +241,10 @@ pub fn set_custom_rules(json: &str) -> bool {
                 "cidr" | "ip-cidr" => RuleKind::Cidr(pattern.trim().to_string()),
                 "exact" | "domain" => RuleKind::Exact(pat_lower),
                 "keyword" | "domain-keyword" => RuleKind::Keyword(pat_lower),
-                "regex" | "domain-regex" => RuleKind::Regex(pattern.trim().to_string()),
+                "regex" | "domain-regex" => {
+                    let re = regex::Regex::new(pattern.trim()).ok();
+                    RuleKind::Regex(pattern.trim().to_string(), re)
+                }
                 _ => RuleKind::Suffix(pat_lower),
             };
             rules.rules.push((rule_kind, action));
@@ -228,9 +255,15 @@ pub fn set_custom_rules(json: &str) -> bool {
 }
 
 fn domain_match(rule: &str, domain: &str) -> bool {
-    let rule = rule.trim_end_matches('.').to_ascii_lowercase();
+    let rule = rule.trim_end_matches('.');
     let d = domain.trim_end_matches('.');
-    d == rule || d.ends_with(&format!(".{rule}"))
+    if d.eq_ignore_ascii_case(rule) {
+        return true;
+    }
+    if d.len() > rule.len() && d.ends_with(rule) && d.as_bytes()[d.len() - rule.len() - 1] == b'.' {
+        return true;
+    }
+    false
 }
 
 fn cidr_match(rule: &str, ip: IpAddr) -> bool {
@@ -260,9 +293,9 @@ fn custom_rules_verdict(domain: Option<&str>, ip: Option<IpAddr>) -> Option<Rule
         if let Some(d) = domain {
             hit = match kind {
                 RuleKind::Suffix(pat) => domain_match(pat, d),
-                RuleKind::Exact(pat) => d.trim_end_matches('.') == pat.trim_end_matches('.'),
-                RuleKind::Keyword(pat) => d.contains(pat),
-                RuleKind::Regex(pat) => regex::Regex::new(pat).map(|re| re.is_match(d)).unwrap_or(false),
+                RuleKind::Exact(pat) => d.trim_end_matches('.').eq_ignore_ascii_case(pat.trim_end_matches('.')),
+                RuleKind::Keyword(pat) => d.to_ascii_lowercase().contains(pat),
+                RuleKind::Regex(_pat, re_opt) => re_opt.as_ref().map(|re| re.is_match(d)).unwrap_or(false),
                 RuleKind::GeoSite(tag) => crate::geo::match_geosite_tag(tag, d),
                 RuleKind::GeoIp(code) => {
                     if let Some(ip_addr) = ip {
