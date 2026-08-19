@@ -327,6 +327,7 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
         } else {
             crate::monitor::add_up(payload_len);
         }
+        crate::monitor::mark_tunnel_active();
 
         if inner_type == 0x17 {
             Ok(self.buffer.clone())
@@ -385,6 +386,7 @@ impl<R: AsyncRead + Unpin> CryptoReader<R> {
         } else {
             crate::monitor::add_up(payload_len);
         }
+        crate::monitor::mark_tunnel_active();
 
         if inner_type == 0x17 {
             writer.write_all(&self.buffer).await?;

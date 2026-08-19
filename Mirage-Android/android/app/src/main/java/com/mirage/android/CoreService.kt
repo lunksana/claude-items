@@ -25,6 +25,8 @@ import com.mirage.android.core.RuleStore
 import com.mirage.android.core.SettingsStore
 import com.mirage.android.core.TrafficStatsStore
 import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.net.InetAddress
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -235,12 +237,17 @@ class CoreService : VpnService() {
         LogStore.append("[failover] 触发节点切换 (mode=$mode, ${nodes.size} 个节点)")
         val selectedUri = NodeStore.getSelectedUri(this)
         val sorted = if (mode == "best") {
-            // 修复 M3: 并发并行测活 (各节点独立 3000ms 超时, 避免 N*5s 阻塞 watchdog 导致监控停摆)
+            // 修复 M3: 并发并行测活 (各节点独立 3000ms 超时, 避免 N*5s 阻塞 watchdog 导致监控停摆)。
+            // 每个 testNode 是完整协议握手 (引擎+拨号), 用信号量限流防 N 个并发握手同时打服务器
+            // (thundering herd) —— 与内核 pool 的 on-demand 信号量同理。
+            val sem = Semaphore(4)
             withContext(Dispatchers.IO) {
                 nodes.map { n ->
                     async {
-                        val rtt = runCatching { MirageNative.testNode(n.uri, 3000) }.getOrDefault(-1L)
-                        n to rtt
+                        sem.withPermit {
+                            val rtt = runCatching { MirageNative.testNode(n.uri, 3000) }.getOrDefault(-1L)
+                            n to rtt
+                        }
                     }
                 }.awaitAll()
             }.filter { it.second >= 0 }.sortedBy { it.second }

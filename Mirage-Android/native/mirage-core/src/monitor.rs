@@ -15,6 +15,44 @@ pub fn add_down(bytes: u64) {
     GLOBAL_DOWN.fetch_add(bytes, Ordering::Relaxed);
 }
 
+// ── 隧道"卡死"检测 (watchdog failover 用) ────────────────────────────────
+// 原理: 隧道流量 (aead 加密层) 每次读写都刷新 TUNNEL_LAST_ACTIVE。若存在活跃的
+// 隧道连接 (TCP/UDP/DNS 代理) 却长时间无隧道流量 → 服务器"半死"(连接在但吞包)
+// 的强信号。区别于"用户空闲"(无活跃连接时零流量是正常的, 不计卡死)。
+
+/// 最近一次隧道流量时间戳 (unix secs, 0 = 从未)。
+static TUNNEL_LAST_ACTIVE: AtomicU64 = AtomicU64::new(0);
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// 隧道数据读写经过时调用 (aead 层收发路径)。
+pub fn mark_tunnel_active() {
+    TUNNEL_LAST_ACTIVE.store(unix_now_secs(), Ordering::Relaxed);
+}
+
+/// 距上次隧道流量的秒数。None = 从未有隧道流量 (会话刚开始, 不算卡死)。
+pub fn tunnel_stall_secs() -> Option<u64> {
+    let last = TUNNEL_LAST_ACTIVE.load(Ordering::Relaxed);
+    if last == 0 {
+        return None;
+    }
+    Some(unix_now_secs().saturating_sub(last))
+}
+
+/// 当前活跃的**隧道**连接数 (排除直连/拦截)。卡死判定用。
+pub fn tunnel_conn_count() -> usize {
+    let lock = ACTIVE_CONNECTIONS.lock().unwrap_or_else(|e| e.into_inner());
+    match lock.as_ref() {
+        Some(map) => map.values().filter(|c| c.outbound.contains("代理")).count(),
+        None => 0,
+    }
+}
+
 // ── 流量采样 (实时速率) ────────────────────────────────────────────────────
 
 /// 最近样本 (时间, 累计上行, 累计下行)。保留 20 个, 间隔 ≥800ms 才记 (过滤 App 高频轮询噪声)。

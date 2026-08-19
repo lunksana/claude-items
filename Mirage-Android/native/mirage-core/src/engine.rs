@@ -118,11 +118,29 @@ impl Engine {
     }
 
     /// 连接池健康度 (App 状态栏显示)。
+    ///
+    /// 两层判据:
+    /// 1. 建连健康: PoolStats.consecutive_failures < 3 (建连失败累计);
+    /// 2. 卡死检测 (M2): 存在活跃**隧道**连接 (TCP/UDP/DNS 代理) 却连续
+    ///    [`TUNNEL_STALL_SEC`] 秒无隧道流量 → 服务器"半死"(连接在但吞包)。
+    ///    纯直连会话 (无隧道连接) 不受影响, 避免用户空闲时误判。
     pub fn is_healthy(&self) -> bool {
-        self.outbounds
-            .get(&self.default_tag)
-            .map(|n| n.is_healthy())
-            .unwrap_or(false)
+        let node = match self.outbounds.get(&self.default_tag) {
+            Some(n) => n,
+            None => return false,
+        };
+        if !node.is_healthy() {
+            return false;
+        }
+        if tunnel_stalled(
+            crate::monitor::tunnel_conn_count(),
+            crate::monitor::tunnel_stall_secs(),
+            TUNNEL_STALL_SEC,
+        ) {
+            tracing::warn!("[Engine] 隧道疑似卡死: 有活跃连接但 {}s 无隧道流量", TUNNEL_STALL_SEC);
+            return false;
+        }
+        true
     }
 
     /// RTT 毫秒 (App 状态栏显示)。
@@ -140,6 +158,42 @@ impl Engine {
         self.fake_ip.clear();
         crate::tun::dns::clear_direct_cache();
         tracing::info!("[Engine] Fake-IP 映射与直连 DNS 缓存已重置");
+    }
+}
+
+/// 隧道卡死判定阈值: 活跃隧道连接存在但超过该秒数无隧道流量 → 不健康。
+pub const TUNNEL_STALL_SEC: u64 = 30;
+
+/// 卡死判据 (纯函数, 便于单测): 有活跃隧道连接 && 距上次隧道流量 ≥ threshold。
+pub fn tunnel_stalled(conns: usize, stall: Option<u64>, threshold: u64) -> bool {
+    conns > 0 && stall.is_some_and(|s| s >= threshold)
+}
+
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+
+    #[test]
+    fn no_conns_never_stalled() {
+        assert!(!tunnel_stalled(0, Some(999), 30), "无活跃连接 → 空闲, 不判卡死");
+        assert!(!tunnel_stalled(0, None, 30));
+    }
+
+    #[test]
+    fn fresh_session_not_stalled() {
+        assert!(!tunnel_stalled(3, None, 30), "从未有隧道流量 (刚启动) → 不判卡死");
+    }
+
+    #[test]
+    fn stalled_when_silent_past_threshold() {
+        assert!(tunnel_stalled(2, Some(30), 30));
+        assert!(tunnel_stalled(1, Some(61), 30));
+    }
+
+    #[test]
+    fn below_threshold_fine() {
+        assert!(!tunnel_stalled(5, Some(29), 30));
+        assert!(!tunnel_stalled(5, Some(0), 30));
     }
 }
 
