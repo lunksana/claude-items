@@ -15,6 +15,7 @@ pub struct NodeUri {
     pub port: u16,
     pub sni: String,
     pub pool_size: Option<usize>,
+    pub udp_mux: Option<bool>,
 }
 
 /// 百分号解码。`+` **不**当空格 —— 这是 URI 的 query 部分而非
@@ -83,6 +84,7 @@ impl NodeUri {
 
         let mut sni = String::new();
         let mut pool_size = None;
+        let mut udp_mux = None;
         for pair in query.split('&').filter(|p| !p.is_empty()) {
             if let Some((k, v)) = pair.split_once('=') {
                 if k == "sni" {
@@ -92,6 +94,13 @@ impl NodeUri {
                         if s > 0 {
                             pool_size = Some(s);
                         }
+                    }
+                } else if k == "udp_mux" || k == "mux" {
+                    let v_lower = v.to_lowercase();
+                    if v_lower == "1" || v_lower == "true" || v_lower == "yes" {
+                        udp_mux = Some(true);
+                    } else if v_lower == "0" || v_lower == "false" || v_lower == "no" {
+                        udp_mux = Some(false);
                     }
                 }
             }
@@ -108,7 +117,7 @@ impl NodeUri {
             return Err(anyhow!("缺少 sni 参数 (伪装域名, 必须与服务端一致)"));
         }
 
-        Ok(NodeUri { password, host: host.to_string(), port, sni, pool_size })
+        Ok(NodeUri { password, host: host.to_string(), port, sni, pool_size, udp_mux })
     }
 }
 

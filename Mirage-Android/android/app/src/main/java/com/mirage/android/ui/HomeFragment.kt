@@ -194,6 +194,12 @@ class HomeFragment : Fragment() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        updateVersionBadge()
+        viewModel.checkCurrentState()
+    }
+
     fun updateVersionBadge() {
         val ctx = context ?: return
         val activeCore = com.mirage.android.core.CoreManager.getInstance(ctx).getActiveCore()

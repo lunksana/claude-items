@@ -18,6 +18,7 @@ class RulesViewModel(application: Application) : AndroidViewModel(application) {
     val builtinDomains: StateFlow<List<String>> = ruleRepo.builtinDomains
     val builtinIpCount: StateFlow<Long> = ruleRepo.builtinIpCount
     val isBlockQuic: StateFlow<Boolean> = vpnRepo.isBlockQuic
+    val isUdpMux: StateFlow<Boolean> = vpnRepo.isUdpMux
 
     /** 应用内核规则命中统计到规则列表。 */
     fun applyHits(hitsMap: Map<String, Long>) {
@@ -50,6 +51,10 @@ class RulesViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setBlockQuic(block: Boolean) {
         vpnRepo.setBlockQuic(block)
+    }
+
+    fun setUdpMux(enabled: Boolean) {
+        vpnRepo.setUdpMux(enabled)
     }
 
     init {

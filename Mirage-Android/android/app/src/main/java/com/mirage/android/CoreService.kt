@@ -4,7 +4,10 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
@@ -39,6 +42,38 @@ class CoreService : VpnService() {
     private var tunFd: ParcelFileDescriptor? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val callbacks = CopyOnWriteArrayList<ICoreCallback>()
+
+    private var logJob: Job? = null
+    private var notifJob: Job? = null
+    private var trafficJob: Job? = null
+    private var watchdogJob: Job? = null
+
+    private fun cancelAllJobs() {
+        logJob?.cancel(); logJob = null
+        notifJob?.cancel(); notifJob = null
+        trafficJob?.cancel(); trafficJob = null
+        watchdogJob?.cancel(); watchdogJob = null
+    }
+
+    private val stopReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_STOP) {
+                log("[core] 收到停止广播 ACTION_STOP")
+                stopInternal()
+            }
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        setActive(this)
+        val filter = IntentFilter(ACTION_STOP)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(stopReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(stopReceiver, filter)
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         setActive(this)
@@ -115,9 +150,10 @@ class CoreService : VpnService() {
         }
         log("[core] 内核已启动")
         notifyState()
+        runCatching { sendBroadcast(Intent(ACTION_VPN_STARTED).setPackage(packageName)) }
 
         // 文件日志: 内核+App 日志落盘 (adb run-as cat files/core.log 诊断用)
-        scope.launch {
+        logJob = scope.launch {
             while (isActive) {
                 runCatching {
                     val logs = (LogStore.all() + MirageNative.recentLogs().toList()).joinToString("\n")
@@ -127,7 +163,7 @@ class CoreService : VpnService() {
             }
         }
         // 通知栏流量
-        scope.launch {
+        notifJob = scope.launch {
             var last = ""
             while (isActive) {
                 runCatching {
@@ -142,7 +178,7 @@ class CoreService : VpnService() {
         }
         // 流量统计持久化 (增量累加到今日/本月)
         TrafficStatsStore.prune(this@CoreService) // 启动时清理一次 30 天前旧数据
-        scope.launch {
+        trafficJob = scope.launch {
             var lastUp = -1L; var lastDown = -1L
             while (isActive) {
                 runCatching {
@@ -159,30 +195,28 @@ class CoreService : VpnService() {
             }
         }
         // 断线自动重连 / 节点 failover watchdog
-        startFailoverWatchdog()
+        watchdogJob = startFailoverWatchdog()
         return 0
     }
 
     /** 断线检测 + 自动重连 + failover watchdog。 */
-    private fun startFailoverWatchdog() {
-        scope.launch {
-            var consecutiveFailures = 0
-            while (isActive) {
-                val interval = SettingsStore.getCheckIntervalSec(this@CoreService).toLong().coerceAtLeast(5)
-                delay(interval * 1000)
-                if (!MirageNative.isRunning()) continue
-                val healthy = runCatching { MirageNative.isHealthy() }.getOrDefault(true)
-                if (healthy) { consecutiveFailures = 0; continue }
+    private fun startFailoverWatchdog(): Job = scope.launch {
+        var consecutiveFailures = 0
+        while (isActive) {
+            val interval = SettingsStore.getCheckIntervalSec(this@CoreService).toLong().coerceAtLeast(5)
+            delay(interval * 1000)
+            if (!MirageNative.isRunning()) continue
+            val healthy = runCatching { MirageNative.isHealthy() }.getOrDefault(true)
+            if (healthy) { consecutiveFailures = 0; continue }
 
-                consecutiveFailures++
-                LogStore.append("[failover] 检测到连接异常 (第 $consecutiveFailures 次)")
-                if (!SettingsStore.isAutoReconnect(this@CoreService)) continue
+            consecutiveFailures++
+            LogStore.append("[failover] 检测到连接异常 (第 $consecutiveFailures 次)")
+            if (!SettingsStore.isAutoReconnect(this@CoreService)) continue
 
-                // 连续 2 次异常才触发 failover (避免瞬时抖动)
-                if (consecutiveFailures >= 2) {
-                    doFailover()
-                    consecutiveFailures = 0
-                }
+            // 连续 2 次异常才触发 failover (避免瞬时抖动)
+            if (consecutiveFailures >= 2) {
+                doFailover()
+                consecutiveFailures = 0
             }
         }
     }
@@ -239,12 +273,21 @@ class CoreService : VpnService() {
 
     fun stopInternal() {
         log("[core] stop()")
+        cancelAllJobs()
         runCatching { MirageNative.stop() }
         runCatching { tunFd?.close() }
         tunFd = null
-        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        }
         runCatching { getSystemService(NotificationManager::class.java)?.cancel(1) }
         notifyState()
+        runCatching { sendBroadcast(Intent(ACTION_VPN_STOPPED).setPackage(packageName)) }
         stopSelf()
     }
 
@@ -305,21 +348,36 @@ class CoreService : VpnService() {
     // ── 前台通知 ─────────────────────────────────────────────────────────
 
     private fun startForegroundCompat() {
-        val channel = NotificationChannel("mirage", "Mirage VPN", NotificationManager.IMPORTANCE_LOW)
-            .also { getSystemService(NotificationManager::class.java)?.createNotificationChannel(it) }
-        val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE)
-        val stopIntent = Intent(this, CoreService::class.java).setAction(ACTION_STOP)
-        val stopPi = PendingIntent.getService(this, 1, stopIntent, PendingIntent.FLAG_IMMUTABLE)
+        val channel = NotificationChannel("mirage_status", "Mirage VPN 运行状态", NotificationManager.IMPORTANCE_DEFAULT).apply {
+            description = "Mirage VPN 运行状态、流量监控与快捷断开"
+            setShowBadge(false)
+            setSound(null, null)
+            enableVibration(false)
+            enableLights(false)
+        }
+        getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
 
-        val notif: Notification = NotificationCompat.Builder(this, "mirage")
+        val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val stopIntent = Intent(this, com.mirage.android.receiver.CoreActionReceiver::class.java).setAction(ACTION_STOP)
+        val stopPi = PendingIntent.getBroadcast(
+            this,
+            1001,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notif: Notification = NotificationCompat.Builder(this, "mirage_status")
             .setContentTitle("Mirage 已连接")
             .setContentText("流量经 Mirage 隧道转发")
             .setSmallIcon(R.drawable.ic_notification_mirage)
             .setColor(0xFF2481CC.toInt())
             .setContentIntent(pi)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "断开", stopPi)
+            .addAction(R.drawable.ic_notification_mirage, "断开连接", stopPi)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -345,18 +403,26 @@ class CoreService : VpnService() {
     private fun updateNotif(text: String) {
         val nm = getSystemService(NotificationManager::class.java) ?: return
         val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE)
-        val stopIntent = Intent(this, CoreService::class.java).setAction(ACTION_STOP)
-        val stopPi = PendingIntent.getService(this, 1, stopIntent, PendingIntent.FLAG_IMMUTABLE)
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val stopIntent = Intent(this, com.mirage.android.receiver.CoreActionReceiver::class.java).setAction(ACTION_STOP)
+        val stopPi = PendingIntent.getBroadcast(
+            this,
+            1001,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 
-        val notif = NotificationCompat.Builder(this, "mirage")
+        val notif = NotificationCompat.Builder(this, "mirage_status")
             .setContentTitle("Mirage 已连接")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_notification_mirage)
             .setColor(0xFF2481CC.toInt())
             .setContentIntent(pi)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "断开", stopPi)
+            .addAction(R.drawable.ic_notification_mirage, "断开连接", stopPi)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
         nm.notify(1, notif)
     }
@@ -382,14 +448,36 @@ class CoreService : VpnService() {
         return MirageNative.setLogLevel(level)
     }
 
+    fun setUdpMuxInternal(enabled: Boolean): Boolean {
+        log("[core] 切换 UDP Mux: $enabled")
+        return MirageNative.setUdpMux(enabled)
+    }
+
+    fun isUdpMuxInternal(): Boolean = MirageNative.isUdpMux()
+
+    override fun onRevoke() {
+        log("[core] 系统任务栏/设置断开 VPN 连接 (onRevoke)")
+        stopInternal()
+        super.onRevoke()
+    }
+
     override fun onDestroy() {
         clearActive()
         log("[core] onDestroy()")
+        runCatching { unregisterReceiver(stopReceiver) }
+        cancelAllJobs()
         runCatching { MirageNative.stop() }
         runCatching { tunFd?.close() }
         tunFd = null
         scope.cancel()
-        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        }
         runCatching { getSystemService(NotificationManager::class.java)?.cancel(1) }
         super.onDestroy()
     }
@@ -408,6 +496,8 @@ class CoreService : VpnService() {
             level?.let { setLogLevelInternal(it) } ?: false
         override fun setBlockQuic(block: Boolean): Boolean = setBlockQuicInternal(block)
         override fun isBlockQuic(): Boolean = isBlockQuicInternal()
+        override fun setUdpMux(enabled: Boolean): Boolean = setUdpMuxInternal(enabled)
+        override fun isUdpMux(): Boolean = isUdpMuxInternal()
         override fun clearDnsCache(): Boolean = clearDnsCacheInternal()
         override fun setDnsServers(directDns: String?, remoteDns: String?): Boolean =
             setDnsServersInternal(directDns ?: "223.5.5.5", remoteDns ?: "1.1.1.1")
@@ -434,6 +524,8 @@ class CoreService : VpnService() {
 
     companion object {
         const val ACTION_STOP = "com.mirage.android.STOP"
+        const val ACTION_VPN_STOPPED = "com.mirage.android.VPN_STOPPED"
+        const val ACTION_VPN_STARTED = "com.mirage.android.VPN_STARTED"
 
         /** 当前活跃实例 (Rust protect 回调用: VpnService.protect 防隧道环路)。 */
         @Volatile
@@ -476,6 +568,9 @@ class CoreService : VpnService() {
 
         @JvmStatic
         fun setActive(s: CoreService) { active = s }
+
+        @JvmStatic
+        fun getActive(): CoreService? = active
 
         @JvmStatic
         fun clearActive() { active = null }

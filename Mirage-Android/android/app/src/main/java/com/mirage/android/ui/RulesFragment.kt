@@ -108,6 +108,15 @@ class RulesFragment : Fragment() {
             ).show()
         }
 
+        binding.switchUdpMux.setOnCheckedChangeListener { _, isChecked ->
+            viewModel.setUdpMux(isChecked)
+            Toast.makeText(
+                requireContext(),
+                if (isChecked) "已启用 UDP Mux 多路复用 (4条共享隧道并发)" else "已关闭 UDP Mux (传统单流单隧道)",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
         binding.btnManageGeo.setOnClickListener {
             showGeoUpdateDialog()
         }
@@ -151,6 +160,13 @@ class RulesFragment : Fragment() {
                     viewModel.isBlockQuic.collect { blocked ->
                         if (binding.switchBlockQuic.isChecked != blocked) {
                             binding.switchBlockQuic.isChecked = blocked
+                        }
+                    }
+                }
+                launch {
+                    viewModel.isUdpMux.collect { mux ->
+                        if (binding.switchUdpMux.isChecked != mux) {
+                            binding.switchUdpMux.isChecked = mux
                         }
                     }
                 }

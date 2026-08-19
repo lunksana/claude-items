@@ -82,6 +82,8 @@ object CoreController {
     fun setLogLevel(level: String): Boolean = call { it.setLogLevel(level) } ?: false
     fun setBlockQuic(block: Boolean): Boolean = call { it.setBlockQuic(block) } ?: false
     fun isBlockQuic(): Boolean = call { it.isBlockQuic } ?: true
+    fun setUdpMux(enabled: Boolean): Boolean = call { it.setUdpMux(enabled) } ?: false
+    fun isUdpMux(): Boolean = call { it.isUdpMux } ?: true
     fun clearDnsCache(): Boolean = call { it.clearDnsCache() } ?: false
     fun setDnsServers(directDns: String, remoteDns: String): Boolean =
         call { it.setDnsServers(directDns, remoteDns) } ?: false

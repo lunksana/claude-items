@@ -31,6 +31,11 @@ pub enum OutboundConfig {
         /// 前向保密: 握手做一次性 X25519 ECDH。须与服务端 `pfs` 同开。默认关。
         #[serde(default)]
         pfs: bool,
+        /// UDP 多路复用开关 (默认 true)。
+        #[serde(default = "d_true")]
+        udp_mux: bool,
+        #[serde(default = "d_udp_mux_tunnels")]
+        udp_mux_tunnels: usize,
         /// 链式代理底层出站 (Mirage-over-X)。移动端 v1 不支持, 保留字段以兼容上游配置解析。
         #[serde(default)]
         underlying: Option<String>,
@@ -78,6 +83,8 @@ pub enum OutboundConfig {
 fn d_camouflage_host() -> String { "www.apple.com".into() }
 fn d_pool_size() -> usize { 4 }
 fn d_test_type() -> String { "ping".into() }
+fn d_true() -> bool { true }
+fn d_udp_mux_tunnels() -> usize { 4 }
 
 /// 最简 Config: 只有出站表。移动端 engine 直接用它构建 CoreState。
 #[derive(Debug, Clone, Deserialize)]
@@ -94,6 +101,7 @@ pub fn single_mirage_config(
     camouflage_host: &str,
     pool_size: usize,
     pfs: bool,
+    udp_mux: bool,
 ) -> Config {
     Config {
         outbounds: vec![
@@ -107,6 +115,8 @@ pub fn single_mirage_config(
                 brutal_rate_mbps: None,
                 brutal_base_rtt_ms: None,
                 pfs,
+                udp_mux,
+                udp_mux_tunnels: 4,
                 underlying: None,
             },
             OutboundConfig::Direct { tag: "direct".to_string() },

@@ -44,6 +44,12 @@ object MirageNative {
     /** 查询当前是否开启 QUIC 屏蔽。 */
     external fun isBlockQuic(): Boolean
 
+    /** 设置是否开启 UDP 多路复用 (UDP Mux)。 */
+    external fun setUdpMux(enabled: Boolean): Boolean
+
+    /** 查询当前是否开启 UDP 多路复用。 */
+    external fun isUdpMux(): Boolean
+
     /**
      * 流量统计: [up_total, down_total, up_rate(B/s), down_rate(B/s),
      * tcp_conns, udp_flows, dns_queries]。

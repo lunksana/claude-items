@@ -56,4 +56,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     fun disconnect() {
         vpnRepo.stopVpn()
     }
+
+    fun checkCurrentState() {
+        vpnRepo.checkCurrentState()
+    }
 }

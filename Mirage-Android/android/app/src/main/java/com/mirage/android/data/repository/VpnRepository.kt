@@ -40,6 +40,9 @@ class VpnRepository(private val context: Context) {
     private val _isBlockQuic = MutableStateFlow(prefs.getBoolean("block_quic", true))
     val isBlockQuic: StateFlow<Boolean> = _isBlockQuic.asStateFlow()
 
+    private val _isUdpMux = MutableStateFlow(prefs.getBoolean("udp_mux", true))
+    val isUdpMux: StateFlow<Boolean> = _isUdpMux.asStateFlow()
+
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var telemetryJob: Job? = null
 
@@ -76,9 +79,38 @@ class VpnRepository(private val context: Context) {
         }
     }
 
+    private val broadcastReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(ctx: Context?, intent: Intent?) {
+            when (intent?.action) {
+                CoreService.ACTION_VPN_STOPPED -> {
+                    scope.launch {
+                        _vpnState.value = VpnState.Disconnected
+                        _connections.value = emptyList()
+                        stopTelemetry()
+                    }
+                }
+                CoreService.ACTION_VPN_STARTED -> {
+                    scope.launch {
+                        _vpnState.value = VpnState.Connected(nodeRepo.getSelectedNode())
+                        startTelemetry()
+                    }
+                }
+            }
+        }
+    }
+
     init {
         CoreController.bind(context)
         CoreController.registerCallback(callback)
+        val filter = android.content.IntentFilter().apply {
+            addAction(CoreService.ACTION_VPN_STOPPED)
+            addAction(CoreService.ACTION_VPN_STARTED)
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(broadcastReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            context.registerReceiver(broadcastReceiver, filter)
+        }
         startTelemetry()
     }
 
@@ -154,6 +186,12 @@ class VpnRepository(private val context: Context) {
         _isBlockQuic.value = block
         prefs.edit().putBoolean("block_quic", block).apply()
         return CoreController.setBlockQuic(block)
+    }
+
+    fun setUdpMux(enabled: Boolean): Boolean {
+        _isUdpMux.value = enabled
+        prefs.edit().putBoolean("udp_mux", enabled).apply()
+        return CoreController.setUdpMux(enabled)
     }
 
     private fun startTelemetry() {

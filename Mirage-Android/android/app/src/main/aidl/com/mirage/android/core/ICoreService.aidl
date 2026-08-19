@@ -23,6 +23,8 @@ interface ICoreService {
     boolean setLogLevel(String level);
     boolean setBlockQuic(boolean block);
     boolean isBlockQuic();
+    boolean setUdpMux(boolean enabled);
+    boolean isUdpMux();
     boolean clearDnsCache();
     boolean setDnsServers(String directDns, String remoteDns);
     String getDirectDns();

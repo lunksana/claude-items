@@ -130,15 +130,29 @@ impl AsyncRead for TunTcpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        let mut total = 0;
         let n = {
             let mut g = lock_inner(&self.stack.inner);
             let sock = g.sockets.get_mut::<tcp::Socket>(self.handle);
             if sock.can_recv() {
-                Some(
-                    sock.recv_slice(buf.initialize_unfilled()).map_err(|e| {
-                        io::Error::new(io::ErrorKind::ConnectionReset, format!("{e:?}"))
-                    })?,
-                )
+                let mut err = None;
+                while sock.can_recv() && buf.remaining() > 0 {
+                    match sock.recv_slice(buf.initialize_unfilled()) {
+                        Ok(n) if n > 0 => {
+                            buf.advance(n);
+                            total += n;
+                        }
+                        Ok(_) => break,
+                        Err(e) => {
+                            err = Some(io::Error::new(io::ErrorKind::ConnectionReset, format!("{e:?}")));
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = err {
+                    return Poll::Ready(Err(e));
+                }
+                Some(total)
             } else if !sock.may_recv() {
                 // 对端已 FIN → EOF
                 None
@@ -148,8 +162,9 @@ impl AsyncRead for TunTcpStream {
             }
         };
         if let Some(n) = n {
-            buf.advance(n);
-            self.stack.poll_now();
+            if n > 0 {
+                self.stack.poll_now();
+            }
         }
         Poll::Ready(Ok(()))
     }

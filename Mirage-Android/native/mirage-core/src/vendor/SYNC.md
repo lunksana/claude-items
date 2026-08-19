@@ -1,8 +1,8 @@
 # Vendored 同步记录
 
-- 上游仓库: /opt/claude/Mirage-rs
-- 上游 commit: `3efd8f3befd679cbb32c2f3b4025591f627ef760`
-- 同步时间: 2026-08-14T22:56:10+08:00
+- 上游仓库: /opt/Mirage-rs
+- 上游 commit: `af6af4c21b02b2c58b49eae2e9cfaf54cf7ff8b3`
+- 同步时间: 2026-08-19T22:17:30+08:00
 
 ## 同步后必须做的事
 1. 检查 $DEST 里是否有对**未 vendored 模块**的引用 (`crate::api` / `crate::ebpf` /

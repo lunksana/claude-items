@@ -719,4 +719,29 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_getGeoTags(
     env.new_string(json).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
 }
 
+/// `boolean setUdpMux(boolean enabled)` — 设置是否开启 UDP 多路复用 (UDP Mux)。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_setUdpMux(
+    _env: JNIEnv,
+    _class: JClass,
+    enabled: jboolean,
+) -> jboolean {
+    mirage_core::proxy::udp_mux::set_udp_mux(enabled != 0, 4);
+    1
+}
+
+/// `boolean isUdpMux()` — 查询当前是否开启 UDP 多路复用。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_isUdpMux(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jboolean {
+    if mirage_core::proxy::udp_mux::udp_mux_enabled() {
+        1
+    } else {
+        0
+    }
+}
+
+
 

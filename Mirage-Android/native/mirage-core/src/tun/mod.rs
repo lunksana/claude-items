@@ -293,6 +293,12 @@ impl TunStack {
             return;
         }
 
+        // ICMP Echo Request for Fake-IP: 本地反射 (ping 代理域名可通, 对齐 Clash/Sing-box 体验)
+        if let Some(reply) = handle_fake_ip_icmp_echo(self, &pkt) {
+            self.write_raw(&reply);
+            return;
+        }
+
         // TCP / 其他 → smoltcp
         self.prescan(&pkt);
 
@@ -465,12 +471,68 @@ impl TunStack {
         });
     }
 
-    /// UDP: (dst_addr, dst_port) 无匹配 socket → 建 bound socket + spawn relay。
-        fn clone_arc(self: &Arc<Self>) -> Arc<Self> {
+    fn clone_arc(self: &Arc<Self>) -> Arc<Self> {
         Arc::clone(self)
     }
 }
 
 fn smol_now(start: Instant) -> SmolInstant {
-    SmolInstant::from_micros(start.elapsed().as_micros() as i64)
+    SmolInstant::from_micros((Instant::now().duration_since(start).as_micros()) as i64)
+}
+
+/// Fake-IP ICMP Echo 本地反射 (ping 代理域名可通)。
+/// 仅针对发往 Fake-IP 网段 (如 198.18.0.0/15) 的 ICMP Echo Request (type 8, code 0)
+/// 原地翻转为 Echo Reply (type 0, code 0)，计算校验和后直接写回 TUN。
+fn handle_fake_ip_icmp_echo(stack: &TunStack, pkt: &[u8]) -> Option<Vec<u8>> {
+    if pkt.len() < 28 {
+        return None;
+    }
+    // 检查是否为 IPv4
+    if (pkt[0] >> 4) != 4 {
+        return None;
+    }
+    let ihl = ((pkt[0] & 0x0F) as usize) * 4;
+    if ihl < 20 || pkt.len() < ihl + 8 {
+        return None;
+    }
+    // 检查协议是否为 ICMP (1)
+    if pkt[9] != 1 {
+        return None;
+    }
+
+    let dst_ip = std::net::Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
+    // 检查是否属于 Fake-IP (反查域名存在或在 198.18.0.0/15 段内)
+    let is_fake = stack.engine().fake_ip_reverse(&std::net::IpAddr::V4(dst_ip)).is_some()
+        || (dst_ip.octets()[0] == 198 && (dst_ip.octets()[1] & 0xFE) == 18);
+    if !is_fake {
+        return None;
+    }
+
+    // 检查 ICMP Type == 8 (Echo Request), Code == 0
+    let icmp_type = pkt[ihl];
+    let icmp_code = pkt[ihl + 1];
+    if icmp_type != 8 || icmp_code != 0 {
+        return None;
+    }
+
+    let mut reply = pkt.to_vec();
+    // 调换源地址与目的地址
+    let src_bytes = [pkt[12], pkt[13], pkt[14], pkt[15]];
+    let dst_bytes = [pkt[16], pkt[17], pkt[18], pkt[19]];
+    reply[12..16].copy_from_slice(&dst_bytes);
+    reply[16..20].copy_from_slice(&src_bytes);
+    // 重新计算 IPv4 头部校验和
+    reply[10..12].copy_from_slice(&[0, 0]);
+    let ip_csum = crate::tun::udp::checksum_public(&reply[0..ihl]);
+    reply[10..12].copy_from_slice(&ip_csum.to_be_bytes());
+
+    // ICMP Type 改为 0 (Echo Reply)
+    reply[ihl] = 0;
+    // 重新计算 ICMP 校验和
+    reply[ihl + 2..ihl + 4].copy_from_slice(&[0, 0]);
+    let icmp_csum = crate::tun::udp::checksum_public(&reply[ihl..]);
+    reply[ihl + 2..ihl + 4].copy_from_slice(&icmp_csum.to_be_bytes());
+
+    debug!("[TUN-ICMP] 反射 Fake-IP Echo Reply: {} → {}", dst_ip, std::net::Ipv4Addr::from(src_bytes));
+    Some(reply)
 }

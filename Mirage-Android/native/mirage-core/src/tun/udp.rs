@@ -49,12 +49,12 @@ pub fn human_bytes(n: u64) -> String {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct FlowKey {
-    src: IpAddr,
-    src_port: u16,
-    dst: IpAddr,
-    dst_port: u16,
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FlowKey {
+    pub src: IpAddr,
+    pub src_port: u16,
+    pub dst: IpAddr,
+    pub dst_port: u16,
 }
 
 /// UDP 流管理器 (挂在 TunStack 上)。
@@ -152,25 +152,13 @@ async fn udp_flow_relay(
         return udp_flow_direct(stack, engine, key, rx).await;
     }
 
-    // 建 UDP 模式隧道
+    // 取出站节点
     let node = match engine.outbounds.get(engine.default_tag()) {
         Some(n) => n,
         None => return,
     };
     let leaf = node.resolve_leaf();
     let OutboundNode::Mirage { pool, .. } = &*leaf else { return };
-    let mut tunnel = match pool.get().await {
-        Ok(t) => t,
-        Err(e) => {
-            debug!("[TUN-UDP] 隧道不可用: {e}");
-            return;
-        }
-    };
-    if tunnel.writer.send_data(&[0x00]).await.is_err() {
-        return;
-    }
-    let writer = Arc::new(Mutex::new(tunnel.writer));
-    let mut reader = tunnel.reader;
 
     // 目标描述: fake-IP → 域名 (ATYP=0x03); 否则裸 IP
     let (target_domain, target_ip) = if let Some(domain) = engine.fake_ip_reverse(&key.dst) {
@@ -184,8 +172,99 @@ async fn udp_flow_relay(
         format!("{}:{}", key.dst, key.dst_port)
     };
     let (cid, conn_up, conn_down) = crate::monitor::record_conn_start("UDP", &target_display, "隧道代理");
-    let _ = flow_id;
-    debug!("[TUN-UDP] #{} 新会话 {} → {}", flow_id, fmt_flow(&key), target_domain.as_deref().unwrap_or(""));
+
+    // ── UDP Mux 路径: 多流复用 K 条长命共享隧道 (脱钩 pool_size 限制) ──
+    if crate::proxy::udp_mux::udp_mux_enabled() {
+        let mtun = match crate::proxy::udp_mux::get_mux_tunnel(pool, &key).await {
+            Ok(t) => t,
+            Err(e) => {
+                debug!("[TUN-UDP] Mirage-MUX 隧道不可用: {e}");
+                crate::monitor::record_conn_close(cid, 0, 0);
+                return;
+            }
+        };
+        let sid = mtun.alloc_sid();
+        let (_sid_guard, got_downlink) = match mtun.try_register(
+            sid,
+            stack.clone(),
+            key,
+            Some(conn_down.clone()),
+        ) {
+            Some(v) => v,
+            None => {
+                debug!("[TUN-UDP] Mirage-MUX 单隧道 sid 到上限, 丢弃 (客户端回落 TCP)");
+                crate::monitor::record_conn_close(cid, 0, 0);
+                return;
+            }
+        };
+
+        debug!("[TUN-UDP] #{} 新 Mux 会话 {} → {} (sid={})", flow_id, fmt_flow(&key), target_display, sid);
+
+        let shared_tx = mtun.uplink();
+        let up_atomic = conn_up.clone();
+        let started = std::time::Instant::now();
+        let mut sent: u64 = 0;
+
+        loop {
+            let to = if got_downlink.load(Ordering::Relaxed) {
+                UDP_IDLE
+            } else {
+                crate::proxy::udp_mux::MUX_FIRST_DOWNLINK.saturating_sub(started.elapsed())
+            };
+            if to.is_zero() {
+                break; // 首下行窗口内无下行 → 快拆释放 sid
+            }
+
+            let (_src, _dst, payload) = match tokio::time::timeout(to, rx.recv()).await {
+                Ok(Some(v)) => v,
+                _ => break,
+            };
+
+            let frame = match &target_domain {
+                Some(d) => crate::proxy::udp_mux::frame_mux_domain(sid, d, key.dst_port, &payload),
+                None => match key.dst {
+                    IpAddr::V4(v4) => crate::proxy::udp_mux::frame_mux_ipv4(sid, &v4, key.dst_port, &payload),
+                    IpAddr::V6(v6) => crate::proxy::udp_mux::frame_mux_ipv6(sid, &v6, key.dst_port, &payload),
+                },
+            };
+            if let Some(f) = frame {
+                let plen = payload.len() as u64;
+                if shared_tx.send(f).await.is_err() {
+                    break;
+                }
+                sent += plen;
+                up_atomic.fetch_add(plen, Ordering::Relaxed);
+            }
+        }
+
+        let recv_bytes = conn_down.load(Ordering::Relaxed);
+        crate::monitor::record_conn_close(cid, sent, recv_bytes);
+        debug!(
+            "[TUN-UDP] #{} Mux 会话关闭 (↑{} ↓{})",
+            flow_id,
+            human_bytes(sent),
+            human_bytes(recv_bytes)
+        );
+        return;
+    }
+
+    // ── 单流独占路径 (Legacy 0x00 模式) ──
+    let mut tunnel = match pool.get().await {
+        Ok(t) => t,
+        Err(e) => {
+            debug!("[TUN-UDP] 隧道不可用: {e}");
+            crate::monitor::record_conn_close(cid, 0, 0);
+            return;
+        }
+    };
+    if tunnel.writer.send_data(&[0x00]).await.is_err() {
+        crate::monitor::record_conn_close(cid, 0, 0);
+        return;
+    }
+    let writer = Arc::new(Mutex::new(tunnel.writer));
+    let mut reader = tunnel.reader;
+
+    debug!("[TUN-UDP] #{} 新单流会话 {} → {}", flow_id, fmt_flow(&key), target_domain.as_deref().unwrap_or(""));
 
     // 下行: rx → 封帧 → 隧道 (机会式合帧)
     let dn_writer = writer.clone();
@@ -378,9 +457,13 @@ fn build_reply_ip(src: SocketAddr, dst: SocketAddr, payload: &[u8]) -> Option<Ve
     }
 }
 
-/// 公开包装 (DNS 应答用)。
+/// 公开包装 (DNS 应答 / ICMP 反射用)。
 pub fn build_reply_ip_public(src: SocketAddr, dst: SocketAddr, payload: &[u8]) -> Option<Vec<u8>> {
     build_reply_ip(src, dst, payload)
+}
+
+pub fn checksum_public(data: &[u8]) -> u16 {
+    checksum(data)
 }
 
 fn checksum(data: &[u8]) -> u16 {

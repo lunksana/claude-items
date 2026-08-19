@@ -163,6 +163,15 @@ pub fn verify_session_token(password: &str, token: &[u8; 32], tolerance_secs: u6
     true
 }
 
+/// 会话 bootstrap 加密帧 (客户端读 TIME_SYNC / 服务端读 first_chunk) 解密失败时的统一排查提示。
+pub fn session_decrypt_failure_hint() -> &'static str {
+    "bootstrap 加密帧读取失败 (解密失败或帧畸形)。最常见是**会话密钥失配**, 排查: \
+     ①两端 password 是否完全一致; \
+     ②系统时钟是否与对端相差超过容差 (默认 ±60s) —— 两端各跑 `date -u` 对一下, 并确认 NTP 正常; \
+     ③两端高级特征是否一致: `pfs`/`tls_padding`/`cipher_agility` 一端开一端没开 (或版本过老不支持) \
+     都会改会话密钥或分帧派生 → 必然失配。若三项都排除, 可能是链路损坏或协议版本不匹配。"
+}
+
 #[cfg(test)]
 mod tolerance_tests {
     use super::ts_within_tolerance;

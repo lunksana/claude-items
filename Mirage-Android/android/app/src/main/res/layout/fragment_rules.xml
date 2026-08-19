@@ -95,6 +95,53 @@
         </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
+    <!-- UDP 多路复用 (UDP Mux) 开关卡片 -->
+    <com.google.android.material.card.MaterialCardView
+        style="@style/MirageCard"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        app:cardCornerRadius="12dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingHorizontal="14dp"
+            android:paddingVertical="10dp">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="UDP 多路复用 (UDP Mux)"
+                    android:textColor="@color/meow_ink"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="在 4 条共享隧道内复用所有 UDP 会话，解决高并发下连接池耗尽问题 (需服务端 ≥v0.9.0)"
+                    android:textColor="@color/meow_ink_secondary"
+                    android:textSize="11sp" />
+            </LinearLayout>
+
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/switchUdpMux"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true" />
+        </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
     <!-- Geo 规则集 (geosite.dat / geoip.dat) 管理卡片 -->
     <com.google.android.material.card.MaterialCardView
         style="@style/MirageCard"

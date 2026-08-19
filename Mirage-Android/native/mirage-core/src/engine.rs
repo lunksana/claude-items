@@ -36,6 +36,7 @@ pub struct NodeInfo {
     pub sni: String,
     pub pool_size: usize,
     pub pfs: bool,
+    pub udp_mux: bool,
 }
 
 impl NodeInfo {
@@ -48,6 +49,7 @@ impl NodeInfo {
             sni: uri.sni.clone(),
             pool_size: uri.pool_size.unwrap_or(8),
             pfs: false,
+            udp_mux: uri.udp_mux.unwrap_or(true),
         }
     }
 }
@@ -62,9 +64,10 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(node: &NodeInfo) -> Result<Arc<Self>> {
+        crate::proxy::udp_mux::set_udp_mux(node.udp_mux, 4);
         let cfg = config::single_mirage_config(
             &node.tag, &node.server, node.server_port, &node.password,
-            &node.sni, node.pool_size, node.pfs,
+            &node.sni, node.pool_size, node.pfs, node.udp_mux,
         );
         let mgr = OutboundManager::new(&cfg).context("构建出站失败")?;
         let fake_ip = FakeIpMapper::new(FAKE_IP_CIDR).context("初始化 fake-IP 失败")?;

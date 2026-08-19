@@ -52,6 +52,28 @@
                 android:value="Mirage VPN Proxy Tunnel" />
         </service>
 
+        <!-- 通知栏快捷动作广播接收器 (与 CoreService 同进程) -->
+        <receiver
+            android:name=".receiver.CoreActionReceiver"
+            android:process=":core"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.mirage.android.STOP" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 下拉控制中心快捷设置磁贴 (Quick Settings Tile) -->
+        <service
+            android:name=".service.MirageTileService"
+            android:icon="@drawable/ic_notification_mirage"
+            android:label="Mirage VPN"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.TileService" />
+            </intent-filter>
+        </service>
+
         <meta-data
             android:name="com.google.android.gms.car.application"
             android:resource="@xml/car_app" />
