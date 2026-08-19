@@ -248,6 +248,16 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
 
     // 分流: fake-IP 反查域名 (DNS 层已决定走向) / 裸 IP (直连标记+CN 段 → 直连)
     let direct_domain = stack.engine().fake_ip_reverse(&dst.0);
+
+    if crate::direct::should_block(direct_domain.as_deref(), Some(dst.0)) {
+        let target_name = direct_domain.as_deref().map(|d| d.to_string()).unwrap_or_else(|| dst.0.to_string());
+        let (cid, _, _) = crate::monitor::record_conn_start("TCP", &format!("{}:{}", target_name, dst.1), "规则拦截 (Block)");
+        crate::monitor::record_conn_close(cid, 0, 0);
+        stream.close();
+        debug!("[TUN-TCP] 规则拦截: 阻断连接 → {}:{}", target_name, dst.1);
+        return;
+    }
+
     let is_direct = match &direct_domain {
         Some(d) => {
             // 域名: 用户规则说直连 → 需要真实 IP; DNS 分流已把直连域名解析为真实 IP

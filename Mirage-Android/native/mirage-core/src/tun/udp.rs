@@ -75,10 +75,20 @@ impl UdpEngine {
 
     /// 泵线程调用: 把一个 TUN 数据报送进对应流。无流则建 (超限丢)。
     pub fn feed(&self, stack: Arc<TunStack>, src: SocketAddr, dst: SocketAddr, payload: &[u8], raw_pkt: &[u8]) {
+        let fake_domain = self.engine.fake_ip_reverse(&dst.ip());
+
+        // 规则拦截 (Block / Reject): 立即回送 ICMP Port Unreachable 并丢弃
+        if crate::direct::should_block(fake_domain.as_deref(), Some(dst.ip())) {
+            if let Some(icmp) = build_icmp_port_unreachable(raw_pkt) {
+                stack.write_raw(&icmp);
+            }
+            debug!("[TUN-UDP] 规则拦截: 阻断 UDP {} → {}", src, dst);
+            return;
+        }
+
         // 屏蔽海外 QUIC (UDP 443): 仅对海外/代理连接回送 ICMP Port Unreachable, 促使客户端 Cronet/OkHttp 瞬间降级到 HTTP/2 TCP 隧道;
         // 国内直连 (如国内视频、腾讯、阿里等 QUIC) 正常放行直连传输
         if dst.port() == 443 && crate::direct::is_block_quic() {
-            let fake_domain = self.engine.fake_ip_reverse(&dst.ip());
             let is_direct = crate::direct::should_direct(fake_domain.as_deref(), Some(dst.ip()));
             if !is_direct {
                 if let Some(icmp) = build_icmp_port_unreachable(raw_pkt) {

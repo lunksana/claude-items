@@ -32,6 +32,9 @@ object ConfigBackup {
         val dnsPrefs = ctx.getSharedPreferences("mirage_dns_prefs", Context.MODE_PRIVATE)
         root.put("direct_dns", dnsPrefs.getString("direct_dns", "223.5.5.5") ?: "223.5.5.5")
         root.put("remote_dns", dnsPrefs.getString("remote_dns", "1.1.1.1") ?: "1.1.1.1")
+        // Geo 配置
+        root.put("geosite_url", GeoManager.getGeositeUrl(ctx))
+        root.put("geoip_url", GeoManager.getGeoipUrl(ctx))
         // QUIC 设置
         val vpnPrefs = ctx.getSharedPreferences("mirage_vpn_prefs", Context.MODE_PRIVATE)
         root.put("block_quic", vpnPrefs.getBoolean("block_quic", true))
@@ -110,6 +113,15 @@ object ConfigBackup {
                 if (directDns.isNotBlank()) directDns else dnsRepo.getDirectDns(),
                 if (remoteDns.isNotBlank()) remoteDns else dnsRepo.getRemoteDns()
             )
+        }
+        // Geo 配置
+        if (root.has("geosite_url")) {
+            val u = root.optString("geosite_url", "")
+            if (u.isNotBlank()) GeoManager.setGeositeUrl(ctx, u)
+        }
+        if (root.has("geoip_url")) {
+            val u = root.optString("geoip_url", "")
+            if (u.isNotBlank()) GeoManager.setGeoipUrl(ctx, u)
         }
         // QUIC
         if (root.has("block_quic")) {

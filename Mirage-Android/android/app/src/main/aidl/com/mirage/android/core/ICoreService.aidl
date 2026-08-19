@@ -38,6 +38,8 @@ interface ICoreService {
     long getBuiltinIpCount();
     /** 完整握手测活, RTT ms 或 -1。 */
     long testNode(String uri, int timeoutMs);
+    String loadGeoFiles(String geositePath, String geoipPath);
+    String getGeoTags();
     void registerCallback(ICoreCallback cb);
     void unregisterCallback(ICoreCallback cb);
 }

@@ -90,10 +90,9 @@ class CoreManagerDialog(
             val fileName = uri.lastPathSegment ?: "libmirage_custom.so"
             val displayName = fileName.substringAfterLast("/").removeSuffix(".so")
 
-            val stream = context.contentResolver.openInputStream(uri)
-                ?: throw IllegalArgumentException("无法打开所选文件")
-
-            val result = coreManager.importCore(stream, displayName)
+            val result = context.contentResolver.openInputStream(uri)?.use { stream ->
+                coreManager.importCore(stream, displayName)
+            } ?: throw IllegalArgumentException("无法打开所选文件")
             if (result.isSuccess) {
                 val core = result.getOrThrow()
                 coreManager.setActiveCore(core.id)

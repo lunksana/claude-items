@@ -21,6 +21,7 @@
 pub mod config;
 pub mod crypto;
 pub mod direct;
+pub mod geo;
 pub mod dns;
 pub mod engine;
 pub mod net_util;

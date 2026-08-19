@@ -89,6 +89,12 @@ object MirageNative {
     /** 内置中国 IP 段数量。 */
     external fun getBuiltinIpCount(): Long
 
+    /** 加载/重新加载 Geo 文件 (geosite.dat 与 geoip.dat)，返回 JSON 状态。 */
+    external fun loadGeoFiles(geositePath: String, geoipPath: String): String
+
+    /** 获取当前已加载的所有 GeoSite tags 和 GeoIP codes (JSON)。 */
+    external fun getGeoTags(): String
+
     /**
      * Rust 侧同步调用 (隧道 socket connect 前): 把 fd 交给当前活跃的 VpnService protect。
      * 必须同步返回 (protect 设置 SO_MARK 影响路由, 晚了会导致隧道流量进 TUN 环路)。

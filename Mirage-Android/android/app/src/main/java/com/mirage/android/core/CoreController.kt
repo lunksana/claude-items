@@ -98,6 +98,14 @@ object CoreController {
     fun getBuiltinDomains(): Array<String> = call { it.builtinDomains } ?: emptyArray()
     fun getBuiltinIpCount(): Long = call { it.builtinIpCount } ?: 0
     fun testNode(uri: String, timeoutMs: Int): Long = call { it.testNode(uri, timeoutMs) } ?: -1
+    fun loadGeoFiles(geositePath: String = "", geoipPath: String = ""): String =
+        call { it.loadGeoFiles(geositePath, geoipPath) } ?: runCatching {
+            MirageNative.loadGeoFiles(geositePath, geoipPath)
+        }.getOrDefault("{\"status\":\"error\"}")
+    fun getGeoTags(): String =
+        call { it.geoTags } ?: runCatching {
+            MirageNative.getGeoTags()
+        }.getOrDefault("{}")
 
     fun registerCallback(cb: ICoreCallback) {
         callbacks.add(cb)

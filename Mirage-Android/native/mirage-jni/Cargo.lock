@@ -453,6 +453,7 @@ dependencies = [
  "jni",
  "libc",
  "mirage-core",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

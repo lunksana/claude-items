@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import androidx.core.app.NotificationCompat
+import com.mirage.android.core.GeoManager
 import com.mirage.android.core.ICoreCallback
 import com.mirage.android.core.ICoreService
 import com.mirage.android.core.LogStore
@@ -98,7 +99,8 @@ class CoreService : VpnService() {
         tunFd = fd
         startForegroundCompat()
 
-        // 注入规则
+        // 注入规则与 Geo 文件
+        runCatching { GeoManager.loadGeoFilesToNative(this) }
         runCatching { MirageNative.setRules(RuleStore.toJson(this)) }
 
         val poolSize = if (poolSizeOverride > 0) poolSizeOverride else NodeStore.getPoolSize(this)
@@ -420,6 +422,10 @@ class CoreService : VpnService() {
         override fun getBuiltinDomains(): Array<String> = getBuiltinDomainsInternal()
         override fun getBuiltinIpCount(): Long = getBuiltinIpCountInternal()
         override fun testNode(uri: String, timeoutMs: Int): Long = testNodeInternal(uri, timeoutMs)
+        override fun loadGeoFiles(geositePath: String?, geoipPath: String?): String =
+            GeoManager.loadGeoFilesToNative(this@CoreService, geositePath, geoipPath)
+        override fun getGeoTags(): String =
+            runCatching { MirageNative.getGeoTags() }.getOrDefault("{}")
         override fun registerCallback(cb: ICoreCallback?) = registerCallbackInternal(cb)
         override fun unregisterCallback(cb: ICoreCallback?) = unregisterCallbackInternal(cb)
     }
@@ -457,9 +463,9 @@ class CoreService : VpnService() {
                         && caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 }
                 if (realNet != null) {
-                    val pfd = android.os.ParcelFileDescriptor.fromFd(fd)
-                    realNet.bindSocket(pfd.fileDescriptor)
-                    pfd.detachFd()
+                    android.os.ParcelFileDescriptor.fromFd(fd).use { pfd ->
+                        realNet.bindSocket(pfd.fileDescriptor)
+                    }
                     netOk = true
                 } else {
                     LogStore.append("[core] 未找到非 VPN 底层网络")

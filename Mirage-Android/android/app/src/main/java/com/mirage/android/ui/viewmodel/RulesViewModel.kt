@@ -57,12 +57,22 @@ class RulesViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun addRule(pattern: String, kind: String, action: String) {
-        val type = if (kind == "cidr") "cidr" else "domain"
+        val type = when (kind) {
+            "cidr" -> "cidr"
+            "geosite" -> "geosite"
+            "geoip" -> "geoip"
+            else -> "domain"
+        }
         ruleRepo.addRule(Rule(type = type, kind = kind, pattern = pattern.trim().lowercase(), action = action))
     }
 
     fun updateRule(index: Int, pattern: String, kind: String, action: String) {
-        val type = if (kind == "cidr") "cidr" else "domain"
+        val type = when (kind) {
+            "cidr" -> "cidr"
+            "geosite" -> "geosite"
+            "geoip" -> "geoip"
+            else -> "domain"
+        }
         ruleRepo.updateRule(index, Rule(type = type, kind = kind, pattern = pattern.trim().lowercase(), action = action))
     }
 

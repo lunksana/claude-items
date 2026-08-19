@@ -43,10 +43,10 @@ class RuleAdapter(
                 binding.tvHits.visibility = View.GONE
             }
 
-            if (rule.isDirect) {
-                binding.tvAction.setTextColor(Color.parseColor("#10B981")) // 绿
-            } else {
-                binding.tvAction.setTextColor(Color.parseColor("#0077CC")) // 蓝
+            when {
+                rule.isDirect -> binding.tvAction.setTextColor(Color.parseColor("#10B981")) // 绿
+                rule.isBlock -> binding.tvAction.setTextColor(Color.parseColor("#EF4444")) // 红
+                else -> binding.tvAction.setTextColor(Color.parseColor("#0077CC")) // 蓝
             }
 
             binding.btnMore.setOnClickListener { v ->

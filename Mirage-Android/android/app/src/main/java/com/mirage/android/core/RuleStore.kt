@@ -88,15 +88,19 @@ object RuleStore {
     fun toJson(ctx: Context): String {
         val arr = JSONArray()
         for (r in getRules(ctx)) {
-            val kind = when (r.kind) {
-                "exact" -> "exact"; "keyword" -> "keyword"
-                "regex" -> "regex"; "cidr" -> "cidr"
+            val kind = when (r.kind.lowercase()) {
+                "geosite" -> "geosite"
+                "geoip" -> "geoip"
+                "exact" -> "exact"
+                "keyword" -> "keyword"
+                "regex" -> "regex"
+                "cidr" -> "cidr"
                 else -> "suffix"
             }
             arr.put(JSONObject()
                 .put("kind", kind)
-                .put("pattern", r.pattern.trim().lowercase())
-                .put("action", r.action))
+                .put("pattern", r.pattern.trim())
+                .put("action", r.action.trim().lowercase()))
         }
         return JSONObject().put("rules", arr).toString()
     }

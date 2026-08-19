@@ -315,6 +315,18 @@ pub fn handle_dns_query(stack: Arc<TunStack>, client: std::net::SocketAddr, quer
     DNS_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     debug!("[TUN-DNS] 查询 {} (type {})", domain, qtype);
 
+    if direct::should_block(Some(&domain), None) {
+        let (cid, _conn_up, _conn_down) = crate::monitor::record_conn_start(
+            "DNS",
+            &format!("{domain}:53"),
+            "规则拦截 (Block)",
+        );
+        let a = if qtype == 1 { Some([0, 0, 0, 0]) } else { None };
+        send_dns_reply(&stack, client, query, &domain, qtype, a, question_len);
+        crate::monitor::record_conn_close(cid, query.len() as u64, 64);
+        return;
+    }
+
     let is_direct = qtype == 1 && direct::should_direct(Some(&domain), None);
     let (cid, _conn_up, _conn_down) = crate::monitor::record_conn_start(
         "DNS",

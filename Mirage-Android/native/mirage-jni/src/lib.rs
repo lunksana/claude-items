@@ -686,3 +686,37 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_getRemoteDns(
     env.new_string(ip).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
 }
 
+/// `String loadGeoFiles(String geositePath, String geoipPath)` — 加载/重新加载 Geo 文件。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_loadGeoFiles(
+    mut env: JNIEnv,
+    _class: JClass,
+    geosite_path: JString,
+    geoip_path: JString,
+) -> jstring {
+    let site_p: String = env.get_string(&geosite_path).map(|s| s.into()).unwrap_or_default();
+    let ip_p: String = env.get_string(&geoip_path).map(|s| s.into()).unwrap_or_default();
+
+    let (site_count, ip_count) = mirage_core::geo::load_geo_files(&site_p, &ip_p);
+    let result = serde_json::json!({
+        "status": "ok",
+        "geosite_tags": site_count,
+        "geoip_codes": ip_count,
+        "geosite_path": site_p,
+        "geoip_path": ip_p,
+    }).to_string();
+
+    env.new_string(result).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
+}
+
+/// `String getGeoTags()` — 获取当前已加载的所有 GeoSite tags 和 GeoIP codes。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_getGeoTags(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let json = mirage_core::geo::get_geo_tags_json();
+    env.new_string(json).unwrap_or_else(|_| JString::from(JObject::null())).into_raw()
+}
+
+
