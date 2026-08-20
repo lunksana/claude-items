@@ -482,6 +482,54 @@ dialog::backdrop { background: rgba(12, 18, 32, .55); backdrop-filter: blur(3px)
 
 .nav-ico { font-size: 15px; line-height: 1; }
 
+/* ---------------- 暗色主题 ---------------- */
+html[data-theme="dark"] {
+  --bg: #0d1320;
+  --panel: #151d2e;
+  --panel-2: #1a2337;
+  --border: #25304a;
+  --border-strong: #36435f;
+  --text: #e4eaf4;
+  --text-soft: #bac5d8;
+  --muted: #7d8aa5;
+  --primary: #4f8df9;
+  --primary-dark: #3b76e0;
+  --primary-soft: #1c2c4d;
+  --ok: #3ecf74;
+  --ok-bg: #123322;
+  --warn: #f2b544;
+  --warn-bg: #3a2c10;
+  --danger: #f2685c;
+  --danger-bg: #3a1b1e;
+  --info: #3db8d8;
+  --info-bg: #0f2f3a;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .25), 0 1px 3px rgba(0, 0, 0, .2);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, .35);
+  --shadow-lg: 0 20px 52px rgba(0, 0, 0, .55);
+}
+/* 代码中散落的硬编码浅色，在暗色下覆盖 */
+html[data-theme="dark"] .btn { background: #232e47; color: #cdd7e6; }
+html[data-theme="dark"] .btn:hover { background: #2b3854; }
+html[data-theme="dark"] .btn.outline { background: transparent; }
+html[data-theme="dark"] .btn.outline:hover { background: var(--primary-soft); }
+html[data-theme="dark"] .badge { background: #232e47; color: #aeb9cc; }
+html[data-theme="dark"] .status-pill { background: #232e47; color: #aeb9cc; }
+html[data-theme="dark"] tbody tr:hover { background: #1a2337; }
+html[data-theme="dark"] .disk-bar-wrap, html[data-theme="dark"] .upload-task-bar-wrap { background: #232e47; }
+html[data-theme="dark"] .toggle-pw:hover { background: var(--panel-2); }
+html[data-theme="dark"] .file-props { background: var(--panel-2); }
+html[data-theme="dark"] .tree-list-box { background: var(--panel-2); }
+html[data-theme="dark"] ::-webkit-scrollbar-thumb { background: #3a465f; }
+html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #4a5874; }
+html[data-theme="dark"] .preview-box { background: #10151f; }
+
+/* ---------------- 可排序表头 / 统一确认对话框 ---------------- */
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--primary); }
+.sort-ind { font-size: 10px; margin-left: 2px; }
+
+.ui-msg { font-size: 13.5px; color: var(--text-soft); line-height: 1.7; white-space: pre-line; word-break: break-word; }
+
 /* ---------------- 响应式 ---------------- */
 /* 平板 / 窄屏：侧栏收成图标栏（图标保留，文字隐藏）*/
 @media (max-width: 860px) {

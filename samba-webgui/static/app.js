@@ -68,6 +68,60 @@ document.querySelectorAll(".toggle-pw").forEach((btn) => {
   });
 });
 
+// ---------- 主题（暗色 / 浅色）---------
+const savedTheme = localStorage.getItem("swg-theme") || "light";
+document.documentElement.dataset.theme = savedTheme;
+function applyThemeBtn() {
+  const b = $("btn-theme");
+  if (!b) return;
+  const dark = document.documentElement.dataset.theme === "dark";
+  b.innerHTML = (dark ? "☀️" : "🌙") + ' <span class="btn-label">' + (dark ? "浅色模式" : "暗色模式") + "</span>";
+}
+applyThemeBtn();
+$("btn-theme")?.addEventListener("click", () => {
+  document.documentElement.dataset.theme =
+    document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  localStorage.setItem("swg-theme", document.documentElement.dataset.theme);
+  applyThemeBtn();
+});
+
+// ---------- 统一确认 / 输入对话框（替代原生 confirm/prompt，观感一致）---------
+let uiResolve = null;
+function uiConfirm(message, opts = {}) {
+  return new Promise((resolve) => {
+    const inp = $("ui-input");
+    if (inp) inp.style.display = "none";
+    if ($("ui-msg")) $("ui-msg").textContent = message;
+    if ($("ui-title")) $("ui-title").textContent = opts.title || "请确认";
+    if ($("ui-ok")) { $("ui-ok").textContent = opts.okText || "确定"; $("ui-ok").className = "btn " + (opts.danger ? "danger" : "primary"); }
+    if ($("ui-cancel")) $("ui-cancel").style.display = "";
+    uiResolve = resolve;
+    $("ui-dialog").showModal();
+  });
+}
+function uiPrompt(title, placeholder, value = "") {
+  return new Promise((resolve) => {
+    const inp = $("ui-input");
+    if (inp) { inp.style.display = ""; inp.placeholder = placeholder || ""; inp.value = value; inp.focus(); inp.select(); }
+    if ($("ui-msg")) $("ui-msg").textContent = "";
+    if ($("ui-title")) $("ui-title").textContent = title;
+    if ($("ui-ok")) { $("ui-ok").textContent = "确定"; $("ui-ok").className = "btn primary"; }
+    if ($("ui-cancel")) $("ui-cancel").style.display = "";
+    uiResolve = resolve;
+    $("ui-dialog").showModal();
+  });
+}
+function uiDialogClose(val) {
+  if (uiResolve) { const r = uiResolve; uiResolve = null; r(val); }
+  $("ui-dialog").close();
+}
+$("ui-ok")?.addEventListener("click", () => {
+  const inp = $("ui-input");
+  uiDialogClose(inp && inp.style.display !== "none" ? inp.value : true);
+});
+$("ui-cancel")?.addEventListener("click", () => uiDialogClose(false));
+$("ui-dialog")?.addEventListener("cancel", (e) => { e.preventDefault(); uiDialogClose(false); });
+
 // ---------- 视图与导航切换 ----------
 function showLogin() {
   $("login-view")?.classList.remove("hidden");
@@ -82,6 +136,7 @@ function showMain() {
   loadUsers();
   refreshShareSelect();
   loadSettings(); // 让"还原上次配置"按钮尽早知道是否有备份
+  scheduleStatusRefresh();
 }
 
 let activeTab = "status";
@@ -103,7 +158,7 @@ document.querySelectorAll(".nav-item").forEach((btn) => {
       const sec = $("tab-" + t);
       if (sec) sec.classList.toggle("hidden", t !== activeTab);
     });
-    if (activeTab === "status") loadStatus();
+    if (activeTab === "status") { loadStatus(); scheduleStatusRefresh(); }
     if (activeTab === "shares") loadShares();
     if (activeTab === "users") loadUsers();
     if (activeTab === "files") { refreshShareSelect(); loadFiles(); }
@@ -130,7 +185,7 @@ $("login-form")?.addEventListener("submit", async (e) => {
 });
 
 $("btn-logout")?.addEventListener("click", async () => {
-  if (!confirm("确定要退出 Samba 管理后台？")) return;
+  if (!await uiConfirm("确定要退出 Samba 管理后台？")) return;
   try { await api("/api/logout", { method: "POST" }); } catch (_) {}
   showLogin();
 });
@@ -237,7 +292,7 @@ async function loadStatus() {
       connsTbody.querySelectorAll("[data-kick]").forEach((b) => {
         b.addEventListener("click", async () => {
           const pid = +b.dataset.kick;
-          if (!confirm(`确定要强制断开 PID 为 ${pid} 的客户端会话连接？`)) return;
+          if (!await uiConfirm(`确定要强制断开 PID 为 ${pid} 的客户端会话连接？`, { danger: true, okText: "断开" })) return;
           try {
             await api("/api/status/disconnect", { json: { pid } });
             toast("客户端会话已成功断开");
@@ -254,11 +309,21 @@ $("btn-refresh-status")?.addEventListener("click", () => {
   loadStatus();
 });
 
+// 监控大盘自动刷新（可选，10s 轮询，仅状态页激活时执行）
+let statusTimer = null;
+function scheduleStatusRefresh() {
+  if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+  if ($("auto-refresh")?.checked) {
+    statusTimer = setInterval(() => { if (activeTab === "status") loadStatus(); }, 10000);
+  }
+}
+$("auto-refresh")?.addEventListener("change", scheduleStatusRefresh);
+
 document.querySelectorAll(".service-actions button[data-action]").forEach((btn) => {
   btn.addEventListener("click", async () => {
     const act = btn.dataset.action;
     const labels = { restart: "重启服务", reload: "热加载配置", stop: "停止服务", start: "启动服务" };
-    if (act === "stop" && !confirm("警告：停止 Samba 服务将断开所有在线连接和传输，确定执行吗？")) return;
+    if (act === "stop" && !await uiConfirm("警告：停止 Samba 服务将断开所有在线连接和传输，确定执行吗？", { danger: true, okText: "停止服务" })) return;
     try {
       toast(`正在${labels[act] || act}...`);
       const r = await api("/api/status/service", { json: { action: act } });
@@ -304,7 +369,7 @@ async function loadShares() {
 
     tbody.querySelectorAll("[data-del]").forEach((b) =>
       b.addEventListener("click", async () => {
-        if (!confirm(`确定要从 Samba 配置中删除共享项目「${b.dataset.del}」吗？（提示：宿主物理磁盘上的文件或文件夹不会被任何删除）`)) return;
+        if (!await uiConfirm(`确定要从 Samba 配置中删除共享项目「${b.dataset.del}」吗？（提示：宿主物理磁盘上的文件或文件夹不会被任何删除）`, { danger: true, okText: "删除" })) return;
         try {
           const r = await api("/api/shares/" + encodeURIComponent(b.dataset.del), { method: "DELETE" });
           toast(r.message || "共享目录已删除");
@@ -315,7 +380,7 @@ async function loadShares() {
     tbody.querySelectorAll("[data-migrate]").forEach((b) =>
       b.addEventListener("click", async () => {
         const name = b.dataset.migrate;
-        if (!confirm(`确定将原主配置中的共享「${name}」接管至 WebGUI 管理平台中托管吗？\n接管后原 smb.conf 中的配置项将被注释保留，您随后即可直接对该目录配置所有读写及高级兼容参数！`)) return;
+        if (!await uiConfirm(`确定将原主配置中的共享「${name}」接管至 WebGUI 管理平台中托管吗？\n接管后原 smb.conf 中的配置项将被注释保留，您随后即可直接对该目录配置所有读写及高级兼容参数！`, { title: "接管共享", okText: "接管" })) return;
         try {
           const r = await api("/api/shares/migrate/" + encodeURIComponent(name), { method: "POST" });
           toast(r.msg || "接管成功");
@@ -646,7 +711,7 @@ async function loadUsers() {
 
     tbody.querySelectorAll("[data-deluser]").forEach((b) =>
       b.addEventListener("click", async () => {
-        if (!confirm(`确定要从 Samba 数据库中删除用户「${b.dataset.deluser}」吗？`)) return;
+        if (!await uiConfirm(`确定要从 Samba 数据库中删除用户「${b.dataset.deluser}」吗？`, { danger: true, okText: "删除" })) return;
         try {
           await api("/api/users/" + encodeURIComponent(b.dataset.deluser), { method: "DELETE" });
           toast("用户已删除"); loadUsers();
@@ -752,7 +817,7 @@ $("user-group-form")?.addEventListener("submit", async (e) => {
 let lastBackupTs = null;
 async function restoreConfig() {
   const when = lastBackupTs ? `（备份于 ${fmtTime(lastBackupTs)}）` : "";
-  if (!confirm(`确定还原到最近一次修改前的配置吗？${when}\n这会撤销你上一次对共享/全局配置的改动，并重新加载 Samba。`)) return;
+  if (!await uiConfirm(`确定还原到最近一次修改前的配置吗？${when}\n这会撤销你上一次对共享/全局配置的改动，并重新加载 Samba。`, { title: "还原配置", okText: "还原" })) return;
   try {
     const r = await api("/api/config/restore", { method: "POST" });
     toast(r.message || "已还原上次配置");
@@ -834,9 +899,15 @@ function renderBreadcrumb() {
   }
   const box = $("breadcrumb");
   if (box) {
-    box.innerHTML = html;
+    box.innerHTML = html + ' <button class="btn mini outline" id="btn-copy-path" title="复制当前相对路径">📋</button>';
     box.querySelectorAll("a").forEach((a) =>
       a.addEventListener("click", () => { curPath = a.dataset.goto; loadFiles(); }));
+    $("btn-copy-path")?.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(curPath || "");
+        toast("已复制路径: " + (curPath || "（共享根）"));
+      } catch (_) { toast("复制失败，请手动选中路径", true); }
+    });
   }
 }
 
@@ -852,10 +923,22 @@ async function loadFiles() {
   const seq = ++filesReqSeq;
   const reqShare = curShare, reqPath = curPath;
   try {
-    const { entries } = await api(`/api/files?share=${encodeURIComponent(curShare)}&path=${encodeURIComponent(curPath)}`);
+    const { entries: rawEntries } = await api(`/api/files?share=${encodeURIComponent(curShare)}&path=${encodeURIComponent(curPath)}`);
     if (seq !== filesReqSeq || reqShare !== curShare || reqPath !== curPath) return;
+    // 前端排序：目录恒在前；目录间按名称，文件间按所选列
+    const dirs = rawEntries.filter((e) => e.is_dir);
+    const files = rawEntries.filter((e) => !e.is_dir);
+    dirs.sort((a, b) => a.name.localeCompare(b.name, "zh"));
+    files.sort((a, b) => {
+      if (sortKey === "size") return a.size - b.size;
+      if (sortKey === "mtime") return a.mtime - b.mtime;
+      return a.name.localeCompare(b.name, "zh");
+    });
+    if (!sortAsc) { dirs.reverse(); files.reverse(); }
+    const entries = dirs.concat(files);
     curEntries = entries; selectedIdx = -1;
     if ($("files-select-all")) $("files-select-all").checked = false;
+    if ($("file-filter")) $("file-filter").value = ""; // 切换目录时清空过滤词
     resetFileProps();
     renderBreadcrumb();
 
@@ -864,7 +947,7 @@ async function loadFiles() {
     tbody.innerHTML = entries.length ? entries.map((e, i) => {
       const isArchive = !e.is_dir && /\.(tar|gz|bz2|xz|zip)$/i.test(e.name);
       return `
-        <tr data-idx="${i}">
+        <tr data-idx="${i}" data-name="${esc(e.name)}">
           <td style="width:40px"><input type="checkbox" class="file-chk" data-name="${esc(e.name)}"></td>
           <td class="file-name"><span style="margin-right:8px">${fileIcon(e)}</span>${esc(e.name)}</td>
           <td class="muted">${e.is_dir ? "-" : fmtSize(e.size)}</td>
@@ -898,7 +981,7 @@ async function loadFiles() {
       b.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         const e = curEntries[+b.dataset.extract];
-        if (!confirm(`确定要直接在当前位置解压文件包「${e.name}」吗？`)) return;
+        if (!await uiConfirm(`确定要直接在当前位置解压文件包「${e.name}」吗？`, { okText: "解压" })) return;
         try {
           toast("正在解压，请耐心等待...");
           await api("/api/files/extract", { json: { share: curShare, path: joinPath(curPath, e.name) } });
@@ -913,12 +996,14 @@ async function loadFiles() {
       b.addEventListener("click", async (ev) => {
         ev.stopPropagation();
         const e = curEntries[+b.dataset.rm];
-        if (!confirm(`确定将项目「${e.name}」移入共享回收站(.recycle)吗？${e.is_dir ? "（⚠️ 整个目录及子文件将一并移入，可在回收站中移回）" : "（可在回收站中恢复）"}`)) return;
+        if (!await uiConfirm(`确定将项目「${e.name}」移入共享回收站(.recycle)吗？${e.is_dir ? "（⚠️ 整个目录及子文件将一并移入，可在回收站中移回）" : "（可在回收站中恢复）"}`, { danger: true, okText: "移入回收站" })) return;
         try {
           await api("/api/files/delete", { json: { share: curShare, path: joinPath(curPath, e.name) } });
           toast("项目已成功彻底删除"); loadFiles();
         } catch (err) { toast(err.message, true); }
       }));
+    updateSortInd();
+    applyFileFilter();
   } catch (err) { toast(err.message, true); }
 }
 
@@ -993,6 +1078,50 @@ function getCheckedFileNames() {
   return list;
 }
 
+// 文件列表排序（表头点击切换）与目录内即时过滤
+let sortKey = "name", sortAsc = true;
+function updateSortInd() {
+  document.querySelectorAll("#files-table thead th.sortable").forEach((th) => {
+    const ind = th.querySelector(".sort-ind");
+    if (!ind) return;
+    ind.textContent = th.dataset.sort === sortKey ? (sortAsc ? " ▲" : " ▼") : "";
+  });
+}
+document.querySelectorAll("#files-table thead th.sortable").forEach((th) => {
+  th.addEventListener("click", () => {
+    const k = th.dataset.sort;
+    if (sortKey === k) sortAsc = !sortAsc; else { sortKey = k; sortAsc = true; }
+    updateSortInd();
+    loadFiles();
+  });
+});
+function applyFileFilter() {
+  const q = ($("file-filter")?.value || "").trim().toLowerCase();
+  document.querySelectorAll("#files-tbody tr[data-idx]").forEach((tr) => {
+    tr.style.display = !q || (tr.dataset.name || "").toLowerCase().includes(q) ? "" : "none";
+  });
+}
+$("file-filter")?.addEventListener("input", applyFileFilter);
+
+// 批量下载：把勾选项目打包成 .tar.gz 并直接下载产物
+$("btn-batch-download")?.addEventListener("click", async () => {
+  const items = getCheckedFileNames();
+  if (!items.length) return toast("请先勾选需要下载的项目", true);
+  const name = await uiPrompt("打包下载", "生成的压缩文件名称（.tar.gz）", "download_files.tar.gz");
+  if (!name) return;
+  const archiveName = name.endsWith(".tar.gz") ? name : name + ".tar.gz";
+  toast("服务端正在打包，请稍候...");
+  try {
+    await api("/api/files/archive", { json: { share: curShare, path: curPath, items, archive_name: archiveName } });
+    const a = document.createElement("a");
+    a.href = fileUrl({ name: archiveName }, false);
+    a.download = archiveName;
+    a.click();
+    toast("打包完成，已开始下载");
+    loadFiles();
+  } catch (err) { toast(err.message, true); }
+});
+
 // 批量复制/剪切移动
 $("btn-batch-copy")?.addEventListener("click", async () => {
   const items = getCheckedFileNames();
@@ -1031,7 +1160,7 @@ $("cm-do-move")?.addEventListener("click", async () => {
   const items = getCheckedFileNames();
   const dstShare = $("cm-target-share").value;
   const dstPath = $("cm-target-path").value.trim();
-  if (!confirm(`确定将勾选的 ${items.length} 个项目剪切移动到 ${dstShare}/${dstPath} 吗？`)) return;
+  if (!await uiConfirm(`确定将勾选的 ${items.length} 个项目剪切移动到 ${dstShare}/${dstPath} 吗？`, { okText: "移动" })) return;
   $("copy-move-dialog").close();
   toast(`正在批量移动 ${items.length} 个项目...`);
   try {
@@ -1050,7 +1179,7 @@ $("cm-do-move")?.addEventListener("click", async () => {
 $("btn-batch-archive")?.addEventListener("click", async () => {
   const items = getCheckedFileNames();
   if (!items.length) return toast("请先勾选需要打包下载的项目", true);
-  const name = prompt("设定生成的压缩文件名称 (须以 .tar.gz 结尾)：", "archive_files.tar.gz");
+  const name = await uiPrompt("打包下载", "设定生成的压缩文件名称 (须以 .tar.gz 结尾)", "archive_files.tar.gz");
   if (!name) return;
   const archiveName = name.endsWith(".tar.gz") ? name : name + ".tar.gz";
   toast("服务端正在打包压缩中，请耐心等候...");
@@ -1063,7 +1192,7 @@ $("btn-batch-archive")?.addEventListener("click", async () => {
 // 新建文件夹
 $("btn-mkdir")?.addEventListener("click", async () => {
   if (!curShare) return toast("请先在上方下拉菜单选择目标共享目录", true);
-  const name = prompt("新文件夹名称：");
+  const name = await uiPrompt("新建文件夹", "新文件夹名称");
   if (!name) return;
   try {
     await api("/api/files/mkdir", { json: { share: curShare, path: curPath, name } });
@@ -1281,7 +1410,7 @@ $("acl-add-btn")?.addEventListener("click", async () => {
 });
 
 $("acl-clear")?.addEventListener("click", async () => {
-  if (!confirm("确定清除该项目全部扩展 ACL 规则，恢复为 Linux 基础 Unix 权限吗？")) return;
+  if (!await uiConfirm("确定清除该项目全部扩展 ACL 规则，恢复为 Linux 基础 Unix 权限吗？", { danger: true, okText: "清空" })) return;
   const t = aclTarget();
   try {
     await api("/api/files/acl", { json: {
