@@ -9,6 +9,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -50,6 +54,28 @@ class CoreService : VpnService() {
     private var trafficJob: Job? = null
     private var watchdogJob: Job? = null
     private var failoverRestartJob: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var lastRecordedUp = -1L
+    private var lastRecordedDown = -1L
+
+    private fun flushLogsAndStats() {
+        runCatching {
+            val logs = (LogStore.all() + MirageNative.recentLogs().toList()).joinToString("\n")
+            java.io.File(filesDir, "core.log").writeText(logs.takeLast(30000))
+        }
+        runCatching {
+            val st = MirageNative.getStats()
+            if (st.size >= 2) {
+                val up = st[0].toLong()
+                val down = st[1].toLong()
+                if (lastRecordedUp >= 0 && lastRecordedDown >= 0 && up >= lastRecordedUp && down >= lastRecordedDown) {
+                    TrafficStatsStore.add(this@CoreService, up - lastRecordedUp, down - lastRecordedDown)
+                }
+                lastRecordedUp = up
+                lastRecordedDown = down
+            }
+        }
+    }
 
     private fun cancelAllJobs() {
         logJob?.cancel(); logJob = null
@@ -57,6 +83,10 @@ class CoreService : VpnService() {
         trafficJob?.cancel(); trafficJob = null
         watchdogJob?.cancel(); watchdogJob = null
         failoverRestartJob?.cancel(); failoverRestartJob = null
+        networkCallback?.let { cb ->
+            runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
+            networkCallback = null
+        }
     }
 
     override fun onCreate() {
@@ -71,15 +101,19 @@ class CoreService : VpnService() {
             stopInternal()
             return START_NOT_STICKY
         }
+        if (intent == null) {
+            // 系统在内存不足/停止后若尝试重启服务，无启动参数时不自启，直接停止
+            return START_NOT_STICKY
+        }
         // startForegroundService 启动: 5 秒内必须 startForeground, 否则系统杀服务/崩溃
         startForegroundCompat()
         // 加载选中的内核 (自定义或内置)
         NativeLoader.load(this)
-        val uri = intent?.getStringExtra("uri")
-        val poolSize = intent?.getIntExtra("pool_size", -1) ?: -1
+        val uri = intent.getStringExtra("uri")
+        val poolSize = intent.getIntExtra("pool_size", -1)
         // 直接驱动启动 (建 TUN + 内核), 不依赖 UI 后续 AIDL 调用
         startInternal(uri, poolSize)
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     // ── ICoreService 实现 ────────────────────────────────────────────────
@@ -147,17 +181,45 @@ class CoreService : VpnService() {
         notifyState()
         runCatching { sendBroadcast(Intent(ACTION_VPN_STARTED).setPackage(packageName)) }
 
-        // 文件日志: 内核+App 日志落盘 (adb run-as cat files/core.log 诊断用)
+        // 注册底层网络监听 (Wi-Fi <-> 蜂窝移动网络切换时即时冲刷暖池坏死连接)
+        val cm = getSystemService(ConnectivityManager::class.java)
+        if (cm != null && networkCallback == null) {
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                private var activeNet: Network? = null
+                override fun onAvailable(network: Network) {
+                    if (activeNet != null && activeNet != network) {
+                        LogStore.append("[core] 底层网络切换: $activeNet -> $network, 冲刷暖池与失效连接")
+                        runCatching { MirageNative.flushPool() }
+                    }
+                    activeNet = network
+                }
+                override fun onLost(network: Network) {
+                    LogStore.append("[core] 底层网络断开: $network, 冲刷空闲连接池")
+                    runCatching { MirageNative.flushPool() }
+                    if (activeNet == network) activeNet = null
+                }
+            }
+            networkCallback = cb
+            runCatching {
+                val req = NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                    .build()
+                cm.registerNetworkCallback(req, cb)
+            }
+        }
+
+        // 文件日志: 降低落盘频次至 60 秒 (大幅减少 Flash 闪存 I/O 与 CPU 唤醒，允许 SoC 深度休眠)
         logJob = scope.launch {
             while (isActive) {
+                delay(60000)
                 runCatching {
                     val logs = (LogStore.all() + MirageNative.recentLogs().toList()).joinToString("\n")
                     java.io.File(filesDir, "core.log").writeText(logs.takeLast(30000))
                 }
-                delay(3000)
             }
         }
-        // 通知栏流量
+        // 通知栏流量 (节流刷新，无变化不重绘)
         notifJob = scope.launch {
             var last = ""
             while (isActive) {
@@ -168,25 +230,15 @@ class CoreService : VpnService() {
                         if (t != last) { last = t; updateNotif(t) }
                     }
                 }
-                delay(2000)
+                delay(4000)
             }
         }
-        // 流量统计持久化 (增量累加到今日/本月)
+        // 流量统计持久化 (30 秒累加一次)
         TrafficStatsStore.prune(this@CoreService) // 启动时清理一次 30 天前旧数据
         trafficJob = scope.launch {
-            var lastUp = -1L; var lastDown = -1L
             while (isActive) {
-                runCatching {
-                    val st = MirageNative.getStats()
-                    if (st.size >= 2) {
-                        val up = st[0].toLong(); val down = st[1].toLong()
-                        if (lastUp >= 0 && lastDown >= 0 && up >= lastUp && down >= lastDown) {
-                            TrafficStatsStore.add(this@CoreService, up - lastUp, down - lastDown)
-                        }
-                        lastUp = up; lastDown = down
-                    }
-                }
-                delay(10000)
+                delay(30000)
+                flushLogsAndStats()
             }
         }
         // 断线自动重连 / 节点 failover watchdog
@@ -280,8 +332,10 @@ class CoreService : VpnService() {
     }
 
     fun stopInternal() {
+        clearActive()
         log("[core] stop()")
         cancelAllJobs()
+        flushLogsAndStats()
         runCatching { MirageNative.stop() }
         runCatching { tunFd?.close() }
         tunFd = null
@@ -473,6 +527,7 @@ class CoreService : VpnService() {
         clearActive()
         log("[core] onDestroy()")
         cancelAllJobs()
+        flushLogsAndStats()
         runCatching { MirageNative.stop() }
         runCatching { tunFd?.close() }
         tunFd = null

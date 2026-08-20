@@ -36,8 +36,10 @@ impl Drop for TcpActiveGuard {
 
 /// 建连 (SYN→Established) 超时。catcher 被 SYN 接住后一般一个 RTT 内完成握手。
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-/// 隧道 relay 空闲超时 (与上游 handler.rs 的 MIRAGE_RELAY_IDLE 对齐, 双向 1800s 无数据才断)。
-const RELAY_IDLE: std::time::Duration = std::time::Duration::from_secs(1800);
+/// 隧道 relay 空闲超时 (双向 300s 无数据则断开释放资源，兼顾 SSH/IM 长连接与防僵尸连接)。
+const RELAY_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+/// 直连 relay 空闲超时 (对齐上游 1800s，国内大文件与持久连接不中断)。
+const RELAY_IDLE_DIRECT: std::time::Duration = std::time::Duration::from_secs(1800);
 
 /// 一条已建立的 TCP 连接 (smoltcp 侧)。
 pub struct TunTcpStream {
@@ -365,7 +367,26 @@ pub async fn relay_tcp(stack: Arc<TunStack>, handle: SocketHandle) {
         down_bytes
     };
 
-    let (up, down) = tokio::join!(upload, download);
+    tokio::pin!(upload);
+    tokio::pin!(download);
+    let mut up = 0u64;
+    let mut down = 0u64;
+    tokio::select! {
+        u = &mut upload => {
+            up = u;
+            // 客户端主动断开: 给下行最多 3 秒接收对端残留数据，随后立即退出释放隧道与 FD
+            if let Ok(d) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut download).await {
+                down = d;
+            }
+        }
+        d = &mut download => {
+            down = d;
+            // 服务端主动断开: 给客户端最多 2 秒发送残留缓冲数据
+            if let Ok(u) = tokio::time::timeout(std::time::Duration::from_secs(2), &mut upload).await {
+                up = u;
+            }
+        }
+    }
     crate::monitor::record_conn_close(cid, up, down);
     debug!(
         "[TUN-TCP] {}:{} 关闭 (↑{} ↓{})",
@@ -410,45 +431,62 @@ async fn relay_direct(_stack: Arc<TunStack>, stream: TunTcpStream, dst: (std::ne
 
     // 双向转发 (smoltcp 侧 TunTcpStream ↔ 真实 socket)
     let mut local = stream;
-    let mut up: u64 = 0;
-    let mut down: u64 = 0;
     let (mut lr, mut lw) = tokio::io::split(&mut local);
     let (mut rr, mut rw) = remote.split();
     let up_atomic = conn_up.clone();
     let to_tunnel = async {
+        let mut up_bytes: u64 = 0;
         let mut buf = [0u8; 65536];
         loop {
-            match lr.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
+            match tokio::time::timeout(RELAY_IDLE_DIRECT, lr.read(&mut buf)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => {
                     if rw.write_all(&buf[..n]).await.is_err() { break; }
-                    up += n as u64;
+                    up_bytes += n as u64;
                     up_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_up(n as u64);
                 }
-                Err(_) => break,
+                _ => break,
             }
         }
-        up
+        up_bytes
     };
     let down_atomic = conn_down.clone();
     let from_tunnel = async {
+        let mut down_bytes: u64 = 0;
         let mut buf = [0u8; 65536];
         loop {
-            match rr.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
+            match tokio::time::timeout(RELAY_IDLE_DIRECT, rr.read(&mut buf)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => {
                     if lw.write_all(&buf[..n]).await.is_err() { break; }
-                    down += n as u64;
+                    down_bytes += n as u64;
                     down_atomic.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
                     crate::monitor::add_down(n as u64);
                 }
-                Err(_) => break,
+                _ => break,
             }
         }
-        down
+        down_bytes
     };
-    let (up, down) = tokio::join!(to_tunnel, from_tunnel);
+    tokio::pin!(to_tunnel);
+    tokio::pin!(from_tunnel);
+    let mut up: u64 = 0;
+    let mut down: u64 = 0;
+    tokio::select! {
+        u = &mut to_tunnel => {
+            up = u;
+            if let Ok(d) = tokio::time::timeout(std::time::Duration::from_secs(3), &mut from_tunnel).await {
+                down = d;
+            }
+        }
+        d = &mut from_tunnel => {
+            down = d;
+            if let Ok(u) = tokio::time::timeout(std::time::Duration::from_secs(2), &mut to_tunnel).await {
+                up = u;
+            }
+        }
+    }
     crate::monitor::record_conn_close(cid, up, down);
     debug!("[TUN-TCP/direct] {}:{} 直连关闭 (↑{} ↓{})",
         dst.0, dst.1,

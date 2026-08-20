@@ -159,6 +159,12 @@ impl Engine {
         crate::tun::dns::clear_direct_cache();
         tracing::info!("[Engine] Fake-IP 映射与直连 DNS 缓存已重置");
     }
+
+    /// 移动端网络环境改变或唤醒时，主动冲刷所有出站节点中的空闲预热连接，
+    /// 迫使下一次请求使用最新绑定的网卡与网络路由。
+    pub fn flush_pool(&self) {
+        self.outbounds.purge_idle();
+    }
 }
 
 /// 隧道卡死判定阈值: 活跃隧道连接存在但超过该秒数无隧道流量 → 不健康。

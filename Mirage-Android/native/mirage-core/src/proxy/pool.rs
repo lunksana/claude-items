@@ -506,6 +506,18 @@ impl WarmPool {
         pool
     }
 
+    /// 移动端网络切换或亮屏唤醒时，立即清空空闲队列中的所有旧连接，
+    /// 避免向已失效网卡/NAT超时的坏死 Socket 发包导致 RST 崩溃。
+    /// 零 Runtime 异步上下文依赖，可在任何 JNI / Binder 系统回调线程安全调用。
+    pub fn purge_idle(&self) {
+        if let Ok(mut q) = self.queue.try_lock() {
+            let n = q.len();
+            q.clear();
+            self.notify.notify_waiters();
+            tracing::info!("WarmPool: 已冲刷 {n} 条空闲预热连接 (网络切换/自愈)");
+        }
+    }
+
     /// 核心握手逻辑：建立 TCP 并包装 AEAD Crypto 层
     async fn connect_upstream(cfg: &PoolConfig, brutal_state: &BrutalState) -> Result<Tunnel> {
         // 建连 + 伪装握手 + 派生密钥: 默认物理 TCP; 配了 underlying 则经该出站拨号 (Mirage-over-X)。
@@ -606,8 +618,20 @@ impl WarmPool {
                 SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
                 SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
             }?;
+            let raw_fd = sock.as_raw_fd();
+            // 启用 TCP KeepAlive 并显式指定移动蜂窝网 NAT 活跃参数 (45s 探测, 10s 间隔, 3次重试)
+            let _ = sock.set_keepalive(true);
+            #[cfg(unix)]
+            unsafe {
+                let idle: libc::c_int = 45;
+                libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, &idle as *const _ as *const libc::c_void, std::mem::size_of_val(&idle) as libc::socklen_t);
+                let intvl: libc::c_int = 10;
+                libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPINTVL, &intvl as *const _ as *const libc::c_void, std::mem::size_of_val(&intvl) as libc::socklen_t);
+                let cnt: libc::c_int = 3;
+                libc::setsockopt(raw_fd, libc::IPPROTO_TCP, libc::TCP_KEEPCNT, &cnt as *const _ as *const libc::c_void, std::mem::size_of_val(&cnt) as libc::socklen_t);
+            }
             // ⚠️ protect 必须在 connect 之前 (SO_MARK 影响路由选择)
-            crate::protect::protect(sock.as_raw_fd());
+            crate::protect::protect(raw_fd);
             // Brutal 拥塞控制 (仅 config 配了 brutal_rate_mbps 时): 直接对裸 fd 设置。
             if brutal_state.configured_rate.is_some() {
                 let current_rate =

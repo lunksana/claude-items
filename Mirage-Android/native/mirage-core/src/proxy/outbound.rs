@@ -123,6 +123,22 @@ impl OutboundNode {
         }
     }
 
+    /// 主动清空所有空闲预热连接 (切网与唤醒自愈)
+    pub fn purge_idle(&self) {
+        match self {
+            Self::Mirage { pool, .. } => pool.purge_idle(),
+            Self::Direct { .. } | Self::Block { .. } => {},
+            Self::Urltest { children, .. }
+            | Self::Fallback { children, .. }
+            | Self::Selector { children, .. }
+            | Self::LoadBalance { children, .. } => {
+                for c in children {
+                    c.purge_idle();
+                }
+            }
+        }
+    }
+
     pub fn resolve_leaf(self: &Arc<Self>) -> Arc<OutboundNode> {
         match &**self {
             Self::Urltest { tag, children, tolerance_ms, test_type, current } => {
@@ -350,6 +366,12 @@ pub struct OutboundManager {
 }
 
 impl OutboundManager {
+    /// 主动清空所有出站节点的空闲预热连接 (切网/唤醒自愈)
+    pub fn purge_idle(&self) {
+        for node in self.outbounds.values() {
+            node.purge_idle();
+        }
+    }
     /// 建一个 Mirage 出站节点 (含 WarmPool)。`underlying` 为链式代理 (Mirage-over-X) 的底层出站,
     /// None = 直连。抽出以便 Pass 1 (无 underlying) 与 Pass 2 (依赖 underlying 已建) 复用。
     fn build_mirage(oc: &OutboundConfig, underlying: Option<Arc<OutboundNode>>) -> Arc<OutboundNode> {

@@ -128,6 +128,13 @@ impl UdpEngine {
     pub fn flow_count(&self) -> usize {
         self.flows.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
+
+    /// 释放流并同步更新计数 (RAII 自动清理，杜绝 FD / 内存泄露)
+    pub fn remove_flow(&self, key: &FlowKey) {
+        let mut map = self.flows.lock().unwrap_or_else(|e| e.into_inner());
+        map.remove(key);
+        GLOBAL_FLOW_COUNT.store(map.len(), std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// 全局 UDP 流数 (流量监测用; 由 TunStack 启动时注册)。
@@ -138,6 +145,16 @@ pub fn flow_count_global() -> usize {
     GLOBAL_FLOW_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+struct FlowGuard {
+    stack: Arc<TunStack>,
+    key: FlowKey,
+}
+impl Drop for FlowGuard {
+    fn drop(&mut self) {
+        self.stack.udp.remove_flow(&self.key);
+    }
+}
+
 /// 单流的双向中继。
 async fn udp_flow_relay(
     stack: Arc<TunStack>,
@@ -145,6 +162,7 @@ async fn udp_flow_relay(
     key: FlowKey,
     mut rx: tokio::sync::mpsc::Receiver<(SocketAddr, SocketAddr, Vec<u8>)>,
 ) {
+    let _guard = FlowGuard { stack: stack.clone(), key };
     let flow_id = NEXT_FLOW_ID.fetch_add(1, Ordering::Relaxed);
 
     // 分流: 裸 IP 命中 CN → 直连 (protect UDP socket 走真实网络)

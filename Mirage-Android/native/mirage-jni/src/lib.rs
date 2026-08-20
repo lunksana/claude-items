@@ -317,6 +317,18 @@ pub extern "system" fn Java_com_mirage_android_core_MirageNative_isHealthy(
     }
 }
 
+/// `boolean flushPool()` — 移动端切网 (Wi-Fi <-> 4G/5G) 或唤醒时清空已失效的空闲隧道。
+#[no_mangle]
+pub extern "system" fn Java_com_mirage_android_core_MirageNative_flushPool(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jboolean {
+    let guard = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(state) = guard.as_ref() else { return 0 };
+    state.stack.flush_pool();
+    1
+}
+
 /// `long latencyMs()` — RTT 毫秒, -1 = 未知
 #[no_mangle]
 pub extern "system" fn Java_com_mirage_android_core_MirageNative_latencyMs(

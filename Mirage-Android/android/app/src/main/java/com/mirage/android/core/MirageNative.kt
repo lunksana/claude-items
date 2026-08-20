@@ -21,6 +21,9 @@ object MirageNative {
     external fun isRunning(): Boolean
     external fun isHealthy(): Boolean
 
+    /** 移动端网络切换或唤醒时冲刷失效空闲连接 */
+    external fun flushPool(): Boolean
+
     /** RTT 毫秒, -1 = 未知 */
     external fun latencyMs(): Long
 

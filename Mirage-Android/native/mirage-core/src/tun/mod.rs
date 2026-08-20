@@ -125,6 +125,12 @@ impl TunStack {
         tracing::info!("[TUN] 引擎已热切换 (节点/规则更新)");
     }
 
+    /// 移动端网络切换/唤醒冲刷空闲池
+    pub fn flush_pool(&self) {
+        let eng = self.engine.load_full();
+        eng.flush_pool();
+    }
+
     /// 启动 TUN 引擎: dup fd → 读线程 + 泵任务。返回后引擎即在工作。
     pub async fn start(engine: Arc<Engine>, cfg: TunConfig, tun_fd: RawFd) -> std::io::Result<Arc<Self>> {
         let fd = unsafe { libc::dup(tun_fd) };
